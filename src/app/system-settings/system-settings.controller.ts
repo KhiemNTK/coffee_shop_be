@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+} from '@nestjs/common';
 import { SystemSettingsService } from './system-settings.service';
 import { CreateSystemSettingDto } from './dto/create-system-setting.dto';
 import { UpdateSystemSettingDto } from './dto/update-system-setting.dto';
@@ -23,7 +31,10 @@ export class SystemSettingsController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateSystemSettingDto: UpdateSystemSettingDto) {
+  update(
+    @Param('id') id: string,
+    @Body() updateSystemSettingDto: UpdateSystemSettingDto,
+  ) {
     return this.systemSettingsService.update(+id, updateSystemSettingDto);
   }
 

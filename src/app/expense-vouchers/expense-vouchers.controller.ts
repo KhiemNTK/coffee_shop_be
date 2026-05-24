@@ -1,11 +1,21 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+} from '@nestjs/common';
 import { ExpenseVouchersService } from './expense-vouchers.service';
 import { CreateExpenseVoucherDto } from './dto/create-expense-voucher.dto';
 import { UpdateExpenseVoucherDto } from './dto/update-expense-voucher.dto';
 
 @Controller('expense-vouchers')
 export class ExpenseVouchersController {
-  constructor(private readonly expenseVouchersService: ExpenseVouchersService) {}
+  constructor(
+    private readonly expenseVouchersService: ExpenseVouchersService,
+  ) {}
 
   @Post()
   create(@Body() createExpenseVoucherDto: CreateExpenseVoucherDto) {
@@ -23,7 +33,10 @@ export class ExpenseVouchersController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateExpenseVoucherDto: UpdateExpenseVoucherDto) {
+  update(
+    @Param('id') id: string,
+    @Body() updateExpenseVoucherDto: UpdateExpenseVoucherDto,
+  ) {
     return this.expenseVouchersService.update(+id, updateExpenseVoucherDto);
   }
 
