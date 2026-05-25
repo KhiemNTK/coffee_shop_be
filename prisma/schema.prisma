@@ -179,6 +179,7 @@ model Equipment {
 model Employee {
   id          String   @id @default(uuid()) // MaNhanVien
   email       String   @unique /// @zod.string.email()
+  avatarUrl   String?
   fullName    String   // HoTen
   address     String?  // DiaChi
   phoneNumber String?  // SoDienThoai

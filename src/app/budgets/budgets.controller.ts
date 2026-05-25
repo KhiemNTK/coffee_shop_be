@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
-=======
 import {
   Controller,
   Get,
@@ -10,7 +7,6 @@ import {
   Param,
   Delete,
 } from '@nestjs/common';
->>>>>>> 4370190 (chore: init project base)
 import { BudgetsService } from './budgets.service';
 import { CreateBudgetDto } from './dto/create-budget.dto';
 import { UpdateBudgetDto } from './dto/update-budget.dto';
