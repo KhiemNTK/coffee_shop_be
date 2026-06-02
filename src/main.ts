@@ -2,7 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app/app.module';
 import { LoggerModule } from './app/logger/logger.module';
 import { Logger } from '@nestjs/common';
-import { applyMiddlewares } from './common/middlewares/common.middleware';
+import { initApp } from './init';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -17,7 +17,7 @@ async function bootstrap() {
     NODE_ENV = 'development',
   } = process.env;
 
-  applyMiddlewares(app);
+  initApp(app);
   await app.listen(PORT, HOST);
   const protocol = NODE_ENV === 'production' ? 'https' : 'http';
   Logger.log(
