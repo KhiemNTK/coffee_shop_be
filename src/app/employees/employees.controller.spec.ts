@@ -1,15 +1,15 @@
-import { Test, TestingModule } from '@nestjs/testing';
+import { TestingModule } from '@nestjs/testing';
 import { EmployeesController } from './employees.controller';
-import { EmployeesService } from './employees.service';
+import { EmployeesModule } from './employees.module';
+import { AutoMockingModule } from '../../../test/auto-mocking/auto-mocking.module';
 
 describe('EmployeesController', () => {
   let controller: EmployeesController;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      controllers: [EmployeesController],
-      providers: [EmployeesService],
-    }).compile();
+    const module: TestingModule = await AutoMockingModule.createTestingModule({
+      imports: [EmployeesModule],
+    });
 
     controller = module.get<EmployeesController>(EmployeesController);
   });
