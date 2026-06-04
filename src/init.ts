@@ -1,8 +1,8 @@
 import { cleanupOpenApiDoc } from 'nestjs-zod';
-import { INestApplication, VersioningType } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { applyMiddlewares } from './common/middlewares/common.middleware';
 import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
-
+import { json, urlencoded, Request, Response, NextFunction } from 'express';
 interface LocalSchemaObject {
   type?: string;
   properties?: Record<string, any>;
@@ -63,12 +63,37 @@ const initOpenAPI = (app: INestApplication) => {
   SwaggerModule.setup(APP_PREFIX, app, cleanupOpenApiDoc(openApiDoc));
 };
 
+const initBodyParser = (app: INestApplication) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    json()(req, res, (err: unknown) => {
+      if (err) {
+        if (err instanceof SyntaxError) {
+          return res.status(400).json({
+            errors: [
+              {
+                message: 'Invalid JSON format. Please check your request body.',
+              },
+            ],
+            data: null,
+            message: 'ERROR',
+          });
+        }
+        return next(err);
+      }
+      next();
+    });
+  });
+
+  app.use(urlencoded({ extended: true }));
+};
+
 const initApp = (app: INestApplication) => {
   const { APP_PREFIX = '/api', FE_URL } = process.env;
   app.setGlobalPrefix(APP_PREFIX);
   app.enableCors({
     origin: FE_URL ? FE_URL : ['*'],
   });
+  initBodyParser(app);
   applyMiddlewares(app);
   initOpenAPI(app);
   app.enableShutdownHooks();

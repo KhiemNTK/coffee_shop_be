@@ -11,7 +11,7 @@ export type { FormatResponseParams };
 
 export const FormatResponseSchema = z
   .object({
-    errors: z.array(z.record(z.any())).nullable().optional(),
+    errors: z.array(z.record(z.string(), z.any())).nullable().optional(),
     data: z.any().nullable().optional(),
     message: z.string().optional(),
   })

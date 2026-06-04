@@ -7,6 +7,7 @@ import { initApp } from './init';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: LoggerModule.createLogger(),
+    bodyParser: false,
   });
 
   const {
