@@ -1,0 +1,4 @@
+export enum RateLimitEnvs {
+  THROTTLE_TTL = 'THROTTLE_TTL',
+  THROTTLE_LIMIT = 'THROTTLE_LIMIT',
+}

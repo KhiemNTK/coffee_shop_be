@@ -3,9 +3,10 @@ import { AppModule } from './app/app.module';
 import { LoggerModule } from './app/logger/logger.module';
 import { Logger } from '@nestjs/common';
 import { initApp } from './init';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: LoggerModule.createLogger(),
     bodyParser: false,
   });

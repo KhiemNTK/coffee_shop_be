@@ -3,6 +3,7 @@ import { INestApplication } from '@nestjs/common';
 import { applyMiddlewares } from './common/middlewares/common.middleware';
 import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
 import { json, urlencoded, Request, Response, NextFunction } from 'express';
+import { NestExpressApplication } from '@nestjs/platform-express';
 interface LocalSchemaObject {
   type?: string;
   properties?: Record<string, any>;
@@ -87,7 +88,7 @@ const initBodyParser = (app: INestApplication) => {
   app.use(urlencoded({ extended: true }));
 };
 
-const initApp = (app: INestApplication) => {
+const initApp = (app: NestExpressApplication) => {
   const { APP_PREFIX = '/api', FE_URL } = process.env;
   app.setGlobalPrefix(APP_PREFIX);
   app.enableCors({
@@ -97,6 +98,7 @@ const initApp = (app: INestApplication) => {
   applyMiddlewares(app);
   initOpenAPI(app);
   app.enableShutdownHooks();
+  app.set('trust proxy', 'loopback');
   return app;
 };
 export { initApp };

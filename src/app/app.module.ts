@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { LoggingInterceptor } from './logger/logging.interceptor';
-import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { ZodSerializerInterceptor, ZodValidationPipe } from 'nestjs-zod';
 import { ConfigModule } from '@nestjs/config';
 import { AuthModule } from './auth/auth.module';
@@ -28,6 +28,8 @@ import { CatchEverythingFilter } from '../catch-everything/catch-everything.filt
 import { FormatResponseInterceptor } from '../common/interceptors/format-response/format-response.interceptor';
 import { ZodExceptionService } from '../catch-everything/zod-exception/zod-exception.service';
 import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
+import { RateLimitModule } from '../common/security/rate-limit.module';
+import { ThrottlerGuard } from '@nestjs/throttler';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
@@ -50,6 +52,7 @@ import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
     PositionsModule,
     QueryUtilModule,
     ApiUtilModule,
+    RateLimitModule,
   ],
   controllers: [AppController],
   providers: [
@@ -58,6 +61,10 @@ import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggingInterceptor,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
     },
     {
       provide: APP_INTERCEPTOR,
