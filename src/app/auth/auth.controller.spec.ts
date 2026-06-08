@@ -1,20 +1,20 @@
 import { TestingModule } from '@nestjs/testing';
-import { AuthService } from './auth.service';
+import { AuthController } from './auth.controller';
 import { AutoMockingModule } from '../../../test/auto-mocking/auto-mocking.module';
 import { AuthModule } from './auth.module';
 
-describe('AuthService', () => {
-  let service: AuthService;
+describe('AuthController', () => {
+  let controller: AuthController;
 
   beforeEach(async () => {
     const module: TestingModule = await AutoMockingModule.createTestingModule({
       imports: [AuthModule],
     });
 
-    service = module.get<AuthService>(AuthService);
+    controller = module.get<AuthController>(AuthController);
   });
 
   it('should be defined', () => {
-    expect(service).toBeDefined();
+    expect(controller).toBeDefined();
   });
 });
