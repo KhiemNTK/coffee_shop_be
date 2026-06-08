@@ -8,6 +8,7 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { Position } from '../../generated/zod';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
+import { POSITION_NOT_FOUND } from '../../common/consts/message';
 
 @Injectable()
 export class PositionsService {
@@ -65,7 +66,7 @@ export class PositionsService {
     });
 
     if (!position) {
-      throw new NotFoundException(`Position with ID ${id} not found`);
+      throw new NotFoundException(POSITION_NOT_FOUND);
     }
 
     return position;
@@ -101,18 +102,5 @@ export class PositionsService {
         name: 'asc',
       },
     });
-  }
-
-  async checkPositionExists(id: string) {
-    const position = await this.prisma.position.findUnique({
-      where: { id },
-      select: { id: true },
-    });
-
-    if (!position) {
-      throw new NotFoundException(`Position with ID ${id} not found`);
-    }
-
-    return true;
   }
 }

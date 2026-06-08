@@ -7,6 +7,7 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { GetEmployeesPaginationDto } from './dto/get-employee.dto';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
+import { USER_NOT_FOUND } from '../../common/consts/message';
 @Injectable()
 export class EmployeesService {
   constructor(
@@ -69,7 +70,7 @@ export class EmployeesService {
     });
 
     if (!employee) {
-      throw new NotFoundException(`Employee with ID ${id} not found`);
+      throw new NotFoundException(USER_NOT_FOUND);
     }
 
     return employee;

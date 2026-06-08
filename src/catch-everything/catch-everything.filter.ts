@@ -11,7 +11,6 @@ import { ZodExceptionService } from './zod-exception/zod-exception.service';
 import { ZodSerializationException, ZodValidationException } from 'nestjs-zod';
 import { ApiUtilService } from '../common/utils/api-util/api-util.service';
 import { Prisma } from '@prisma/client';
-import { Request } from 'express';
 
 interface ErrorItem {
   message: string;
