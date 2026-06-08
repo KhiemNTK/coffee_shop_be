@@ -30,6 +30,9 @@ import { ZodExceptionService } from '../catch-everything/zod-exception/zod-excep
 import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
 import { RateLimitModule } from '../common/security/rate-limit.module';
 import { ThrottlerGuard } from '@nestjs/throttler';
+import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
+import { JwtModule } from '@nestjs/jwt';
+import { AuthGuard } from './auth/auth.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
@@ -53,6 +56,8 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     QueryUtilModule,
     ApiUtilModule,
     RateLimitModule,
+    MailUtilModule,
+    JwtModule,
   ],
   controllers: [AppController],
   providers: [
@@ -85,6 +90,10 @@ import { ThrottlerGuard } from '@nestjs/throttler';
     {
       provide: APP_INTERCEPTOR,
       useClass: FormatResponseInterceptor,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard,
     },
   ],
 })
