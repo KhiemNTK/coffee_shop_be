@@ -2,7 +2,6 @@ import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { CreatePositionDto } from './dto/create-position.dto';
 import { UpdatePositionDto } from './dto/update-position.dto';
 import { GetPositionsPaginationDto } from './dto/get-position.dto';
-import { Prisma } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
@@ -23,13 +22,6 @@ export class PositionsService {
     return this.prisma.position.create({
       data: createPositionDto,
     });
-  }
-
-  async getPosition(where: Prisma.PositionWhereUniqueInput) {
-    const data = await this.prisma.position.findUnique({
-      where,
-    });
-    return data;
   }
 
   async getPositions({

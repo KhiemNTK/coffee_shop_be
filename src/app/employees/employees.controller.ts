@@ -13,7 +13,7 @@ import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { IDDto } from '../../common/dto/param.dto';
 import { GetEmployeesPaginationDto } from './dto/get-employee.dto';
-
+import { Employee } from 'src/common/decorators/employee.decorator';
 @Controller('employees')
 export class EmployeesController {
   constructor(private readonly employeesService: EmployeesService) {}

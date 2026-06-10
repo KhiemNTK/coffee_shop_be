@@ -30,6 +30,12 @@ export class EmployeesService {
     return data;
   }
 
+  private async findEmployeeOrThrow(id: string): Promise<Employee> {
+    const employee = await this.prisma.employee.findUnique({ where: { id } });
+    if (!employee) throw new NotFoundException(USER_NOT_FOUND);
+    return employee;
+  }
+
   async getEmployees({
     page,
     itemPerPage,
@@ -77,7 +83,7 @@ export class EmployeesService {
   }
 
   async updateEmployee(id: string, updateEmployeeDto: UpdateEmployeeDto) {
-    await this.getEmployeeById(id);
+    await this.findEmployeeOrThrow(id);
 
     return this.prisma.employee.update({
       where: { id },
@@ -86,7 +92,7 @@ export class EmployeesService {
   }
 
   async deleteEmployee(id: string) {
-    await this.getEmployeeById(id);
+    await this.findEmployeeOrThrow(id);
 
     await this.prisma.employee.softDelete({ id });
 

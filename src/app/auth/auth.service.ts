@@ -11,7 +11,7 @@ import { StringUtilService } from '../../common/utils/string-util/string-util.se
 import { JwtService } from '@nestjs/jwt';
 import { SignInDto, SignUpDto } from './dto/sign.dto';
 import { JWTToken, TokenKeys } from './consts/jwt.const';
-import { ForgotPasswordDto, ResetPasswordDto } from './dto/password.dto';
+import { ForgotPasswordDto } from './dto/password.dto';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { MailUtilService } from '../../common/utils/mail-util/mail-util.service';
