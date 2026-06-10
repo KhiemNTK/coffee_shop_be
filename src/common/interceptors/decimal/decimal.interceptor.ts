@@ -3,10 +3,12 @@ import {
   ExecutionContext,
   Injectable,
   NestInterceptor,
+  StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { Decimal } from '@prisma/client/runtime/library';
+import { Workbook } from 'exceljs';
 
 @Injectable()
 export class DecimalInterceptor implements NestInterceptor {
@@ -21,6 +23,11 @@ export class DecimalInterceptor implements NestInterceptor {
 
     if (data instanceof Decimal) {
       return data.toNumber();
+    }
+
+    // Bypass binary/stream objects to preserve their prototype chain
+    if (data instanceof StreamableFile || data instanceof Workbook) {
+      return data;
     }
 
     // handle array

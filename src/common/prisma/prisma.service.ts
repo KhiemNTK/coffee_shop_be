@@ -3,6 +3,7 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  BadRequestException,
 } from '@nestjs/common';
 import { PrismaClient, Prisma } from '@prisma/client';
 
@@ -102,6 +103,44 @@ export class PrismaService
               data: { deletedAt: new Date() },
               where,
             });
+          },
+          async export<T>(
+            this: T,
+            args: Prisma.Args<T, 'findMany'> = {} as any,
+          ) {
+            const context = Prisma.getExtensionContext(this) as Record<
+              string,
+              any
+            >;
+            const FIELDS_EXCLUDE = ['id'];
+
+            const modelFields = Object.keys(
+              (context.fields as Record<string, unknown>) || {},
+            );
+            if (args.select) {
+              const selectObj = args.select as Record<string, unknown>;
+              const invalidFields = Object.keys(selectObj).filter(
+                (field) => !modelFields.includes(field),
+              );
+
+              if (invalidFields.length > 0) {
+                throw new BadRequestException(
+                  `Invalid fields: ${invalidFields.join(', ')}`,
+                );
+              }
+            } else {
+              args.select ??= modelFields.reduce<Record<string, boolean>>(
+                (acc, field) => {
+                  if (!FIELDS_EXCLUDE.includes(field)) {
+                    acc[field] = true;
+                  }
+                  return acc;
+                },
+                {},
+              );
+            }
+            const result = await context.findMany(args);
+            return result;
           },
         },
       },
