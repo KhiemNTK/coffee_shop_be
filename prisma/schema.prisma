@@ -29,33 +29,101 @@ generator custom_generator {
 }
 
 // =============================================
+// ENUMS (Chuẩn hóa trạng thái dữ liệu)
+// =============================================
+enum TableStatus {
+  EMPTY
+  OCCUPIED
+  RESERVED
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ServeStatus {
+  PENDING
+  COOKING
+  SERVED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  TRANSFER
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+enum InventoryTxType {
+  IMPORT
+  EXPORT
+}
+
+enum CashFlowType {
+  INCOME // Thu
+  EXPENSE // Chi
+}
+
+enum DiscountType {
+  PERCENTAGE // Giảm giá theo %
+  FIXED_AMOUNT // Giảm giá theo số tiền cố định
+}
+
+enum ReservationStatus {
+  PENDING
+  ARRIVED
+  CANCELLED
+  NO_SHOW
+}
+
+enum EquipmentStatus {
+  IN_USE // Đang sử dụng
+  MAINTENANCE // Đang bảo trì / Sửa chữa
+  BROKEN // Hỏng hóc
+  LIQUIDATED // Đã thanh lý
+}
+
+enum ShiftStatus {
+  OPEN // Ca đang mở
+  CLOSED // Đã chốt ca
+}
+
+// =============================================
 // 0. AUTH & AUTHORIZATION (Phân quyền hệ thống)
 // =============================================
 
 model Role {
-  id           String   @id @default(uuid())
-  name         String   @unique
+  id           String  @id @default(uuid())
+  name         String  @unique
   description  String?
-  isSystemRole Boolean  @default(false)
-  
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  deletedAt    DateTime?
+  isSystemRole Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
   rolePermissions RolePermission[]
   employeeRoles   EmployeeRole[]
 }
 
 model Permission {
-  id                 String   @id @default(uuid())
+  id                 String  @id @default(uuid())
   name               String
   description        String?
-  key                String   /// @zod.string.describe("Pattern: [/resource]_[action], e.g: [/product]_[read]")
-  isSystemPermission Boolean  @default(false)
-  
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  deletedAt          DateTime?
+  key                String /// @zod.string.describe("Pattern: [/resource]_[action], e.g: [/product]_[read]")
+  isSystemPermission Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
   rolePermissions RolePermission[]
 
@@ -67,8 +135,8 @@ model RolePermission {
   permissionId String
   createdAt    DateTime @default(now())
 
-  role       Role       @relation(fields: [roleId], references: [id])
-  permission Permission @relation(fields: [permissionId], references: [id])
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([roleId, permissionId])
 }
@@ -78,8 +146,8 @@ model EmployeeRole {
   roleId     String
   createdAt  DateTime @default(now())
 
-  employee Employee @relation(fields: [employeeId], references: [id])
-  role     Role     @relation(fields: [roleId], references: [id])
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  role     Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([employeeId, roleId])
 }
@@ -89,9 +157,9 @@ model EmployeeRole {
 // =============================================
 
 model Position {
-  id        String   @id @default(uuid()) // MaChucVu
-  name      String   // TenChucVu
-  salary    Decimal  // Luong
+  id     String  @id @default(uuid())
+  name   String
+  salary Decimal
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -101,58 +169,77 @@ model Position {
 }
 
 model DiningTable {
-  id        String   @id @default(uuid()) // MaBan
-  status    String   // TinhTrangBan
+  id     String      @id @default(uuid())
+  name   String
+  status TableStatus @default(EMPTY)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  reservations Reservation[]
+  reservations  Reservation[]
+  orderSessions OrderSession[]
 }
 
-model Budget {
-  id        String   @id @default(uuid()) // MaNganSach
-  name      String   // TenNganSach
-  balance   Decimal  // SoDu
+model Fund {
+  id      String  @id @default(uuid())
+  name    String // VD: Tiền mặt tại két, Tài khoản Vietcombank
+  balance Decimal @default(0)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  invoices        Invoice[]
-  importOrders    ImportOrder[]
-  exportOrders    ExportOrder[]
-  expenseVouchers ExpenseVoucher[]
+  cashTransactions CashTransaction[]
+}
+
+model MenuCategory {
+  id          String  @id @default(uuid())
+  name        String // VD: Cà phê, Sinh tố, Bánh ngọt
+  description String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  menuItems MenuItem[]
 }
 
 model MenuItem {
-  id        String   @id @default(uuid()) // MaThucDon
-  name      String   // Ten
-  price     Decimal  // GiaTien
+  id    String  @id @default(uuid())
+  name  String
+  price Decimal
+
+  categoryId String
+  category   MenuCategory @relation(fields: [categoryId], references: [id])
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  invoiceDetails InvoiceDetail[]
-  ingredients    MenuItemIngredient[]
+  orderItems  OrderItem[]
+  ingredients MenuItemIngredient[]
 }
 
 model Promotion {
-  id        String   @id @default(uuid()) // MaKhuyenMai
-  name      String   // TenKhuyenMai
+  id            String       @id @default(uuid()) // MaKhuyenMai
+  name          String // TenKhuyenMai
+  startDate     DateTime // NgayBatDau
+  endDate       DateTime // NgayKetThuc
+  discountType  DiscountType
+  discountValue Decimal // Giá trị giảm giá (ví dụ: 10 cho 10% hoặc 50000 cho 50.000đ)
+  maxDiscount   Decimal?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  invoicePromotions InvoicePromotion[]
+  invoices Invoice[]
 }
 
 model Unit {
-  id        String   @id @default(uuid()) // MaDonViTinh
-  name      String   // TenDonVi
+  id   String @id @default(uuid()) // MaDonViTinh
+  name String
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -162,14 +249,23 @@ model Unit {
 }
 
 model Equipment {
-  id        String   @id @default(uuid()) // MaThietBi
-  name      String   // TenThietBi
+  id           String          @id @default(uuid()) // MaThietBi
+  name         String
+  quantity     Int
+  unitPrice    Decimal
+  totalAmount  Decimal
+  purchaseDate DateTime
+  status       EquipmentStatus @default(IN_USE) // Quản lý vòng đời thiết bị
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  importEquipmentDetails ImportEquipmentDetail[]
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  cashTransactionId String?          @unique
+  cashTransaction   CashTransaction? @relation(fields: [cashTransactionId], references: [id], onDelete: SetNull)
 }
 
 // =============================================
@@ -180,97 +276,62 @@ model Employee {
   id          String   @id @default(uuid()) // MaNhanVien
   email       String   @unique /// @zod.string.email()
   avatarUrl   String?
-  fullName    String   // HoTen
-  address     String?  // DiaChi
-  phoneNumber String?  // SoDienThoai
+  fullName    String // HoTen
+  address     String? // DiaChi
+  phoneNumber String? // SoDienThoai
   username    String   @unique // TenDangNhap
   ///FAKE:faker.internet.password()
-  password    String   // MatKhau
+  password    String // MatKhau
+  salary      Decimal?
   isActive    Boolean  @default(true) // TrangThai
-
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
-
-  positionId  String   // MaChucVu
-  position    Position @relation(fields: [positionId], references: [id])
-
-  importOrders    ImportOrder[]
-  exportOrders    ExportOrder[]
-  reservations    Reservation[]
-  expenseVouchers ExpenseVoucher[]
-  invoices        Invoice[]       
-  employeeRoles   EmployeeRole[]  
-}
-
-model InventoryItem {
-  id        String   @id @default(uuid()) // MaHangHoa
-  name      String   // TenHangHoa
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  unitId    String   // MaDonViTinh
-  unit      Unit     @relation(fields: [unitId], references: [id])
+  positionId String // MaChucVu
+  position   Position @relation(fields: [positionId], references: [id])
 
-  menuIngredients   MenuItemIngredient[]
-  importItemDetails ImportItemDetail[]
-  exportItemDetails ExportItemDetail[]
+  employeeRoles    EmployeeRole[]
+  orderSessions    OrderSession[]
+  invoices         Invoice[]
+  actionLogs       ActionLog[]
+  cashTransactions CashTransaction[]
+  reservations     Reservation[]
+  equipment        Equipment[]
+  printSetting     PrintSetting?
+  shifts           CashierShift[]
 }
 
-model Invoice {
-  id          String   @id @default(uuid()) // MaHoaDon
-  totalAmount Decimal  // TongTien
+model InventoryCategory {
+  id          String  @id @default(uuid())
+  name        String // VD: Nguyên liệu pha chế, Đồ đóng chai, Vật dụng
+  description String?
 
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  budgetId    String   // MaNganSach
-  budget      Budget   @relation(fields: [budgetId], references: [id])
-
-  employeeId  String? 
-  employee    Employee? @relation(fields: [employeeId], references: [id])
-
-  reservations      Reservation[]
-  invoiceDetails    InvoiceDetail[]
-  invoicePromotions InvoicePromotion[]
+  inventoryItems InventoryItem[]
 }
 
-model ImportOrder {
-  id         String   @id @default(uuid()) // MaDonNhap
-  importDate DateTime // NgayNhap
+model InventoryItem {
+  id    String  @id @default(uuid()) // MaHangHoa
+  name  String // TenHangHoa
+  stock Decimal @default(0) // Số lượng tồn kho hiện tại
 
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  deletedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  employeeId String   // MaNhanVien
-  employee   Employee @relation(fields: [employeeId], references: [id])
+  categoryId String
+  category   InventoryCategory @relation(fields: [categoryId], references: [id])
 
-  budgetId   String   // MaNganSach
-  budget     Budget   @relation(fields: [budgetId], references: [id])
+  unitId String // MaDonViTinh
+  unit   Unit   @relation(fields: [unitId], references: [id])
 
-  importItemDetails      ImportItemDetail[]
-  importEquipmentDetails ImportEquipmentDetail[]
-}
-
-model ExportOrder {
-  id         String   @id @default(uuid()) // MaDonXuat
-  exportDate DateTime // NgayXuat
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  deletedAt  DateTime?
-
-  employeeId String   // MaNhanVien
-  employee   Employee @relation(fields: [employeeId], references: [id])
-
-  budgetId   String   // MaNganSach
-  budget     Budget   @relation(fields: [budgetId], references: [id])
-
-  exportItemDetails ExportItemDetail[]
+  ingredients  MenuItemIngredient[]
+  transactions InventoryTransaction[]
 }
 
 // =============================================
@@ -278,106 +339,67 @@ model ExportOrder {
 // =============================================
 
 model Reservation {
-  id           Int      @id @default(autoincrement()) // MaCTDatBan
-  customerName String?  // KhachHang
-  dateTime     DateTime // NgayGio
+  id              Int               @id @default(autoincrement()) // MaCTDatBan
+  customerName    String?
+  phoneNumber     String
+  reservationDate DateTime
+  reservationTime DateTime
+  status          ReservationStatus @default(PENDING) // Trạng thái đặt bàn
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  tableId      String   // MaBan
-  table        DiningTable @relation(fields: [tableId], references: [id])
+  tableId String // MaBan
+  table   DiningTable @relation(fields: [tableId], references: [id])
 
-  employeeId   String   // MaNhanVien
-  employee     Employee @relation(fields: [employeeId], references: [id])
-
-  invoiceId    String?  // Optional (when first reservation is converted to invoice))
-  invoice      Invoice? @relation(fields: [invoiceId], references: [id])
+  employeeId String // MaNhanVien
+  employee   Employee @relation(fields: [employeeId], references: [id])
 }
 
-model InvoiceDetail {
-  invoiceId  String   // MaHoaDon
-  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+model CashierShift {
+  id                 String      @id @default(uuid())
+  openedAt           DateTime    @default(now())
+  closedAt           DateTime?
+  startingCash       Decimal     @default(0) // Tiền lẻ có sẵn đầu ca
+  reportedEndingCash Decimal? // Số tiền mặt thu ngân đếm được khi chốt ca
+  actualEndingCash   Decimal? // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
+  status             ShiftStatus @default(OPEN)
 
-  menuItemId String   // MaThucDon
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+  employeeId String // Ai là người giữ ca này
+  employee   Employee @relation(fields: [employeeId], references: [id])
 
-  quantity   Int      // SoLuong
-  amount     Decimal  // SoTien
-  
-  createdAt  DateTime @default(now())
-
-  @@id([invoiceId, menuItemId])
-}
-
-model InvoicePromotion {
-  invoiceId   String   // MaHoaDon
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
-
-  promotionId String   // MaKhuyenMai
-  promotion   Promotion @relation(fields: [promotionId], references: [id])
-
-  createdAt   DateTime @default(now())
-
-  @@id([invoiceId, promotionId])
+  orderSessions    OrderSession[]
+  invoices         Invoice[]
+  cashTransactions CashTransaction[] // Lưu các khoản thu/chi phát sinh trong ca
 }
 
 model MenuItemIngredient {
-  menuItemId      String   // MaThucDon
-  menuItem        MenuItem @relation(fields: [menuItemId], references: [id])
+  menuItemId String // MaThucDon
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
 
-  inventoryItemId String   // MaHangHoa
+  inventoryItemId String // MaHangHoa
   inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
 
-  quantity        Decimal  // DinhLuong
-  
-  createdAt       DateTime @default(now())
+  quantity Decimal // DinhLuong
+
+  createdAt DateTime @default(now())
 
   @@id([menuItemId, inventoryItemId])
 }
 
-model ImportItemDetail {
-  importOrderId   String   // MaDonNhap
-  importOrder     ImportOrder @relation(fields: [importOrderId], references: [id])
+model InventoryTransaction {
+  id              String          @id @default(uuid())
+  type            InventoryTxType // IMPORT (Nhập), EXPORT (Xuất)
+  quantity        Decimal
+  unitPrice       Decimal?
+  totalAmount     Decimal?
+  transactionDate DateTime
+  note            String?
 
-  inventoryItemId String   // MaHangHoa
+  createdAt DateTime @default(now())
+
+  inventoryItemId String
   inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
-
-  quantity        Int      // SoLuong
-  importPrice     Decimal  // GiaNhap
-
-  createdAt       DateTime @default(now())
-
-  @@id([importOrderId, inventoryItemId])
-}
-
-model ImportEquipmentDetail {
-  importOrderId String   // MaDonNhap
-  importOrder   ImportOrder @relation(fields: [importOrderId], references: [id])
-
-  equipmentId   String   // MaThietBi
-  equipment     Equipment @relation(fields: [equipmentId], references: [id])
-
-  quantity      Int      // SoLuong
-  importPrice   Decimal  // GiaNhap
-  
-  createdAt     DateTime @default(now())
-
-  @@id([importOrderId, equipmentId])
-}
-
-model ExportItemDetail {
-  exportOrderId   String   // MaDonXuat
-  exportOrder     ExportOrder @relation(fields: [exportOrderId], references: [id])
-
-  inventoryItemId String   // MaHangHoa
-  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
-
-  quantity        Int      // SoLuong
-
-  createdAt       DateTime @default(now())
-
-  @@id([exportOrderId, inventoryItemId])
 }
 
 // =============================================
@@ -385,27 +407,140 @@ model ExportItemDetail {
 // =============================================
 
 model SystemSetting {
-  id          String   @id @default(uuid()) // MaCaiDat
-  value       String   // GiaTri
-  description String?  // MoTa
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id          String  @id @default(uuid()) // MaCaiDat
+  value       String // GiaTri
+  description String? // MoTa
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
-model ExpenseVoucher {
-  id          String   @id @default(uuid()) // MaPhieuChi
-  expenseDate DateTime // NgayChi
-  description String   // KhoanChi
-  amount      Decimal  // SoTien
+// =============================================
+// REFACTORED: F&B CORE TRANSACTIONS
+// =============================================
 
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+// Quản lý Phiên phục vụ (Đại diện cho 1 lần khách vào quán)
+model OrderSession {
+  id            String        @id @default(uuid())
+  sessionStatus SessionStatus @default(ACTIVE) // TinhTrang: ACTIVE, COMPLETED, CANCELLED
+  guestCount    Int? // So luong khach
 
-  budgetId    String   // MaNganSach
-  budget      Budget   @relation(fields: [budgetId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  employeeId  String   // MaNhanVien
-  employee    Employee @relation(fields: [employeeId], references: [id])
+  tableId String? // MaBan (Có thể null nếu bán mang đi - Takeaway)
+  table   DiningTable? @relation(fields: [tableId], references: [id])
+
+  employeeId String // Nhan vien phuc vu/mo ban
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  orderItems OrderItem[]
+  invoices   Invoice[] // 1 Session có thể xuất ra nhiều Invoices (Tách Bill)
+
+  shiftId String?
+  shift   CashierShift? @relation(fields: [shiftId], references: [id])
+}
+
+//Chi tiết món ăn khách gọi trong phiên
+model OrderItem {
+  id          String  @id @default(uuid())
+  quantity    Int
+  priceAtTime Decimal // GiaTien tai thoi diem goi
+  note        String? // Ghi chu (VD: Khong hanh)
+
+  serveStatus ServeStatus @default(PENDING) // TrangThaiBep: PENDING, COOKING, SERVED, CANCELLED
+  isPaid      Boolean     @default(false) // Danh dau mon da duoc thanh toan chua
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderSessionId String
+  orderSession   OrderSession @relation(fields: [orderSessionId], references: [id])
+
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+}
+
+// Hóa đơn thanh toán - In phiếu thanh toán
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique
+  subTotal       Decimal // Tổng tiền hàng
+  discountAmount Decimal       @default(0) // Tiền giảm giá
+  totalAmount    Decimal // Tiền thực thu
+  amountTendered Decimal? // Tiền khách đưa
+  changeAmount   Decimal? // Tiền thối lại
+  paymentMethod  PaymentMethod @default(CASH)
+  paymentStatus  PaymentStatus @default(PENDING)
+  taxAmount      Decimal       @default(0) // Số tiền thuế
+  taxRate        Decimal       @default(0) // % Thuế (VD: 8, 10)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderSessionId String
+  orderSession   OrderSession @relation(fields: [orderSessionId], references: [id])
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  shiftId String?
+  shift   CashierShift? @relation(fields: [shiftId], references: [id])
+
+  promotionId String?
+  promotion   Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  orderItems OrderItem[]
+}
+
+// Quản lý Ngân sách / Thu Chi (NGANSACH.THU, CHI, NGAY, SOTIEN)
+model CashTransaction {
+  id              String       @id @default(uuid())
+  type            CashFlowType // INCOME (Thu), EXPENSE (Chi)
+  amount          Decimal
+  description     String
+  transactionDate DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  fundId String // Nguồn tiền xuất/nhập
+  fund   Fund   @relation(fields: [fundId], references: [id])
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  shiftId String? // Khoản chi/thu này phát sinh trong ca nào
+  shift   CashierShift? @relation(fields: [shiftId], references: [id])
+
+  equipment Equipment?
+}
+
+// Cài đặt in ấn máy POS
+model PrintSetting {
+  id          String @id @default(uuid())
+  paperSize   String // Khổ giấy
+  printerName String // Máy in
+  printLimit  Int    @default(1) // Số lần in/giới hạn in
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  employeeId String   @unique
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+}
+
+// Lịch sử thao tác nghiệp vụ (Audit Log)
+model ActionLog {
+  id         String @id @default(uuid())
+  actionType String // VD: TRANSFER_TABLE, MERGE_TABLE, CANCEL_ITEM
+  details    Json // Dữ liệu chi tiết sự thay đổi
+
+  createdAt DateTime @default(now())
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
 }

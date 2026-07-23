@@ -91,8 +91,12 @@ const initBodyParser = (app: INestApplication) => {
 const initApp = (app: NestExpressApplication) => {
   const { APP_PREFIX = '/api', FE_URL } = process.env;
   app.setGlobalPrefix(APP_PREFIX);
+  const allowedOrigins = FE_URL
+    ? FE_URL.split(',').map((url) => url.trim())
+    : '*';
   app.enableCors({
-    origin: FE_URL ? FE_URL : ['*'],
+    origin: allowedOrigins,
+    credentials: true,
   });
   initBodyParser(app);
   applyMiddlewares(app);

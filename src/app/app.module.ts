@@ -8,10 +8,6 @@ import { ConfigModule } from '@nestjs/config';
 import { AuthModule } from './auth/auth.module';
 import { EmployeesModule } from './employees/employees.module';
 import { SystemSettingsModule } from './system-settings/system-settings.module';
-import { ExpenseVouchersModule } from './expense-vouchers/expense-vouchers.module';
-import { BudgetsModule } from './budgets/budgets.module';
-import { ExportOrdersModule } from './export-orders/export-orders.module';
-import { ImportOrdersModule } from './import-orders/import-orders.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { ReservationsModule } from './reservations/reservations.module';
 import { PromotionsModule } from './promotions/promotions.module';
@@ -33,6 +29,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthGuard } from './auth/auth.guard';
+import { OrdersModule } from './orders/orders.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
@@ -46,10 +43,6 @@ import { AuthGuard } from './auth/auth.guard';
     EquipmentModule,
     PromotionsModule,
     ReservationsModule,
-    ImportOrdersModule,
-    ExportOrdersModule,
-    BudgetsModule,
-    ExpenseVouchersModule,
     SystemSettingsModule,
     InvoicesModule,
     PositionsModule,
@@ -58,6 +51,7 @@ import { AuthGuard } from './auth/auth.guard';
     RateLimitModule,
     MailUtilModule,
     JwtModule,
+    OrdersModule,
   ],
   controllers: [AppController],
   providers: [
