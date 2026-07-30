@@ -1,13 +1,5 @@
 import { z } from 'zod';
-
-interface FormatResponseParams {
-  errors?: null | Record<string, any>[];
-  data?: null | any;
-  message?: string;
-  [key: string]: any;
-}
-
-export type { FormatResponseParams };
+export type { FormatResponseParams } from '../../../types';
 
 export const FormatResponseSchema = z
   .object({

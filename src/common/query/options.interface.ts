@@ -10,6 +10,4 @@ export class GetOptionsParams extends createZodDto(
     .loose(),
 ) {}
 
-export interface Options {
-  getOptions(params: GetOptionsParams);
-}
+export type { Options } from '../types';

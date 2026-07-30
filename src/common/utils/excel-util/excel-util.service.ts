@@ -1,4 +1,4 @@
-import { WORKSHEETS_IS_EMPTY, FILE_NOT_FOUND } from './../../consts/message';
+import { SYSTEM_ERRORS } from './../../consts/message';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Workbook } from 'exceljs';
 import type { CellValue, Worksheet } from 'exceljs';
@@ -37,7 +37,7 @@ export class ExcelUtilService {
 
   generateExcel({ worksheets = [] }: GenerateExcelParams) {
     if (!worksheets || worksheets.length === 0) {
-      throw new BadRequestException(WORKSHEETS_IS_EMPTY);
+      throw new BadRequestException(SYSTEM_ERRORS.WORKSHEETS_IS_EMPTY);
     }
     const workbook = new Workbook();
     for (const workSheetData of worksheets) {
@@ -94,7 +94,8 @@ export class ExcelUtilService {
   }
 
   async read(file: File) {
-    if (!file || !file.buffer) throw new BadRequestException(FILE_NOT_FOUND);
+    if (!file || !file.buffer)
+      throw new BadRequestException(SYSTEM_ERRORS.FILE_NOT_FOUND);
     const workbook = new Workbook();
     try {
       await workbook.xlsx.load(file.buffer as unknown as ArrayBuffer);

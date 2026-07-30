@@ -3,7 +3,4 @@ export enum Operator {
   OR = 'OR',
 }
 
-export interface BuildSearchParams<T> {
-  search: Partial<Record<keyof T, any>>;
-  operator?: Operator;
-}
+export type { BuildSearchParams } from '../../../types';

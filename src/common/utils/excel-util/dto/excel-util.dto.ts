@@ -1,4 +1,4 @@
-import { EmployeeInfo } from '../../../decorators/employee.decorator';
+import type { EmployeeInfo } from '../../../types';
 import { File } from './excel-util.interface';
 
 class ImportExcel {
