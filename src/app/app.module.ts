@@ -30,13 +30,18 @@ import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthGuard } from './auth/auth.guard';
 import { OrdersModule } from './orders/orders.module';
+import { AuthorizationModule } from './authorization/authorization.module';
+import { PermissionsGuard } from './authorization/permissions.guard';
+import { PermissionsModule } from './permissions/permissions.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
     AuthModule,
+    AuthorizationModule,
     PrismaModule,
     EmployeesModule,
     RolesModule,
+    PermissionsModule,
     DiningTablesModule,
     MenuModule,
     InventoryModule,
@@ -88,6 +93,10 @@ import { OrdersModule } from './orders/orders.module';
     {
       provide: APP_GUARD,
       useClass: AuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: PermissionsGuard,
     },
   ],
 })

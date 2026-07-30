@@ -1,15 +1,15 @@
-import { Test, TestingModule } from '@nestjs/testing';
+import { TestingModule } from '@nestjs/testing';
 import { DiningTablesController } from './dining-tables.controller';
-import { DiningTablesService } from './dining-tables.service';
+import { DiningTablesModule } from './dining-tables.module';
+import { AutoMockingModule } from '../../../test/auto-mocking/auto-mocking.module';
 
-describe('DiningTablesController', () => {
+describe('EmployeesController', () => {
   let controller: DiningTablesController;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      controllers: [DiningTablesController],
-      providers: [DiningTablesService],
-    }).compile();
+    const module: TestingModule = await AutoMockingModule.createTestingModule({
+      imports: [DiningTablesModule],
+    });
 
     controller = module.get<DiningTablesController>(DiningTablesController);
   });

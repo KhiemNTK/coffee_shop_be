@@ -7,39 +7,43 @@ import {
   Param,
   Delete,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { DiningTablesService } from './dining-tables.service';
-import { CreateDiningTableDto } from './dto/create-dining-table.dto';
-import { UpdateDiningTableDto } from './dto/update-dining-table.dto';
+import {
+  CreateDiningTableDto,
+  UpdateDiningTableDto,
+} from './dto/create-dining-table.dto';
+import { IDDto } from '../../common/dto/param.dto';
+import { OrdersService } from '../orders/orders.service';
 
+@ApiTags('Dining Tables')
 @Controller('dining-tables')
 export class DiningTablesController {
-  constructor(private readonly diningTablesService: DiningTablesService) {}
+  constructor(
+    private readonly diningTablesService: DiningTablesService,
+    private readonly ordersService: OrdersService,
+  ) {}
 
   @Post()
-  create(@Body() createDiningTableDto: CreateDiningTableDto) {
-    return this.diningTablesService.create(createDiningTableDto);
+  createTable(@Body() createDiningTableDto: CreateDiningTableDto) {
+    return this.diningTablesService.createTable(createDiningTableDto);
   }
 
   @Get()
-  findAll() {
-    return this.diningTablesService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.diningTablesService.findOne(+id);
+  getTables() {
+    return this.diningTablesService.getTables();
   }
 
   @Patch(':id')
-  update(
-    @Param('id') id: string,
+  updateTable(
+    @Param() { id }: IDDto,
     @Body() updateDiningTableDto: UpdateDiningTableDto,
   ) {
-    return this.diningTablesService.update(+id, updateDiningTableDto);
+    return this.diningTablesService.updateTable(id, updateDiningTableDto);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.diningTablesService.remove(+id);
+  deleteTable(@Param() { id }: IDDto) {
+    return this.diningTablesService.deleteTable(id);
   }
 }
