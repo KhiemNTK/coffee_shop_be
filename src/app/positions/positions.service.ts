@@ -7,7 +7,7 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { Position } from '../../generated/zod';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
-import { POSITION_NOT_FOUND } from '../../common/consts/message';
+import { SYSTEM_ERRORS } from '../../common/consts/message';
 
 @Injectable()
 export class PositionsService {
@@ -58,7 +58,7 @@ export class PositionsService {
     });
 
     if (!position) {
-      throw new NotFoundException(POSITION_NOT_FOUND);
+      throw new NotFoundException(SYSTEM_ERRORS.POSITION_NOT_FOUND);
     }
 
     return position;
@@ -76,7 +76,9 @@ export class PositionsService {
   async deletePosition(id: string) {
     await this.getPositionById(id);
 
-    await this.prisma.position.softDelete({ id });
+    await this.prisma.position.delete({
+      where: { id },
+    });
 
     return {
       success: true,

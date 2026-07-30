@@ -58,6 +58,16 @@ export class AuthController {
     return data;
   }
 
+  @Get('me')
+  getMe(@Employee('employeeId') employeeId: string) {
+    return this.authService.getMe(employeeId);
+  }
+
+  @Get('me/permissions')
+  getMyPermissions(@Employee('employeeId') employeeId: string) {
+    return this.authService.getMyPermissions(employeeId);
+  }
+
   @Get('logout')
   @SkipAuth()
   logout(@Res({ passthrough: true }) res: Response) {

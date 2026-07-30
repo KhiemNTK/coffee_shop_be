@@ -17,13 +17,10 @@ import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { MailUtilService } from '../../common/utils/mail-util/mail-util.service';
 import { MailTemplate } from '../../common/utils/mail-util/mail-util.const';
 import { ConfigService } from '@nestjs/config';
-import {
-  USERNAME_ALREADY_EXISTS,
-  EMAIL_ALREADY_EXISTS,
-  INVALID_TOKEN,
-  INVALID_DEFAULT_POSITION,
-  INVALID_SECRET_KEY,
-} from '../../common/consts/message';
+import { AUTH_ERRORS, SYSTEM_ERRORS } from '../../common/consts/message';
+import { AuthorizationService } from '../authorization/authorization.service';
+import { DEFAULT_EMPLOYEE_ROLE_NAME } from '../../common/consts/permission-keys';
+import type { EmployeeInfo } from '../../common/types';
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -36,6 +33,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly mailUtilService: MailUtilService,
     private readonly configService: ConfigService,
+    private readonly authorizationService: AuthorizationService,
   ) {}
 
   async createToken<T extends Record<string, any>>(payload: T) {
@@ -56,8 +54,25 @@ export class AuthService {
       const decoded = await this.jwtService.verifyAsync(token);
       return decoded;
     } catch (error) {
-      throw new UnauthorizedException(INVALID_TOKEN);
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
+  }
+
+  async getAuthenticatedEmployee(employeeId: string): Promise<EmployeeInfo> {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { id: true, email: true, isActive: true },
+    });
+
+    if (!employee || !employee.isActive) {
+      throw new UnauthorizedException(AUTH_ERRORS.INACTIVE_EMPLOYEE);
+    }
+
+    return {
+      employeeId: employee.id,
+      employeeEmail: employee.email,
+      email: employee.email,
+    };
   }
 
   async signUp(signUpDto: SignUpDto) {
@@ -65,14 +80,14 @@ export class AuthService {
       signUpDto;
     const existingEmail = await this.employeesService.getEmployee({ email });
     if (existingEmail) {
-      throw new BadRequestException(EMAIL_ALREADY_EXISTS);
+      throw new BadRequestException(AUTH_ERRORS.EMAIL_ALREADY_EXISTS);
     }
 
     const existingUsername = await this.prisma.employee.findUnique({
       where: { username },
     });
     if (existingUsername) {
-      throw new BadRequestException(USERNAME_ALREADY_EXISTS);
+      throw new BadRequestException(AUTH_ERRORS.USERNAME_ALREADY_EXISTS);
     }
 
     const defaultPosition = await this.prisma.position.findFirst({
@@ -80,20 +95,40 @@ export class AuthService {
     });
 
     if (!defaultPosition) {
-      throw new InternalServerErrorException(INVALID_DEFAULT_POSITION);
+      throw new InternalServerErrorException(
+        SYSTEM_ERRORS.INVALID_DEFAULT_POSITION,
+      );
     }
 
     const passwordHashed = await this.stringUtilService.hash(password);
-    const employeeCreated = await this.employeesService.createEmployee({
-      email,
-      username,
-      password: passwordHashed,
-      positionId: defaultPosition.id,
-      fullName,
-      address,
-      phoneNumber,
-      isActive: true,
+    const employeeCreated = await this.prisma.$transaction(async (tx) => {
+      const employee = await tx.employee.create({
+        data: {
+          email,
+          username,
+          password: passwordHashed,
+          positionId: defaultPosition.id,
+          fullName,
+          address,
+          phoneNumber,
+          isActive: true,
+        },
+      });
+
+      const defaultRole = await tx.role.findFirst({
+        where: { name: DEFAULT_EMPLOYEE_ROLE_NAME },
+        select: { id: true },
+      });
+      if (defaultRole) {
+        await tx.employeeRole.create({
+          data: { employeeId: employee.id, roleId: defaultRole.id },
+        });
+      }
+
+      return employee;
     });
+    await this.authorizationService.invalidateEmployee(employeeCreated.id);
+
     return this.createToken({
       employeeId: employeeCreated.id,
       employeeEmail: employeeCreated.email,
@@ -104,7 +139,7 @@ export class AuthService {
     const { email, password } = signInDto;
     const employee = await this.employeesService.getEmployee({ email });
     const passwordHashed = employee?.password;
-    if (!passwordHashed) {
+    if (!employee || !passwordHashed || !employee.isActive) {
       throw new UnauthorizedException();
     }
     const isMatch = await this.stringUtilService.compare(
@@ -123,8 +158,46 @@ export class AuthService {
 
   async refreshToken(refreshToken: string) {
     const decoded = await this.verifyToken(refreshToken);
-    const { iat, exp, ...employee } = decoded;
-    return this.createToken(employee);
+    const employeeId = decoded.employeeId as string | undefined;
+    if (!employeeId) {
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
+    }
+    const employee = await this.getAuthenticatedEmployee(employeeId);
+    return this.createToken({
+      employeeId: employee.employeeId,
+      employeeEmail: employee.employeeEmail,
+    });
+  }
+
+  async getMe(employeeId: string) {
+    await this.getAuthenticatedEmployee(employeeId);
+
+    return this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        fullName: true,
+        avatarUrl: true,
+        phoneNumber: true,
+        isActive: true,
+        position: {
+          select: { id: true, name: true },
+        },
+        employeeRoles: {
+          select: {
+            role: {
+              select: { id: true, name: true, description: true },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  async getMyPermissions(employeeId: string) {
+    return this.authorizationService.getAuthorizationContext(employeeId);
   }
 
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
@@ -141,7 +214,8 @@ export class AuthService {
     const employeeEmail = employee.email;
 
     const resetSecret =
-      this.configService.get<string>('JWT_RESET_SECRET') || INVALID_SECRET_KEY;
+      this.configService.get<string>('JWT_RESET_SECRET') ||
+      AUTH_ERRORS.INVALID_SECRET_KEY;
 
     const resetToken = await this.jwtService.signAsync(
       { sub: employee.id },

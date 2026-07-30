@@ -7,8 +7,10 @@ import { StringUtilService } from '../../common/utils/string-util/string-util.se
 import { EmployeesModule } from '../employees/employees.module';
 import { JWTEnvs } from './consts/jwt.const';
 import { MailUtilService } from '../../common/utils/mail-util/mail-util.service';
+import { AuthorizationModule } from '../authorization/authorization.module';
 @Module({
   imports: [
+    AuthorizationModule,
     EmployeesModule,
     JwtModule.registerAsync({
       inject: [ConfigService],

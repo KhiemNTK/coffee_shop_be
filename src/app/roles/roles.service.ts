@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   Inject,
+  ConflictException,
 } from '@nestjs/common';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
@@ -12,13 +13,14 @@ import { CreateRoleDto, ImportRolesDto } from './dto/create-role.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { ExportRolesDto, GetRolesPaginationDto } from './dto/get-role.dto';
 import {
-  ROLE_NOT_FOUND,
-  SYSTEM_ROLE_CANNOT_BE_DELETED,
+  AUTHORIZATION_ERRORS,
+  SYSTEM_ERRORS,
 } from '../../common/consts/message';
 import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { RoleEntity } from './entities/role.entity';
-import { Prisma } from '@prisma/client';
+import { AuthorizationService } from '../authorization/authorization.service';
+import { ReplaceRolePermissionsDto } from './dto/role-permissions.dto';
 @Injectable()
 export class RolesService {
   private roleEntityName = RoleEntity.name;
@@ -31,9 +33,12 @@ export class RolesService {
     private paginationUtilService: PaginationUtilService,
     private queryUtilService: QueryUtilService,
     private excelUtilService: ExcelUtilService,
+    private authorizationService: AuthorizationService,
   ) {}
 
   async createRole(createRoleDto: CreateRoleDto) {
+    await this.ensureRoleNameAvailable(createRoleDto.name);
+
     return this.prisma.role.create({
       data: createRoleDto,
     });
@@ -45,16 +50,16 @@ export class RolesService {
     select,
     ...search
   }: GetRolesPaginationDto) {
-    const totalItems = await this.prisma.role.count();
-    const paging = this.paginationUtilService.paging({
-      page,
-      itemPerPage,
-      totalItems,
-    });
     const fieldsSelect =
       this.queryUtilService.convertFieldsSelectOption<Role>(select);
     const searchQuery = this.queryUtilService.buildSearchQuery<Role>({
       search,
+    });
+    const totalItems = await this.prisma.role.count({ where: searchQuery });
+    const paging = this.paginationUtilService.paging({
+      page,
+      itemPerPage,
+      totalItems,
     });
 
     const list = await this.prisma.role.findMany({
@@ -62,6 +67,7 @@ export class RolesService {
       skip: paging.skip,
       take: paging.itemPerPage,
       where: searchQuery,
+      orderBy: { createdAt: 'desc' },
     });
 
     const data = paging.format(list);
@@ -74,32 +80,125 @@ export class RolesService {
     });
 
     if (!role) {
-      throw new NotFoundException(ROLE_NOT_FOUND);
+      throw new NotFoundException(SYSTEM_ERRORS.ROLE_NOT_FOUND);
     }
 
     return role;
   }
 
   async updateRole(id: string, updateRoleDto: UpdateRoleDto) {
-    await this.getRoleById(id);
+    const role = await this.getRoleById(id);
+    if (role.isSystemRole) {
+      throw new BadRequestException(
+        AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED,
+      );
+    }
 
-    return this.prisma.role.update({
+    if (updateRoleDto.name) {
+      await this.ensureRoleNameAvailable(updateRoleDto.name, id);
+    }
+
+    const updated = await this.prisma.role.update({
       where: { id },
       data: updateRoleDto,
     });
+    await this.authorizationService.invalidateAll();
+    return updated;
   }
 
   async deleteRole(id: string) {
     const role = await this.getRoleById(id);
     if (role.isSystemRole) {
-      throw new BadRequestException(SYSTEM_ROLE_CANNOT_BE_DELETED);
+      throw new BadRequestException(
+        SYSTEM_ERRORS.SYSTEM_ROLE_CANNOT_BE_DELETED,
+      );
     }
-    await this.prisma.role.softDelete({ id });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.rolePermission.deleteMany({ where: { roleId: id } });
+      await tx.employeeRole.deleteMany({ where: { roleId: id } });
+      await tx.role.delete({ where: { id } });
+    });
+    await this.authorizationService.invalidateAll();
 
     return {
       success: true,
       message: `Role #${id} has been deleted successfully`,
     };
+  }
+
+  async getRolePermissions(id: string) {
+    await this.getRoleById(id);
+
+    return this.prisma.role.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        isSystemRole: true,
+        rolePermissions: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            permission: {
+              select: {
+                id: true,
+                name: true,
+                key: true,
+                description: true,
+                isSystemPermission: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
+  async replaceRolePermissions(
+    id: string,
+    { permissionIds }: ReplaceRolePermissionsDto,
+  ) {
+    const role = await this.getRoleById(id);
+    if (role.isSystemRole) {
+      throw new BadRequestException(
+        AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED,
+      );
+    }
+
+    const uniquePermissionIds = [...new Set(permissionIds)];
+    if (uniquePermissionIds.length !== permissionIds.length) {
+      throw new BadRequestException(
+        AUTHORIZATION_ERRORS.DUPLICATE_PERMISSION_IDS,
+      );
+    }
+
+    if (uniquePermissionIds.length > 0) {
+      const permissions = await this.prisma.permission.findMany({
+        where: { id: { in: uniquePermissionIds } },
+        select: { id: true },
+      });
+      if (permissions.length !== uniquePermissionIds.length) {
+        throw new BadRequestException(
+          AUTHORIZATION_ERRORS.INVALID_PERMISSION_IDS,
+        );
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.rolePermission.deleteMany({ where: { roleId: id } });
+      if (uniquePermissionIds.length > 0) {
+        await tx.rolePermission.createMany({
+          data: uniquePermissionIds.map((permissionId) => ({
+            roleId: id,
+            permissionId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
+    await this.authorizationService.invalidateAll();
+
+    return this.getRolePermissions(id);
   }
 
   async exportRoles({ ids, select }: ExportRolesDto) {
@@ -142,9 +241,24 @@ export class RolesService {
       data: insertData,
       skipDuplicates: true,
     });
+    await this.authorizationService.invalidateAll();
     return {
       success: true,
       message: `Imported ${result.count} roles successfully.`,
     };
+  }
+
+  private async ensureRoleNameAvailable(name: string, excludeId?: string) {
+    const existing = await this.prisma.role.findFirst({
+      where: {
+        name,
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException(AUTHORIZATION_ERRORS.ROLE_NAME_EXISTS);
+    }
   }
 }

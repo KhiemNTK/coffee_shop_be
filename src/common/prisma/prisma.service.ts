@@ -1,6 +1,5 @@
 import {
   Injectable,
-  NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
   BadRequestException,
@@ -42,42 +41,53 @@ export class PrismaService
         $allModels: {
           async $allOperations({ model, operation, args, query }) {
             const isSoftDeleteModel = modelsWithSoftDelete.includes(model);
+            if (!isSoftDeleteModel) return query(args);
 
-            const safeArgs = args as any;
+            const safeArgs = (args ? { ...args } : {}) as Record<string, any>;
 
-            if (isSoftDeleteModel) {
-              if (['findFirst', 'findMany', 'count'].includes(operation)) {
-                safeArgs.where = { ...safeArgs.where, deletedAt: null };
-                return query(safeArgs as typeof args);
+            if (
+              [
+                'findMany',
+                'findFirst',
+                'findFirstOrThrow',
+                'count',
+                'aggregate',
+                'groupBy',
+              ].includes(operation)
+            ) {
+              safeArgs.where = safeArgs.where || {};
+              if (safeArgs.where.deletedAt === undefined) {
+                safeArgs.where.deletedAt = null;
+              }
+              return query(safeArgs as typeof args);
+            }
+
+            if (
+              operation === 'findUnique' ||
+              operation === 'findUniqueOrThrow'
+            ) {
+              safeArgs.where = safeArgs.where || {};
+              if (safeArgs.where.deletedAt === undefined) {
+                safeArgs.where.deletedAt = null;
               }
 
-              if (
-                operation === 'findUnique' ||
-                operation === 'findUniqueOrThrow'
-              ) {
-                safeArgs.where = { ...safeArgs.where, deletedAt: null };
+              const targetOperation =
+                operation === 'findUnique' ? 'findFirst' : 'findFirstOrThrow';
 
-                const result = await (prismaClient as any)[model].findFirst(
-                  safeArgs,
-                );
+              const result = await (prismaClient as any)[model][
+                targetOperation
+              ](safeArgs);
+              return result;
+            }
 
-                if (!result && operation === 'findUniqueOrThrow') {
-                  throw new NotFoundException(`${model} not found.`);
-                }
-                return result;
-              }
+            if (operation === 'delete') {
+              safeArgs.data = { deletedAt: new Date() };
+              return (prismaClient as any)[model].update(safeArgs);
+            }
 
-              if (operation === 'delete') {
-                const record = await (prismaClient as any)[model].findFirst({
-                  where: safeArgs.where,
-                });
-                if (!record) {
-                  throw new NotFoundException(
-                    `${model} not found for deletion.`,
-                  );
-                }
-                return query(safeArgs as typeof args);
-              }
+            if (operation === 'deleteMany') {
+              safeArgs.data = { deletedAt: new Date() };
+              return (prismaClient as any)[model].updateMany(safeArgs);
             }
 
             return query(args);
@@ -86,37 +96,25 @@ export class PrismaService
       },
       model: {
         $allModels: {
-          async softDelete<T>(
-            this: T,
-            where: Prisma.Args<T, 'updateMany'>['where'],
-          ) {
-            const context = Prisma.getExtensionContext(this);
-            const modelName = (context as any).$name as string;
-
-            if (!modelsWithSoftDelete.includes(modelName)) {
-              throw new Error(
-                `Model ${modelName} does not support soft delete`,
-              );
-            }
-
-            return await (context as any).updateMany({
-              data: { deletedAt: new Date() },
-              where,
-            });
-          },
           async export<T>(
             this: T,
             args: Prisma.Args<T, 'findMany'> = {} as any,
           ) {
-            const context = Prisma.getExtensionContext(this) as Record<
-              string,
-              any
-            >;
-            const FIELDS_EXCLUDE = ['id'];
+            const context = Prisma.getExtensionContext(this);
+            const modelName = (context as any).$name as string;
 
-            const modelFields = Object.keys(
-              (context.fields as Record<string, unknown>) || {},
+            const modelDefinition = Prisma.dmmf.datamodel.models.find(
+              (m) => m.name === modelName,
             );
+            if (!modelDefinition) {
+              throw new BadRequestException(
+                `Model ${modelName} not found in DMMF`,
+              );
+            }
+
+            const modelFields = modelDefinition.fields.map((f) => f.name);
+            const FIELDS_EXCLUDE = ['id', 'password', 'deletedAt'];
+
             if (args.select) {
               const selectObj = args.select as Record<string, unknown>;
               const invalidFields = Object.keys(selectObj).filter(
@@ -125,22 +123,21 @@ export class PrismaService
 
               if (invalidFields.length > 0) {
                 throw new BadRequestException(
-                  `Invalid fields: ${invalidFields.join(', ')}`,
+                  `Invalid fields for export: ${invalidFields.join(', ')}`,
                 );
               }
             } else {
-              args.select ??= modelFields.reduce<Record<string, boolean>>(
-                (acc, field) => {
-                  if (!FIELDS_EXCLUDE.includes(field)) {
-                    acc[field] = true;
-                  }
-                  return acc;
-                },
-                {},
-              );
+              (args as Record<string, any>).select = modelFields.reduce<
+                Record<string, boolean>
+              >((acc, field) => {
+                if (!FIELDS_EXCLUDE.includes(field)) {
+                  acc[field] = true;
+                }
+                return acc;
+              }, {});
             }
-            const result = await context.findMany(args);
-            return result;
+
+            return await (context as any).findMany(args);
           },
         },
       },
@@ -149,6 +146,4 @@ export class PrismaService
 }
 
 export const PRISMA_SERVICE_TOKEN = 'PRISMA_SERVICE_TOKEN';
-export type ExtendedPrismaClient = ReturnType<
-  PrismaService['getExtendedClient']
->;
+export type { ExtendedPrismaClient } from '../types/prisma.types';

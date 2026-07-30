@@ -102,7 +102,7 @@ enum ShiftStatus {
 
 model Role {
   id           String  @id @default(uuid())
-  name         String  @unique
+  name         String
   description  String?
   isSystemRole Boolean @default(false)
 
@@ -112,6 +112,9 @@ model Role {
 
   rolePermissions RolePermission[]
   employeeRoles   EmployeeRole[]
+
+  @@index([name])
+  @@index([deletedAt])
 }
 
 model Permission {
@@ -127,7 +130,8 @@ model Permission {
 
   rolePermissions RolePermission[]
 
-  @@unique([name, key])
+  @@index([key])
+  @@index([deletedAt])
 }
 
 model RolePermission {
@@ -139,6 +143,7 @@ model RolePermission {
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([roleId, permissionId])
+  @@index([permissionId])
 }
 
 model EmployeeRole {
@@ -150,6 +155,7 @@ model EmployeeRole {
   role     Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([employeeId, roleId])
+  @@index([roleId])
 }
 
 // =============================================
@@ -246,6 +252,9 @@ model Unit {
   deletedAt DateTime?
 
   inventoryItems InventoryItem[]
+
+  @@index([deletedAt])
+  @@index([name])
 }
 
 model Equipment {
@@ -313,6 +322,9 @@ model InventoryCategory {
   deletedAt DateTime?
 
   inventoryItems InventoryItem[]
+
+  @@index([deletedAt])
+  @@index([name])
 }
 
 model InventoryItem {
@@ -332,6 +344,12 @@ model InventoryItem {
 
   ingredients  MenuItemIngredient[]
   transactions InventoryTransaction[]
+
+  @@index([categoryId])
+  @@index([unitId])
+  @@index([deletedAt])
+  @@index([name])
+  @@index([stock])
 }
 
 // =============================================
@@ -400,6 +418,11 @@ model InventoryTransaction {
 
   inventoryItemId String
   inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
+
+  @@index([inventoryItemId])
+  @@index([type, transactionDate])
+  @@index([transactionDate])
+  @@index([inventoryItemId, transactionDate])
 }
 
 // =============================================
@@ -439,6 +462,11 @@ model OrderSession {
 
   shiftId String?
   shift   CashierShift? @relation(fields: [shiftId], references: [id])
+
+  @@index([sessionStatus, createdAt])
+  @@index([tableId, sessionStatus])
+  @@index([employeeId])
+  @@index([shiftId])
 }
 
 //Chi tiết món ăn khách gọi trong phiên
@@ -462,6 +490,12 @@ model OrderItem {
 
   invoiceId String?
   invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  @@index([orderSessionId])
+  @@index([menuItemId])
+  @@index([invoiceId])
+  @@index([serveStatus])
+  @@index([isPaid])
 }
 
 // Hóa đơn thanh toán - In phiếu thanh toán
@@ -494,6 +528,12 @@ model Invoice {
   promotion   Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
 
   orderItems OrderItem[]
+
+  @@index([orderSessionId])
+  @@index([employeeId])
+  @@index([shiftId])
+  @@index([paymentStatus, createdAt])
+  @@index([createdAt])
 }
 
 // Quản lý Ngân sách / Thu Chi (NGANSACH.THU, CHI, NGAY, SOTIEN)

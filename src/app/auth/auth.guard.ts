@@ -8,9 +8,8 @@ import {
 import { IS_SKIP_AUTH } from './auth.decorator';
 import { Reflector } from '@nestjs/core';
 import { AuthService } from './auth.service';
-import { EmployeeInfo } from '../../common/decorators/employee.decorator';
 import { TokenKeys } from './consts/jwt.const';
-import { INVALID_TOKEN } from '../../common/consts/message';
+import { AUTH_ERRORS } from '../../common/consts/message';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -31,14 +30,18 @@ export class AuthGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const token = this.extractTokenFromHeader(req);
     if (!token) {
-      throw new UnauthorizedException(INVALID_TOKEN);
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
     try {
       const payload = await this.authService.verifyToken(token);
-      const { iat, exp, ...employee } = payload;
-      req['employee'] = employee as EmployeeInfo;
+      const employeeId = payload.employeeId as string | undefined;
+      if (!employeeId) {
+        throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
+      }
+      req['employee'] =
+        await this.authService.getAuthenticatedEmployee(employeeId);
     } catch (err) {
-      throw new UnauthorizedException(INVALID_TOKEN);
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
     return true;
   }

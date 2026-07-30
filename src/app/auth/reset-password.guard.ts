@@ -7,7 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
-import { INVALID_TOKEN, INVALID_SECRET_KEY } from '../../common/consts/message';
+import { AUTH_ERRORS } from '../../common/consts/message';
 
 @Injectable()
 export class ResetPasswordGuard implements CanActivate {
@@ -22,13 +22,13 @@ export class ResetPasswordGuard implements CanActivate {
     const token = request.body?.token;
 
     if (!token || typeof token !== 'string') {
-      throw new UnauthorizedException(INVALID_TOKEN);
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
 
     try {
       const resetSecret =
         this.configService.get<string>('JWT_RESET_SECRET') ||
-        INVALID_SECRET_KEY;
+        AUTH_ERRORS.INVALID_SECRET_KEY;
 
       const payload = await this.jwtService.verifyAsync(token, {
         secret: resetSecret,
@@ -40,7 +40,7 @@ export class ResetPasswordGuard implements CanActivate {
 
       return true;
     } catch (err) {
-      throw new UnauthorizedException(INVALID_TOKEN);
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
   }
 }
