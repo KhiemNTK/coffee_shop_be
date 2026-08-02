@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { AuthorizationService } from './authorization.service';
@@ -11,7 +11,7 @@ const createContext = (employee?: Record<string, unknown>) =>
     switchToHttp: jest.fn(() => ({
       getRequest: jest.fn(() => ({ employee })),
     })),
-  }) as any;
+  }) as unknown as ExecutionContext;
 
 describe('PermissionsGuard', () => {
   let reflector: jest.Mocked<Pick<Reflector, 'getAllAndOverride'>>;

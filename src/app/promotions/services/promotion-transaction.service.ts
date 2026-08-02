@@ -1,17 +1,17 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { ExtendedPrismaTransactionClient } from '../../../common/types';
-import { InventoryRepository } from '../repositories/inventory.repository';
+import { PromotionsRepository } from '../repositories/promotions.repository';
 
 @Injectable()
-export class InventoryTransactionService {
-  private readonly logger = new Logger(InventoryTransactionService.name);
+export class PromotionTransactionService {
+  private readonly logger = new Logger(PromotionTransactionService.name);
   private readonly maxSerializableTransactionRetries = 3;
   private readonly serializableTransaction = {
     isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
   } as const;
 
-  constructor(private readonly inventoryRepository: InventoryRepository) {}
+  constructor(private readonly promotionsRepository: PromotionsRepository) {}
 
   async runSerializable<T>(
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
@@ -22,7 +22,7 @@ export class InventoryTransactionService {
       attempt++
     ) {
       try {
-        return await this.inventoryRepository.client.$transaction(
+        return await this.promotionsRepository.client.$transaction(
           callback,
           this.serializableTransaction,
         );
@@ -32,7 +32,7 @@ export class InventoryTransactionService {
           attempt < this.maxSerializableTransactionRetries
         ) {
           this.logger.warn(
-            `Inventory transaction conflict. Retrying attempt ${attempt + 1}/${this.maxSerializableTransactionRetries}`,
+            `Promotion transaction conflict. Retrying attempt ${attempt + 1}/${this.maxSerializableTransactionRetries}`,
           );
           await new Promise((resolve) => setTimeout(resolve, attempt * 25));
           continue;

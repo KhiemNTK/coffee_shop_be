@@ -3,6 +3,7 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { InventoryTxType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type {
+  ExtendedPrismaTransactionClient,
   InventoryEventBase,
   InventoryMovementResult,
 } from '../../../common/types';
@@ -154,7 +155,7 @@ export class InventoryMovementService {
   }
 
   private async applyMovement(
-    tx: any,
+    tx: ExtendedPrismaTransactionClient,
     movement: {
       inventoryItemId: string;
       type: InventoryTxType;

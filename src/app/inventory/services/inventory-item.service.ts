@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InventoryTxType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import type { InventoryEventBase } from '../../../common/types';
+import type {
+  ExtendedPrismaTransactionClient,
+  InventoryEventBase,
+} from '../../../common/types';
 import {
   CreateInventoryItemDto,
   UpdateInventoryItemDto,
@@ -205,7 +208,10 @@ export class InventoryItemService {
     unit: { select: { id: true, name: true } },
   } as const;
 
-  private async findItemNameInTransaction(tx: any, id: string) {
+  private async findItemNameInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    id: string,
+  ) {
     const item = await tx.inventoryItem.findUnique({
       where: { id },
       select: { name: true },

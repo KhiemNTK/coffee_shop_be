@@ -27,6 +27,7 @@ import { ORDER_EVENTS } from './events/order.events';
 import { OrderEventsPublisher } from './events/order-events.publisher';
 import { OrderPolicyService } from './order-policy.service';
 import type {
+  ExtendedPrismaTransactionClient,
   MenuItemPriceSnapshot,
   OpenSessionInput,
   OrderEventBase,
@@ -117,7 +118,7 @@ export class OrdersService {
   }
 
   private async runSerializableTransaction<T>(
-    callback: (tx: any) => Promise<T>,
+    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ): Promise<T> {
     for (
       let attempt = 1;
@@ -125,10 +126,10 @@ export class OrdersService {
       attempt++
     ) {
       try {
-        return (await (this.prisma.$transaction as any)(
+        return await this.prisma.$transaction(
           callback,
           this.serializableTransaction,
-        )) as T;
+        );
       } catch (error) {
         if (
           this.isSerializableTransactionConflict(error) &&

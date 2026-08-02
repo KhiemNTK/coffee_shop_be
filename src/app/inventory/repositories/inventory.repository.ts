@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../../common/prisma/prisma.service';
 import { PRISMA_SERVICE_TOKEN } from '../../../common/prisma/prisma.service';
+import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 
 @Injectable()
 export class InventoryRepository {
@@ -19,7 +20,10 @@ export class InventoryRepository {
     return this.prisma;
   }
 
-  async ensureActiveCategoryExists(id: string, tx: any = this.prisma) {
+  async ensureActiveCategoryExists(
+    id: string,
+    tx: ExtendedPrismaTransactionClient = this.prisma,
+  ) {
     const category = await tx.inventoryCategory.findUnique({
       where: { id },
       select: { id: true },
@@ -34,7 +38,10 @@ export class InventoryRepository {
     return category;
   }
 
-  async ensureActiveUnitExists(id: string, tx: any = this.prisma) {
+  async ensureActiveUnitExists(
+    id: string,
+    tx: ExtendedPrismaTransactionClient = this.prisma,
+  ) {
     const unit = await tx.unit.findUnique({
       where: { id },
       select: { id: true },
@@ -47,7 +54,10 @@ export class InventoryRepository {
     return unit;
   }
 
-  async ensureActiveItemExists(id: string, tx: any = this.prisma) {
+  async ensureActiveItemExists(
+    id: string,
+    tx: ExtendedPrismaTransactionClient = this.prisma,
+  ) {
     const item = await tx.inventoryItem.findUnique({
       where: { id },
       select: {
@@ -102,7 +112,7 @@ export class InventoryRepository {
     name: string;
     categoryId: string;
     excludeId?: string;
-    tx?: any;
+    tx?: ExtendedPrismaTransactionClient;
   }) {
     const existing = await tx.inventoryItem.findFirst({
       where: {

@@ -10,4 +10,5 @@ export * from './options.types';
 export * from './order-event.types';
 export * from './order.types';
 export * from './prisma.types';
+export * from './promotion.types';
 export * from './query-util.types';

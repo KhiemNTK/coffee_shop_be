@@ -1,8 +1,13 @@
 import { Injectable } from '@nestjs/common';
+import type { ExtendedPrismaTransactionClient } from '../../common/types';
+
+type InvoiceNumberClient = {
+  invoice: Pick<ExtendedPrismaTransactionClient['invoice'], 'findFirst'>;
+};
 
 @Injectable()
 export class InvoiceNumberService {
-  async generate(tx: any, createdAt = new Date()) {
+  async generate(tx: InvoiceNumberClient, createdAt = new Date()) {
     const prefix = this.getPrefix(createdAt);
     const latest = await tx.invoice.findFirst({
       where: {

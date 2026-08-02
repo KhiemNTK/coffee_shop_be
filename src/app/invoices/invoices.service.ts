@@ -8,7 +8,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  DiscountType,
   PaymentMethod,
   PaymentStatus,
   Prisma,
@@ -22,13 +21,15 @@ import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import type {
+  ExtendedPrismaTransactionClient,
   InvoiceCalculationResult,
   InvoiceLineSnapshot,
-  InvoicePromotionSnapshot,
+  PromotionCalculationResult,
   OrderEventBase,
 } from '../../common/types';
 import { ORDER_EVENTS } from '../orders/events/order.events';
 import { OrderEventsPublisher } from '../orders/events/order-events.publisher';
+import { PromotionCalculatorService } from '../promotions/services/promotion-calculator.service';
 import { CheckoutInvoiceDto, CreateInvoiceDto } from './dto/create-invoice.dto';
 import { GetInvoicesPaginationDto } from './dto/get-invoice.dto';
 import { UpdateInvoicePaymentDto } from './dto/update-invoice.dto';
@@ -51,6 +52,7 @@ export class InvoicesService {
     private readonly invoicePolicy: InvoicePolicyService,
     private readonly invoiceNumberService: InvoiceNumberService,
     private readonly orderEventsPublisher: OrderEventsPublisher,
+    private readonly promotionCalculatorService: PromotionCalculatorService,
   ) {}
 
   private readonly invoiceInclude = {
@@ -390,12 +392,17 @@ export class InvoicesService {
       });
       this.invoicePolicy.assertInvoiceItemsAreBillable(items);
 
-      const promotion = input.promotionId
-        ? await this.getPromotion(tx, input.promotionId)
+      const subTotal = this.calculateSubTotal(items);
+      const promotionCalculation = input.promotionId
+        ? await this.promotionCalculatorService.calculateDiscountTx(tx, {
+            promotionId: input.promotionId,
+            subTotal,
+            at: new Date(),
+          })
         : null;
       const calculation = this.calculateInvoice({
-        items,
-        promotion,
+        subTotal,
+        promotionCalculation,
         taxRate: input.taxRate,
         paymentStatus,
         paymentMethod,
@@ -417,7 +424,7 @@ export class InvoicesService {
           orderSessionId: session.id,
           employeeId,
           shiftId: session.shiftId,
-          promotionId: promotion?.id ?? null,
+          promotionId: promotionCalculation?.promotionId ?? null,
         },
         select: { id: true },
       });
@@ -451,7 +458,7 @@ export class InvoicesService {
   }
 
   private async getInvoiceItems(
-    tx: any,
+    tx: ExtendedPrismaTransactionClient,
     {
       orderSessionId,
       orderItemIds,
@@ -498,59 +505,23 @@ export class InvoicesService {
     return items;
   }
 
-  private async getPromotion(
-    tx: any,
-    promotionId: string,
-  ): Promise<InvoicePromotionSnapshot> {
-    const promotion = await tx.promotion.findUnique({
-      where: { id: promotionId },
-      select: {
-        id: true,
-        discountType: true,
-        discountValue: true,
-        maxDiscount: true,
-        startDate: true,
-        endDate: true,
-      },
-    });
-
-    if (!promotion) {
-      throw new NotFoundException(
-        `Promotion with ID ${promotionId} not found.`,
-      );
-    }
-
-    const now = new Date();
-    if (promotion.startDate > now || promotion.endDate < now) {
-      throw new BadRequestException('Promotion is not active.');
-    }
-
-    return promotion;
-  }
-
   private calculateInvoice({
-    items,
-    promotion,
+    subTotal,
+    promotionCalculation,
     taxRate,
     paymentStatus,
     paymentMethod,
     amountTendered,
   }: {
-    items: InvoiceLineSnapshot[];
-    promotion: InvoicePromotionSnapshot | null;
+    subTotal: Decimal;
+    promotionCalculation: PromotionCalculationResult | null;
     taxRate?: string | number;
     paymentStatus: PaymentStatus;
     paymentMethod: PaymentMethod;
     amountTendered?: string | number;
   }): InvoiceCalculationResult {
-    const subTotal = items
-      .reduce(
-        (total, item) =>
-          total.plus(new Decimal(item.priceAtTime).mul(item.quantity)),
-        new Decimal(0),
-      )
-      .toDecimalPlaces(2);
-    const discountAmount = this.calculateDiscount(subTotal, promotion);
+    const discountAmount =
+      promotionCalculation?.discountAmount ?? new Decimal(0);
     const resolvedTaxRate = this.toDecimal(taxRate ?? 0);
     const taxableAmount = Decimal.max(subTotal.minus(discountAmount), 0);
     const taxAmount = taxableAmount
@@ -588,23 +559,6 @@ export class InvoicesService {
     };
   }
 
-  private calculateDiscount(
-    subTotal: Decimal,
-    promotion: InvoicePromotionSnapshot | null,
-  ) {
-    if (!promotion) return new Decimal(0);
-
-    const rawDiscount =
-      promotion.discountType === DiscountType.PERCENTAGE
-        ? subTotal.mul(promotion.discountValue).div(100)
-        : new Decimal(promotion.discountValue);
-    const cappedByPromotion = promotion.maxDiscount
-      ? Decimal.min(rawDiscount, promotion.maxDiscount)
-      : rawDiscount;
-
-    return Decimal.min(cappedByPromotion, subTotal).toDecimalPlaces(2);
-  }
-
   private resolvePaidAmountTendered({
     paymentMethod,
     totalAmount,
@@ -629,8 +583,18 @@ export class InvoicesService {
     return new Decimal(value).toDecimalPlaces(4);
   }
 
+  private calculateSubTotal(items: InvoiceLineSnapshot[]) {
+    return items
+      .reduce(
+        (total, item) =>
+          total.plus(new Decimal(item.priceAtTime).mul(item.quantity)),
+        new Decimal(0),
+      )
+      .toDecimalPlaces(2);
+  }
+
   private async closeSessionIfFullyPaid(
-    tx: any,
+    tx: ExtendedPrismaTransactionClient,
     session: {
       id: string;
       sessionStatus: SessionStatus;
@@ -668,7 +632,10 @@ export class InvoicesService {
     }
   }
 
-  private async findInvoiceInTransaction(tx: any, id: string) {
+  private async findInvoiceInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    id: string,
+  ) {
     const invoice = await tx.invoice.findUnique({
       where: { id },
       include: this.invoiceInclude,
@@ -719,7 +686,7 @@ export class InvoicesService {
   }
 
   private async runSerializableTransaction<T>(
-    callback: (tx: any) => Promise<T>,
+    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ): Promise<T> {
     for (
       let attempt = 1;
@@ -727,10 +694,10 @@ export class InvoicesService {
       attempt++
     ) {
       try {
-        return (await (this.prisma.$transaction as any)(
+        return await this.prisma.$transaction(
           callback,
           this.serializableTransaction,
-        )) as T;
+        );
       } catch (error) {
         if (
           this.isRetryableTransactionError(error) &&

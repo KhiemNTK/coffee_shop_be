@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 import { PaginationUtilService } from '../../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../../common/utils/query-util/query-util.service';
 import { CreateUnitDto, GetUnitsDto, UpdateUnitDto } from '../dto/unit.dto';
@@ -125,7 +126,10 @@ export class UnitService {
     };
   }
 
-  private async assertActiveEmployee(tx: any, employeeId: string) {
+  private async assertActiveEmployee(
+    tx: ExtendedPrismaTransactionClient,
+    employeeId: string,
+  ) {
     const employee = await tx.employee.findUnique({
       where: { id: employeeId },
       select: { isActive: true },

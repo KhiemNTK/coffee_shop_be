@@ -1,9 +1,4 @@
-import type {
-  DiscountType,
-  PaymentMethod,
-  PaymentStatus,
-  ServeStatus,
-} from '@prisma/client';
+import type { PaymentMethod, PaymentStatus, ServeStatus } from '@prisma/client';
 import type { Decimal } from '@prisma/client/runtime/library';
 
 export interface InvoiceLineSnapshot {
@@ -37,13 +32,4 @@ export interface InvoicePaymentTransition {
   paymentMethod?: PaymentMethod;
   amountTendered?: string | number;
   closeSessionAfterPayment?: boolean;
-}
-
-export interface InvoicePromotionSnapshot {
-  id: string;
-  discountType: DiscountType;
-  discountValue: Decimal;
-  maxDiscount: Decimal | null;
-  startDate: Date;
-  endDate: Date;
 }

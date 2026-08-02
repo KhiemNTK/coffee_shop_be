@@ -56,7 +56,10 @@ export class PrismaService
               ].includes(operation)
             ) {
               safeArgs.where = safeArgs.where || {};
-              if (safeArgs.where.deletedAt === undefined) {
+              const includeDeleted = safeArgs.where.__includeDeleted === true;
+              delete safeArgs.where.__includeDeleted;
+
+              if (!includeDeleted && safeArgs.where.deletedAt === undefined) {
                 safeArgs.where.deletedAt = null;
               }
               return query(safeArgs as typeof args);
@@ -67,7 +70,10 @@ export class PrismaService
               operation === 'findUniqueOrThrow'
             ) {
               safeArgs.where = safeArgs.where || {};
-              if (safeArgs.where.deletedAt === undefined) {
+              const includeDeleted = safeArgs.where.__includeDeleted === true;
+              delete safeArgs.where.__includeDeleted;
+
+              if (!includeDeleted && safeArgs.where.deletedAt === undefined) {
                 safeArgs.where.deletedAt = null;
               }
 

@@ -1,4 +1,6 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { CreatePromotionDto } from './create-promotion.dto';
+import { createZodDto } from 'nestjs-zod';
+import { PromotionBaseSchema } from './promotion-common.dto';
 
-export class UpdatePromotionDto extends PartialType(CreatePromotionDto) {}
+export class UpdatePromotionDto extends createZodDto(
+  PromotionBaseSchema.partial(),
+) {}

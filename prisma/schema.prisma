@@ -241,6 +241,12 @@ model Promotion {
   deletedAt DateTime?
 
   invoices Invoice[]
+
+  @@index([deletedAt])
+  @@index([startDate, endDate])
+  @@index([discountType])
+  @@index([createdAt])
+  @@index([name])
 }
 
 model Unit {
