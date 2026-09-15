@@ -18,12 +18,11 @@ export class StringUtilService {
   }
 
   async hash(value: string) {
-    const salt = await bcrypt.genSalt(10);
-    return await bcrypt.hash(value, salt);
+    return bcrypt.hash(value, 12);
   }
 
   async compare(value: string, valueHashed: string) {
-    return await bcrypt.compare(value, valueHashed);
+    return bcrypt.compare(value, valueHashed);
   }
 
   random(length = 6): string {

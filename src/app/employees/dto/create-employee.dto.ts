@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { NewPasswordSchema } from '../../../common/validation/password.schema';
 
 export const CreateEmployeeInputSchema = z.object({
   fullName: z
@@ -27,11 +28,7 @@ export const CreateEmployeeInputSchema = z.object({
     .min(3, 'Username must be at least 3 characters')
     .max(50),
 
-  password: z
-    .string()
-    .trim()
-    .min(6, 'Password must be at least 6 characters')
-    .max(100),
+  password: NewPasswordSchema,
 
   isActive: z.boolean().optional().default(true),
 

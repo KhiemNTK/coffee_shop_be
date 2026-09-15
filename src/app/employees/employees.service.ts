@@ -15,6 +15,26 @@ import { QueryUtilService } from '../../common/utils/query-util/query-util.servi
 import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { ReplaceEmployeeRolesDto } from './dto/employee-roles.dto';
+import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+
+const EMPLOYEE_PUBLIC_SELECT = {
+  id: true,
+  email: true,
+  avatarUrl: true,
+  fullName: true,
+  address: true,
+  phoneNumber: true,
+  username: true,
+  salary: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  positionId: true,
+} satisfies Prisma.EmployeeSelect;
+
+const EMPLOYEE_PUBLIC_FIELDS = new Set(Object.keys(EMPLOYEE_PUBLIC_SELECT));
+
 @Injectable()
 export class EmployeesService {
   constructor(
@@ -23,11 +43,16 @@ export class EmployeesService {
     private paginationUtilService: PaginationUtilService,
     private queryUtilService: QueryUtilService,
     private authorizationService: AuthorizationService,
+    private readonly stringUtilService: StringUtilService,
   ) {}
 
   async createEmployee(createEmployeeDto: CreateEmployeeDto) {
+    const password = await this.stringUtilService.hash(
+      createEmployeeDto.password,
+    );
     return this.prisma.employee.create({
-      data: createEmployeeDto,
+      data: { ...createEmployeeDto, password },
+      select: EMPLOYEE_PUBLIC_SELECT,
     });
   }
 
@@ -50,8 +75,7 @@ export class EmployeesService {
     select,
     ...search
   }: GetEmployeesPaginationDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<Employee>(select);
+    const fieldsSelect = this.getPublicSelect(select);
     const searchQuery = this.queryUtilService.buildSearchQuery<Employee>({
       search,
     });
@@ -78,7 +102,8 @@ export class EmployeesService {
   async getEmployeeById(id: string) {
     const employee = await this.prisma.employee.findUnique({
       where: { id },
-      include: {
+      select: {
+        ...EMPLOYEE_PUBLIC_SELECT,
         position: true,
         employeeRoles: {
           include: { role: true },
@@ -95,10 +120,29 @@ export class EmployeesService {
 
   async updateEmployee(id: string, updateEmployeeDto: UpdateEmployeeDto) {
     await this.findEmployeeOrThrow(id);
+    const password = updateEmployeeDto.password
+      ? await this.stringUtilService.hash(updateEmployeeDto.password)
+      : undefined;
 
-    const employee = await this.prisma.employee.update({
-      where: { id },
-      data: updateEmployeeDto,
+    const employee = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.employee.update({
+        where: { id },
+        data: {
+          ...updateEmployeeDto,
+          ...(password ? { password } : {}),
+        },
+        select: EMPLOYEE_PUBLIC_SELECT,
+      });
+      if (updateEmployeeDto.isActive === false) {
+        await tx.authSession.updateMany({
+          where: { employeeId: id, revokedAt: null },
+          data: {
+            revokedAt: new Date(),
+            revokeReason: 'EMPLOYEE_DISABLED',
+          },
+        });
+      }
+      return updated;
     });
     await this.authorizationService.invalidateEmployee(id);
     return employee;
@@ -108,6 +152,13 @@ export class EmployeesService {
     await this.findEmployeeOrThrow(id);
 
     await this.prisma.$transaction(async (tx) => {
+      await tx.authSession.updateMany({
+        where: { employeeId: id, revokedAt: null },
+        data: {
+          revokedAt: new Date(),
+          revokeReason: 'EMPLOYEE_DELETED',
+        },
+      });
       await tx.employeeRole.deleteMany({ where: { employeeId: id } });
       await tx.employee.delete({ where: { id } });
     });
@@ -179,5 +230,23 @@ export class EmployeesService {
     await this.authorizationService.invalidateEmployee(id);
 
     return this.getEmployeeRoles(id);
+  }
+
+  private getPublicSelect(select?: string): Prisma.EmployeeSelect {
+    if (!select?.trim()) return EMPLOYEE_PUBLIC_SELECT;
+
+    const fields = [
+      ...new Set(
+        select
+          .split(',')
+          .map((field) => field.trim())
+          .filter((field) => EMPLOYEE_PUBLIC_FIELDS.has(field)),
+      ),
+    ];
+    if (fields.length === 0) {
+      throw new BadRequestException('No selectable employee fields requested.');
+    }
+
+    return Object.fromEntries(fields.map((field) => [field, true]));
   }
 }
