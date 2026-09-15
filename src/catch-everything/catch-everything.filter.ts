@@ -11,6 +11,7 @@ import { ZodExceptionService } from './zod-exception/zod-exception.service';
 import { ZodSerializationException, ZodValidationException } from 'nestjs-zod';
 import { ApiUtilService } from '../common/utils/api-util/api-util.service';
 import { Prisma } from '@prisma/client';
+import type { RequestWithContext } from '../common/middlewares/request-context.middleware';
 
 interface ErrorItem {
   message: string;
@@ -46,7 +47,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const { httpAdapter } = this.httpAdapterHost;
     const ctx = host.switchToHttp();
-    const request = ctx.getRequest();
+    const request = ctx.getRequest<RequestWithContext>();
 
     const response = ctx.getResponse();
     const method = httpAdapter.getRequestMethod(request);
@@ -54,9 +55,37 @@ export class CatchEverythingFilter implements ExceptionFilter {
     const reqContext = `${method} ${url}`;
 
     const { status, errors } = this.resolveException(exception, reqContext);
-    const responseBody = this.apiUtilService.formatResponse({ errors });
+    const responseBody = this.apiUtilService.formatResponse({
+      errors,
+      code: this.resolveErrorCode(exception, status),
+      requestId: request.requestId,
+    });
 
     httpAdapter.reply(response, responseBody, status);
+  }
+
+  private resolveErrorCode(exception: unknown, status: HttpStatus) {
+    if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      return exception.code;
+    }
+    if (exception instanceof ZodValidationException) {
+      return 'VALIDATION_ERROR';
+    }
+    if (exception instanceof ZodSerializationException) {
+      return 'SERIALIZATION_ERROR';
+    }
+    if (exception instanceof HttpException) {
+      const response = exception.getResponse();
+      if (
+        typeof response === 'object' &&
+        response !== null &&
+        'code' in response &&
+        typeof response.code === 'string'
+      ) {
+        return response.code;
+      }
+    }
+    return `HTTP_${status}`;
   }
 
   private resolveException(

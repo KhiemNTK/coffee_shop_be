@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app/app.module';
 import { LoggerModule } from './app/logger/logger.module';
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { initApp } from './init';
 import { NestExpressApplication } from '@nestjs/platform-express';
 
@@ -11,20 +12,18 @@ async function bootstrap() {
     bodyParser: false,
   });
 
-  const {
-    PORT = 3000,
-    HOST = 'localhost',
-    APP_PREFIX = '/api',
-    APP_NAME = 'nestjs-app',
-    NODE_ENV = 'development',
-  } = process.env;
-
   initApp(app);
-  await app.listen(PORT, HOST);
-  const protocol = NODE_ENV === 'production' ? 'https' : 'http';
+  const config = app.get(ConfigService);
+  const port = config.get<number>('PORT', 3000);
+  const host = config.get<string>('HOST', '0.0.0.0');
+  const appPrefix = config.get<string>('APP_PREFIX', '/api/v1');
+  const appName = config.get<string>('APP_NAME', 'coffee_shop_be');
+  const nodeEnvironment = config.get<string>('NODE_ENV', 'development');
+  await app.listen(port, host);
+  const protocol = nodeEnvironment === 'production' ? 'https' : 'http';
   Logger.log(
-    `Service is running at ${protocol}://${HOST}:${PORT}${APP_PREFIX}`,
-    APP_NAME,
+    `Service is running at ${protocol}://${host}:${port}${appPrefix}`,
+    appName,
   );
 }
 void bootstrap();

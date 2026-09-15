@@ -27,15 +27,21 @@ import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
 import { RateLimitModule } from '../common/security/rate-limit.module';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
-import { JwtModule } from '@nestjs/jwt';
 import { AuthGuard } from './auth/auth.guard';
 import { OrdersModule } from './orders/orders.module';
 import { AuthorizationModule } from './authorization/authorization.module';
 import { PermissionsGuard } from './authorization/permissions.guard';
 import { PermissionsModule } from './permissions/permissions.module';
+import { CsrfGuard } from './auth/csrf.guard';
+import { HealthModule } from './health/health.module';
+import { validateEnvironment } from '../config/environment';
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, expandVariables: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      expandVariables: true,
+      validate: validateEnvironment,
+    }),
     AuthModule,
     AuthorizationModule,
     PrismaModule,
@@ -55,8 +61,8 @@ import { PermissionsModule } from './permissions/permissions.module';
     ApiUtilModule,
     RateLimitModule,
     MailUtilModule,
-    JwtModule,
     OrdersModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [
@@ -93,6 +99,10 @@ import { PermissionsModule } from './permissions/permissions.module';
     {
       provide: APP_GUARD,
       useClass: AuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: CsrfGuard,
     },
     {
       provide: APP_GUARD,

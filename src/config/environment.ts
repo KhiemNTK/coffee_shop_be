@@ -1,0 +1,134 @@
+import { z } from 'zod';
+
+const BooleanEnvSchema = z.preprocess((value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return value;
+  const normalized = value.toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return value;
+}, z.boolean());
+
+const CorsOriginsSchema = z.string().refine(
+  (value) =>
+    value
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+      .every((origin) => z.url().safeParse(origin).success),
+  'FE_URL must contain comma-separated absolute URLs',
+);
+
+const EnvironmentSchema = z
+  .object({
+    NODE_ENV: z
+      .enum(['development', 'test', 'production'])
+      .default('development'),
+    PORT: z.coerce.number().int().positive().max(65535).default(3000),
+    HOST: z.string().min(1).default('0.0.0.0'),
+    APP_PREFIX: z.string().startsWith('/').default('/api/v1'),
+    APP_NAME: z.string().min(1).default('coffee_shop_be'),
+    DATABASE_URL: z.string().min(1),
+    REDIS_URL: z.url().optional(),
+    FE_URL: CorsOriginsSchema.default('http://localhost:3001'),
+    JWT_SECRET: z
+      .string()
+      .default('development-access-secret-change-before-production'),
+    JWT_REFRESH_SECRET: z
+      .string()
+      .default('development-refresh-secret-change-before-production'),
+    PASSWORD_RESET_URL: z.url().default('http://localhost:3001/reset-password'),
+    AUTH_SIGNUP_ENABLED: BooleanEnvSchema.default(false),
+    CSRF_ENABLED: BooleanEnvSchema.default(true),
+    COOKIE_SECURE: BooleanEnvSchema.default(false),
+    COOKIE_SAME_SITE: z.enum(['strict', 'lax', 'none']).default('strict'),
+    SWAGGER_ENABLED: BooleanEnvSchema.optional(),
+    JSON_BODY_LIMIT: z
+      .string()
+      .regex(/^\d+(kb|mb)$/i)
+      .default('1mb'),
+    TRUST_PROXY: z.string().min(1).default('loopback'),
+    THROTTLE_TTL: z.coerce.number().int().positive().default(60000),
+    THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
+    MAIL_HOST: z.string().optional(),
+    MAIL_PORT: z.coerce.number().int().positive().optional(),
+    MAIL_USER: z.string().optional(),
+    MAIL_PASS: z.string().optional(),
+    MAIL_FROM: z.string().optional(),
+  })
+  .passthrough();
+
+const WEAK_SECRET_MARKERS = [
+  'change-before-production',
+  'changeme',
+  'replace-me',
+  'your-secret',
+  'default-secret',
+];
+
+export function validateEnvironment(raw: Record<string, unknown>) {
+  const parsed = EnvironmentSchema.parse(raw);
+  const environment = {
+    ...parsed,
+    SWAGGER_ENABLED: parsed.SWAGGER_ENABLED ?? parsed.NODE_ENV !== 'production',
+  };
+  if (environment.NODE_ENV !== 'production') return environment;
+
+  const required = [
+    'DATABASE_URL',
+    'REDIS_URL',
+    'FE_URL',
+    'JWT_SECRET',
+    'JWT_REFRESH_SECRET',
+    'PASSWORD_RESET_URL',
+    'MAIL_HOST',
+    'MAIL_PORT',
+    'MAIL_USER',
+    'MAIL_PASS',
+    'MAIL_FROM',
+  ] as const;
+  const missing = required.filter((key) => !raw[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required production environment variables: ${missing.join(', ')}`,
+    );
+  }
+
+  for (const [name, value] of [
+    ['JWT_SECRET', environment.JWT_SECRET],
+    ['JWT_REFRESH_SECRET', environment.JWT_REFRESH_SECRET],
+  ] as const) {
+    const weak = WEAK_SECRET_MARKERS.some((marker) =>
+      value.toLowerCase().includes(marker),
+    );
+    if (value.length < 32 || weak) {
+      throw new Error(
+        `${name} must be a strong secret of at least 32 characters`,
+      );
+    }
+  }
+
+  if (environment.JWT_SECRET === environment.JWT_REFRESH_SECRET) {
+    throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+  if (environment.AUTH_SIGNUP_ENABLED) {
+    throw new Error('AUTH_SIGNUP_ENABLED cannot be enabled in production');
+  }
+  if (!environment.CSRF_ENABLED) {
+    throw new Error('CSRF_ENABLED must be enabled in production');
+  }
+  if (!environment.COOKIE_SECURE) {
+    throw new Error('COOKIE_SECURE must be enabled in production');
+  }
+  const insecureOrigin = environment.FE_URL.split(',')
+    .map((origin) => origin.trim())
+    .find((origin) => !origin.startsWith('https://'));
+  if (insecureOrigin) {
+    throw new Error('FE_URL must use HTTPS in production');
+  }
+  if (!environment.PASSWORD_RESET_URL.startsWith('https://')) {
+    throw new Error('PASSWORD_RESET_URL must use HTTPS in production');
+  }
+
+  return environment;
+}
