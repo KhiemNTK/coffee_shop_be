@@ -6,12 +6,16 @@ import { ConfigService } from '@nestjs/config';
 import { StringUtilService } from '../../common/utils/string-util/string-util.service';
 import { EmployeesModule } from '../employees/employees.module';
 import { JWTEnvs } from './consts/jwt.const';
-import { MailUtilService } from '../../common/utils/mail-util/mail-util.service';
+import { MailUtilModule } from '../../common/utils/mail-util/mail-util.module';
 import { AuthorizationModule } from '../authorization/authorization.module';
+import { AuthTokenService } from './auth-token.service';
+import { AuthSessionService } from './auth-session.service';
+import { PasswordResetService } from './password-reset.service';
 @Module({
   imports: [
     AuthorizationModule,
     EmployeesModule,
+    MailUtilModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
@@ -20,8 +24,14 @@ import { AuthorizationModule } from '../authorization/authorization.module';
       }),
     }),
   ],
-  providers: [AuthService, StringUtilService, MailUtilService],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    AuthTokenService,
+    AuthSessionService,
+    PasswordResetService,
+    StringUtilService,
+  ],
+  exports: [AuthService, AuthSessionService],
   controllers: [AuthController],
 })
 export class AuthModule {}

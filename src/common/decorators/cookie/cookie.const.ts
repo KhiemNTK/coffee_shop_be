@@ -1,4 +1,5 @@
-import { CookieOptions } from 'express';
+import { randomBytes } from 'node:crypto';
+import type { CookieOptions } from 'express';
 import { JWTToken } from '../../../app/auth/consts/jwt.const';
 
 enum CookiesToken {
@@ -6,9 +7,30 @@ enum CookiesToken {
   REFRESH_TOKEN_EXPIRES_IN = JWTToken.REFRESH_TOKEN_EXPIRE_IN,
 }
 
-const COOKIE_CONFIG_DEFAULT: CookieOptions = {
-  httpOnly: true,
-  sameSite: 'strict',
-};
+const getBaseCookieOptions = (): CookieOptions => ({
+  secure:
+    process.env.NODE_ENV === 'production' ||
+    process.env.COOKIE_SECURE === 'true',
+  sameSite: (process.env.COOKIE_SAME_SITE ??
+    'strict') as CookieOptions['sameSite'],
+  path: '/',
+});
 
-export { CookiesToken, COOKIE_CONFIG_DEFAULT };
+const getAuthCookieOptions = (): CookieOptions => ({
+  ...getBaseCookieOptions(),
+  httpOnly: true,
+});
+
+const getCsrfCookieOptions = (): CookieOptions => ({
+  ...getBaseCookieOptions(),
+  httpOnly: false,
+});
+
+const createCsrfToken = () => randomBytes(32).toString('base64url');
+
+export {
+  CookiesToken,
+  createCsrfToken,
+  getAuthCookieOptions,
+  getCsrfCookieOptions,
+};

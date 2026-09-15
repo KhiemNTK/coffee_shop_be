@@ -3,6 +3,7 @@ import type { PermissionKey } from './authorization.types';
 
 export interface EmployeeInfo {
   employeeId: EmployeeEntity['id'];
+  sessionId?: string;
   employeeEmail?: EmployeeEntity['email'];
   email?: EmployeeEntity['email'];
   permissionKeys?: PermissionKey[];

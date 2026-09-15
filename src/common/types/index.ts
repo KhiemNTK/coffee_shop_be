@@ -1,5 +1,6 @@
 export * from './api-util.types';
 export * from './authorization.types';
+export * from './auth.types';
 export * from './cookie.types';
 export * from './employee.types';
 export * from './excel.types';

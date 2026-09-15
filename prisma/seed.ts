@@ -1,9 +1,11 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcrypt';
 import {
   PermissionKeys,
   SYSTEM_ROLE_NAMES,
 } from '../src/common/consts/permission-keys';
+import type { PermissionKey } from '../src/common/types';
 
 const prisma = new PrismaClient();
 
@@ -11,6 +13,12 @@ type PermissionSeed = {
   key: string;
   name: string;
   description: string;
+};
+
+type RoleSeed = {
+  name: string;
+  description: string;
+  permissions: PermissionKey[];
 };
 
 const toTitle = (keyName: string) =>
@@ -27,7 +35,7 @@ const permissionSeeds: PermissionSeed[] = Object.entries(PermissionKeys).map(
   }),
 );
 
-const roleSeeds = [
+const roleSeeds: RoleSeed[] = [
   {
     name: SYSTEM_ROLE_NAMES.OWNER,
     description: 'System owner with every permission',
@@ -168,7 +176,7 @@ async function upsertPermission(seed: PermissionSeed) {
   });
 }
 
-async function upsertRole(seed: (typeof roleSeeds)[number]) {
+async function upsertRole(seed: RoleSeed) {
   const existing = await prisma.role.findFirst({
     where: { name: seed.name, deletedAt: null },
     select: { id: true },
@@ -201,26 +209,65 @@ async function main() {
 
   for (const roleSeed of roleSeeds) {
     const role = await upsertRole(roleSeed);
-    await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
-    await prisma.rolePermission.createMany({
-      data: roleSeed.permissions.map((permissionKey) => ({
-        roleId: role.id,
-        permissionId: permissionByKey.get(permissionKey)!,
-      })),
-      skipDuplicates: true,
-    });
+    await prisma.$transaction([
+      prisma.rolePermission.deleteMany({ where: { roleId: role.id } }),
+      prisma.rolePermission.createMany({
+        data: roleSeed.permissions.map((permissionKey) => ({
+          roleId: role.id,
+          permissionId: permissionByKey.get(permissionKey)!,
+        })),
+        skipDuplicates: true,
+      }),
+    ]);
   }
 
   const ownerEmail = process.env.OWNER_EMAIL;
   if (ownerEmail) {
-    const [owner, ownerRole] = await Promise.all([
+    const [existingOwner, ownerRole] = await Promise.all([
       prisma.employee.findUnique({ where: { email: ownerEmail } }),
       prisma.role.findFirst({
         where: { name: SYSTEM_ROLE_NAMES.OWNER, deletedAt: null },
       }),
     ]);
 
-    if (owner && ownerRole) {
+    if (!ownerRole) {
+      throw new Error('OWNER role was not created');
+    }
+
+    let owner = existingOwner;
+    if (!owner) {
+      const ownerPassword = process.env.OWNER_PASSWORD;
+      const ownerUsername = process.env.OWNER_USERNAME;
+      const ownerFullName = process.env.OWNER_FULL_NAME;
+      if (!ownerPassword || !ownerUsername || !ownerFullName) {
+        throw new Error(
+          'OWNER_PASSWORD, OWNER_USERNAME and OWNER_FULL_NAME are required when bootstrapping a new owner',
+        );
+      }
+      if (ownerPassword.length < 12) {
+        throw new Error('OWNER_PASSWORD must contain at least 12 characters');
+      }
+
+      let staffPosition = await prisma.position.findFirst({
+        where: { name: 'Staff', deletedAt: null },
+      });
+      staffPosition ??= await prisma.position.create({
+        data: { name: 'Staff', salary: 0 },
+      });
+
+      owner = await prisma.employee.create({
+        data: {
+          email: ownerEmail,
+          username: ownerUsername,
+          fullName: ownerFullName,
+          password: await bcrypt.hash(ownerPassword, 12),
+          positionId: staffPosition.id,
+          isActive: true,
+        },
+      });
+    }
+
+    if (owner) {
       await prisma.employeeRole.upsert({
         where: {
           employeeId_roleId: {

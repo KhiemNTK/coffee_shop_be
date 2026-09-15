@@ -6,10 +6,14 @@ export const AUTH_ERRORS = {
   INVALID_TOKEN: 'Invalid token',
   INVALID_SECRET_KEY: 'Invalid secret key',
   INACTIVE_EMPLOYEE: 'Employee account is inactive',
+  INVALID_CREDENTIALS: 'Invalid email or password',
+  INVALID_CSRF_TOKEN: 'Invalid CSRF token',
+  SIGN_UP_DISABLED: 'Public sign-up is disabled',
 };
 
 export const AUTHORIZATION_ERRORS = {
   PERMISSION_DENIED: 'Permission denied',
+  POLICY_NOT_CONFIGURED: 'Authorization policy is not configured',
   PERMISSION_NOT_FOUND: 'Permission not found',
   PERMISSION_KEY_EXISTS: 'Permission key already exists',
   ROLE_NAME_EXISTS: 'Role name already exists',

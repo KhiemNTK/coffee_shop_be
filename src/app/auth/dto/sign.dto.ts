@@ -3,10 +3,13 @@ import { z } from 'zod';
 import { EmployeeSchema } from '../../../generated/zod';
 import { withResponse } from '../../../common/interceptors/format-response/format-response.util';
 import { TokenKeys } from '../consts/jwt.const';
+import {
+  ExistingPasswordSchema,
+  NewPasswordSchema,
+} from '../../../common/validation/password.schema';
 
-export const SignInSchema = EmployeeSchema.pick({
-  email: true,
-  password: true,
+export const SignInSchema = EmployeeSchema.pick({ email: true }).extend({
+  password: ExistingPasswordSchema,
 });
 
 const AdditionalSchema = EmployeeSchema.pick({
@@ -16,7 +19,10 @@ const AdditionalSchema = EmployeeSchema.pick({
   phoneNumber: true,
 });
 
-export const SignUpSchema = SignInSchema.extend(AdditionalSchema.shape);
+export const SignUpSchema = SignInSchema.extend({
+  ...AdditionalSchema.shape,
+  password: NewPasswordSchema,
+});
 
 const SignInResponseSchema = withResponse(
   z.object({

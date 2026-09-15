@@ -1,12 +1,12 @@
 import { EmployeeSchema } from '../../../generated/zod';
 import z from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { NewPasswordSchema } from '../../../common/validation/password.schema';
 
 const ForgotPasswordInputSchema = z
   .object({
     email: EmployeeSchema.shape.email.optional(),
     phoneNumber: EmployeeSchema.shape.phoneNumber.optional(),
-    redirectTo: z.url('Redirect URL must be a valid URL'),
   })
   .refine((data) => data.email || data.phoneNumber, {
     message: 'Email or phone number is required',
@@ -18,8 +18,8 @@ export class ForgotPasswordDto extends createZodDto(
 ) {}
 
 const resetPasswordSchema = z.object({
-  token: z.string().min(1, 'Token is required'),
-  password: EmployeeSchema.shape.password,
+  token: z.string().min(32, 'Invalid token').max(128, 'Invalid token'),
+  password: NewPasswordSchema,
 });
 
 export class ResetPasswordDto extends createZodDto(resetPasswordSchema) {}

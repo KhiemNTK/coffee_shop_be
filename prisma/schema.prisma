@@ -307,15 +307,51 @@ model Employee {
   positionId String // MaChucVu
   position   Position @relation(fields: [positionId], references: [id])
 
-  employeeRoles    EmployeeRole[]
-  orderSessions    OrderSession[]
-  invoices         Invoice[]
-  actionLogs       ActionLog[]
-  cashTransactions CashTransaction[]
-  reservations     Reservation[]
-  equipment        Equipment[]
-  printSetting     PrintSetting?
-  shifts           CashierShift[]
+  employeeRoles       EmployeeRole[]
+  orderSessions       OrderSession[]
+  invoices            Invoice[]
+  actionLogs          ActionLog[]
+  cashTransactions    CashTransaction[]
+  reservations        Reservation[]
+  equipment           Equipment[]
+  printSetting        PrintSetting?
+  shifts              CashierShift[]
+  authSessions        AuthSession[]
+  passwordResetTokens PasswordResetToken[]
+}
+
+model AuthSession {
+  id               String    @id @default(uuid())
+  familyId         String
+  refreshTokenHash String    @unique
+  expiresAt        DateTime
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+  revokeReason     String?
+  ipAddress        String?
+  userAgent        String?
+  createdAt        DateTime  @default(now())
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, revokedAt])
+  @@index([familyId, revokedAt])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, usedAt])
+  @@index([expiresAt])
 }
 
 model InventoryCategory {

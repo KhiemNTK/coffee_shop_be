@@ -1,19 +1,23 @@
-import { Controller, Post, Body, Get, Res, UseGuards } from '@nestjs/common';
-import { ApiResponse } from '@nestjs/swagger';
-import { AuthService } from './auth.service';
-import { SignInDto, SignInResponseDto, SignUpDto } from './dto/sign.dto';
-import { SkipAuth } from './auth.decorator';
-import { Cookies } from '../../common/decorators/cookie/cookie.decorator';
-import type { Response } from 'express';
+import { Body, Controller, Get, Post, Req, Res } from '@nestjs/common';
+import { ApiCookieAuth, ApiResponse } from '@nestjs/swagger';
+import type { Request, Response } from 'express';
 import ms from 'ms';
+import { RequirePermissions } from '../authorization/authorization.decorator';
+import { Employee } from '../../common/decorators/employee.decorator';
+import { Cookies } from '../../common/decorators/cookie/cookie.decorator';
 import {
-  COOKIE_CONFIG_DEFAULT,
   CookiesToken,
+  createCsrfToken,
+  getAuthCookieOptions,
+  getCsrfCookieOptions,
 } from '../../common/decorators/cookie/cookie.const';
+import type { AuthRequestMetadata, AuthTokenPair } from '../../common/types';
+import { AuthService } from './auth.service';
+import { SkipAuth } from './auth.decorator';
+import { SkipCsrf } from './csrf.decorator';
 import { TokenKeys } from './consts/jwt.const';
 import { ForgotPasswordDto, ResetPasswordDto } from './dto/password.dto';
-import { Employee } from '../../common/decorators/employee.decorator';
-import { ResetPasswordGuard } from './reset-password.guard';
+import { SignInDto, SignInResponseDto, SignUpDto } from './dto/sign.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -21,99 +25,119 @@ export class AuthController {
 
   @Post('sign-up')
   @SkipAuth()
+  @SkipCsrf()
   async signUp(
-    @Body() signUpDto: SignUpDto,
+    @Body() dto: SignUpDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const data = await this.authService.signUp(signUpDto);
-
-    res.cookie(TokenKeys.ACCESS_TOKEN_KEY, data.accessToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.ACCESS_TOKEN_EXPIRES_IN),
-    });
-    res.cookie(TokenKeys.REFRESH_TOKEN_KEY, data.refreshToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
-    });
-
-    return data;
+    const tokens = await this.authService.signUp(
+      dto,
+      this.getRequestMetadata(req),
+    );
+    this.setAuthCookies(res, tokens);
+    return tokens;
   }
 
   @Post('sign-in')
   @SkipAuth()
+  @SkipCsrf()
   @ApiResponse({ type: SignInResponseDto })
   async signIn(
-    @Body() signInDto: SignInDto,
+    @Body() dto: SignInDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const data = await this.authService.signIn(signInDto);
-    res.cookie(TokenKeys.ACCESS_TOKEN_KEY, data.accessToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.ACCESS_TOKEN_EXPIRES_IN),
-    });
-    res.cookie(TokenKeys.REFRESH_TOKEN_KEY, data.refreshToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
-    });
-    return data;
+    const tokens = await this.authService.signIn(
+      dto,
+      this.getRequestMetadata(req),
+    );
+    this.setAuthCookies(res, tokens);
+    return tokens;
   }
 
   @Get('me')
+  @RequirePermissions()
   getMe(@Employee('employeeId') employeeId: string) {
     return this.authService.getMe(employeeId);
   }
 
   @Get('me/permissions')
+  @RequirePermissions()
   getMyPermissions(@Employee('employeeId') employeeId: string) {
     return this.authService.getMyPermissions(employeeId);
   }
 
-  @Get('logout')
+  @Post('logout')
   @SkipAuth()
-  logout(@Res({ passthrough: true }) res: Response) {
-    res.clearCookie(TokenKeys.ACCESS_TOKEN_KEY, {
-      ...COOKIE_CONFIG_DEFAULT,
-    });
-    res.clearCookie(TokenKeys.REFRESH_TOKEN_KEY, {
-      ...COOKIE_CONFIG_DEFAULT,
-    });
+  @ApiCookieAuth('refreshCookie')
+  async logout(
+    @Cookies(TokenKeys.REFRESH_TOKEN_KEY) refreshToken: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    await this.authService.logout(refreshToken);
+    this.clearAuthCookies(res);
     return { message: 'Logout success!' };
   }
 
-  @Get('refresh-token')
+  @Post('refresh')
   @SkipAuth()
+  @ApiCookieAuth('refreshCookie')
   async refreshToken(
-    @Cookies('refreshToken') refreshToken: string,
+    @Cookies(TokenKeys.REFRESH_TOKEN_KEY) refreshToken: string,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const data = await this.authService.refreshToken(refreshToken);
-    res.cookie(TokenKeys.ACCESS_TOKEN_KEY, data.accessToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.ACCESS_TOKEN_EXPIRES_IN),
-    });
-    res.cookie(TokenKeys.REFRESH_TOKEN_KEY, data.refreshToken, {
-      ...COOKIE_CONFIG_DEFAULT,
-      maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
-    });
-    return data;
+    const tokens = await this.authService.refreshToken(
+      refreshToken,
+      this.getRequestMetadata(req),
+    );
+    this.setAuthCookies(res, tokens);
+    return tokens;
   }
 
   @Post('forgot-password')
   @SkipAuth()
-  async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
-    return this.authService.forgotPassword(forgotPasswordDto);
+  @SkipCsrf()
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
   }
 
   @Post('reset-password')
   @SkipAuth()
-  @UseGuards(ResetPasswordGuard)
-  async resetPassword(
-    @Body() resetPasswordDto: ResetPasswordDto,
-    @Employee('employeeId') employeeId: string,
-  ) {
-    return this.authService.resetPassword(
-      employeeId,
-      resetPasswordDto.password,
+  @SkipCsrf()
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
+  }
+
+  private setAuthCookies(res: Response, tokens: AuthTokenPair) {
+    const authCookieOptions = getAuthCookieOptions();
+    res.cookie(TokenKeys.ACCESS_TOKEN_KEY, tokens.accessToken, {
+      ...authCookieOptions,
+      maxAge: ms(CookiesToken.ACCESS_TOKEN_EXPIRES_IN),
+    });
+    res.cookie(TokenKeys.REFRESH_TOKEN_KEY, tokens.refreshToken, {
+      ...authCookieOptions,
+      maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
+    });
+    res.cookie(
+      TokenKeys.CSRF_TOKEN_KEY,
+      createCsrfToken(),
+      getCsrfCookieOptions(),
     );
+  }
+
+  private clearAuthCookies(res: Response) {
+    const authCookieOptions = getAuthCookieOptions();
+    res.clearCookie(TokenKeys.ACCESS_TOKEN_KEY, authCookieOptions);
+    res.clearCookie(TokenKeys.REFRESH_TOKEN_KEY, authCookieOptions);
+    res.clearCookie(TokenKeys.CSRF_TOKEN_KEY, getCsrfCookieOptions());
+  }
+
+  private getRequestMetadata(req: Request): AuthRequestMetadata {
+    return {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    };
   }
 }
