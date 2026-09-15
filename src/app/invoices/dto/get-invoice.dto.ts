@@ -4,8 +4,7 @@ import { z } from 'zod';
 
 const OptionalDateSchema = z
   .string()
-  .datetime()
-  .or(z.coerce.date())
+  .datetime({ offset: true })
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 

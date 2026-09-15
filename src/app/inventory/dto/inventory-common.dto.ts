@@ -17,8 +17,7 @@ export const PositiveInventoryDecimalInputSchema =
 
 export const OptionalDateSchema = z
   .string()
-  .datetime()
-  .or(z.coerce.date())
+  .datetime({ offset: true })
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 

@@ -12,8 +12,7 @@ export const PromotionDecimalInputSchema = z.union([
 
 export const PromotionDateSchema = z
   .string()
-  .datetime()
-  .or(z.coerce.date())
+  .datetime({ offset: true })
   .transform((value) => new Date(value));
 
 export const OptionalPromotionDateSchema = PromotionDateSchema.optional();
