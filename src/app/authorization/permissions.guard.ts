@@ -26,11 +26,13 @@ export class PermissionsGuard implements CanActivate {
     ]);
     if (isSkipAuth) return true;
 
-    const requiredPermissions =
-      this.reflector.getAllAndOverride<PermissionKey[]>(
-        REQUIRED_PERMISSIONS_KEY,
-        [context.getHandler(), context.getClass()],
-      ) ?? [];
+    const requiredPermissions = this.reflector.getAllAndOverride<
+      PermissionKey[]
+    >(REQUIRED_PERMISSIONS_KEY, [context.getHandler(), context.getClass()]);
+
+    if (requiredPermissions === undefined) {
+      throw new ForbiddenException(AUTHORIZATION_ERRORS.POLICY_NOT_CONFIGURED);
+    }
 
     if (requiredPermissions.length === 0) return true;
 

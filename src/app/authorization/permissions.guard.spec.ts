@@ -33,7 +33,18 @@ describe('PermissionsGuard', () => {
     );
   });
 
-  it('allows phased routes without required permission metadata', async () => {
+  it('rejects routes without authorization metadata', async () => {
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(undefined);
+
+    await expect(
+      guard.canActivate(createContext({ employeeId: 'employee-id' })),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(authorizationService.getAuthorizationContext).not.toHaveBeenCalled();
+  });
+
+  it('allows explicit authenticated-only routes', async () => {
     reflector.getAllAndOverride
       .mockReturnValueOnce(false)
       .mockReturnValueOnce([]);
