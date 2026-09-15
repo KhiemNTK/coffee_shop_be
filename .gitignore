@@ -61,3 +61,4 @@ generated
 
 # Ignore extension VS Code
 *.session.sql
+.agents/
