@@ -1,5 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
-import type { ExecutionContext } from '@nestjs/common';
+import { type ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthService } from './auth.service';
 import { AuthGuard } from './auth.guard';

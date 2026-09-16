@@ -19,8 +19,12 @@ import { AuthorizationService } from '../authorization/authorization.service';
 import { EmployeesService } from '../employees/employees.service';
 import { AuthSessionService } from './auth-session.service';
 import { AuthTokenService } from './auth-token.service';
-import { ForgotPasswordDto, ResetPasswordDto } from './dto/password.dto';
-import { SignInDto, SignUpDto } from './dto/sign.dto';
+import {
+  ForgotPasswordDto,
+  ResetPasswordDto,
+  SignInDto,
+  SignUpDto,
+} from './dto';
 import { PasswordResetService } from './password-reset.service';
 
 @Injectable()

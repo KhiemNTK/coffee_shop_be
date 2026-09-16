@@ -13,12 +13,12 @@ import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
-import { CreatePromotionDto } from './dto/create-promotion.dto';
 import {
+  CreatePromotionDto,
   GetActivePromotionsDto,
   SearchPromotionsDto,
-} from './dto/promotion-common.dto';
-import { UpdatePromotionDto } from './dto/update-promotion.dto';
+  UpdatePromotionDto,
+} from './dto';
 import { PromotionsService } from './promotions.service';
 
 @ApiTags('promotions')

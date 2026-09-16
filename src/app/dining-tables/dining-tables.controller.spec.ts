@@ -3,7 +3,7 @@ import { DiningTablesController } from './dining-tables.controller';
 import { DiningTablesModule } from './dining-tables.module';
 import { AutoMockingModule } from '../../../test/auto-mocking/auto-mocking.module';
 
-describe('EmployeesController', () => {
+describe('DiningTablesController', () => {
   let controller: DiningTablesController;
 
   beforeEach(async () => {

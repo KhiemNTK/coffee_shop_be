@@ -1,6 +1,8 @@
 import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import type { AuthorizationContext, PermissionKey } from '../../common/types';
 import { PermissionCacheService } from './permission-cache.service';

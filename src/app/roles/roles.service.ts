@@ -5,13 +5,20 @@ import {
   Inject,
   ConflictException,
 } from '@nestjs/common';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
-import { CreateRoleDto, ImportRolesDto } from './dto/create-role.dto';
-import { UpdateRoleDto } from './dto/update-role.dto';
-import { ExportRolesDto, GetRolesPaginationDto } from './dto/get-role.dto';
+import {
+  CreateRoleDto,
+  ExportRolesDto,
+  GetRolesPaginationDto,
+  ImportRolesDto,
+  ReplaceRolePermissionsDto,
+  UpdateRoleDto,
+} from './dto';
 import {
   AUTHORIZATION_ERRORS,
   SYSTEM_ERRORS,
@@ -20,7 +27,6 @@ import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.servi
 import { Prisma, Role } from '@prisma/client';
 import { RoleEntity } from './entities/role.entity';
 import { AuthorizationService } from '../authorization/authorization.service';
-import { ReplaceRolePermissionsDto } from './dto/role-permissions.dto';
 @Injectable()
 export class RolesService {
   private roleEntityName = RoleEntity.name;

@@ -4,18 +4,22 @@ import {
   Inject,
   NotFoundException,
 } from '@nestjs/common';
-import { CreateEmployeeDto } from './dto/create-employee.dto';
-import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { Employee, Prisma } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
-import { GetEmployeesPaginationDto } from './dto/get-employee.dto';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
 import { AuthorizationService } from '../authorization/authorization.service';
-import { ReplaceEmployeeRolesDto } from './dto/employee-roles.dto';
 import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import {
+  CreateEmployeeDto,
+  GetEmployeesPaginationDto,
+  ReplaceEmployeeRolesDto,
+  UpdateEmployeeDto,
+} from './dto';
 
 const EMPLOYEE_PUBLIC_SELECT = {
   id: true,

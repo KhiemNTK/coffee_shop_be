@@ -15,20 +15,18 @@ import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import {
   BulkInventoryMovementDto,
-  GetInventoryTransactionsDto,
-  InventoryMovementDto,
-} from './dto/inventory-common.dto';
-import {
   CreateInventoryCategoryDto,
-  GetInventoryCategoriesDto,
-  UpdateInventoryCategoryDto,
-} from './dto/inventory-category.dto';
-import {
   CreateInventoryItemDto,
+  CreateUnitDto,
+  GetInventoryCategoriesDto,
   GetInventoryItemsDto,
+  GetInventoryTransactionsDto,
+  GetUnitsDto,
+  InventoryMovementDto,
+  UpdateInventoryCategoryDto,
   UpdateInventoryItemDto,
-} from './dto/inventory-item.dto';
-import { CreateUnitDto, GetUnitsDto, UpdateUnitDto } from './dto/unit.dto';
+  UpdateUnitDto,
+} from './dto';
 import { InventoryService } from './inventory.service';
 
 @ApiTags('inventory')

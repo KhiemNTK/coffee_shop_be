@@ -9,12 +9,14 @@ import {
   Query,
 } from '@nestjs/common';
 import { PositionsService } from './positions.service';
-import { CreatePositionDto } from './dto/create-position.dto';
-import { UpdatePositionDto } from './dto/update-position.dto';
 import { IDDto } from '../../common/dto/param.dto';
-import { GetPositionsPaginationDto } from './dto/get-position.dto';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import {
+  CreatePositionDto,
+  GetPositionsPaginationDto,
+  UpdatePositionDto,
+} from './dto';
 
 @Controller('positions')
 export class PositionsController {

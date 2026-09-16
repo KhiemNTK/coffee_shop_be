@@ -21,8 +21,10 @@ import {
   TransferDiningTableDto,
   UpdateOrderItemStatusDto,
 } from './dto';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { ORDER_EVENTS } from './events/order.events';
 import { OrderEventsPublisher } from './events/order-events.publisher';
 import { OrderPolicyService } from './order-policy.service';

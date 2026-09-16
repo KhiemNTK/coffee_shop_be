@@ -1,20 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import {
   BulkInventoryMovementDto,
-  GetInventoryTransactionsDto,
-  InventoryMovementDto,
-} from './dto/inventory-common.dto';
-import {
   CreateInventoryCategoryDto,
-  GetInventoryCategoriesDto,
-  UpdateInventoryCategoryDto,
-} from './dto/inventory-category.dto';
-import {
   CreateInventoryItemDto,
+  CreateUnitDto,
+  GetInventoryCategoriesDto,
   GetInventoryItemsDto,
+  GetInventoryTransactionsDto,
+  GetUnitsDto,
+  InventoryMovementDto,
+  UpdateInventoryCategoryDto,
   UpdateInventoryItemDto,
-} from './dto/inventory-item.dto';
-import { CreateUnitDto, GetUnitsDto, UpdateUnitDto } from './dto/unit.dto';
+  UpdateUnitDto,
+} from './dto';
 import { InventoryCategoryService } from './services/inventory-category.service';
 import { InventoryItemService } from './services/inventory-item.service';
 import { InventoryMovementService } from './services/inventory-movement.service';

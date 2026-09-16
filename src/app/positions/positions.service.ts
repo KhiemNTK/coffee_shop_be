@@ -1,10 +1,14 @@
 import { Injectable, Inject, NotFoundException } from '@nestjs/common';
-import { CreatePositionDto } from './dto/create-position.dto';
-import { UpdatePositionDto } from './dto/update-position.dto';
-import { GetPositionsPaginationDto } from './dto/get-position.dto';
+import {
+  CreatePositionDto,
+  GetPositionsPaginationDto,
+  UpdatePositionDto,
+} from './dto';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { Position } from '../../generated/zod';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { SYSTEM_ERRORS } from '../../common/consts/message';

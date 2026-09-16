@@ -10,13 +10,15 @@ import {
   Put,
 } from '@nestjs/common';
 import { EmployeesService } from './employees.service';
-import { CreateEmployeeDto } from './dto/create-employee.dto';
-import { UpdateEmployeeDto } from './dto/update-employee.dto';
 import { IDDto } from '../../common/dto/param.dto';
-import { GetEmployeesPaginationDto } from './dto/get-employee.dto';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
-import { ReplaceEmployeeRolesDto } from './dto/employee-roles.dto';
+import {
+  CreateEmployeeDto,
+  GetEmployeesPaginationDto,
+  ReplaceEmployeeRolesDto,
+  UpdateEmployeeDto,
+} from './dto';
 @Controller('employees')
 export class EmployeesController {
   constructor(private readonly employeesService: EmployeesService) {}

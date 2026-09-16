@@ -6,15 +6,19 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Permission } from '@prisma/client';
-import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { AUTHORIZATION_ERRORS } from '../../common/consts/message';
 import { AuthorizationService } from '../authorization/authorization.service';
-import { CreatePermissionDto } from './dto/create-permission.dto';
-import { GetPermissionsPaginationDto } from './dto/get-permission.dto';
-import { UpdatePermissionDto } from './dto/update-permission.dto';
+import {
+  CreatePermissionDto,
+  GetPermissionsPaginationDto,
+  UpdatePermissionDto,
+} from './dto';
 
 @Injectable()
 export class PermissionsService {

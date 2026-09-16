@@ -6,12 +6,12 @@ import type {
   ExtendedPrismaTransactionClient,
   PromotionEventBase,
 } from '../../common/types';
-import { CreatePromotionDto } from './dto/create-promotion.dto';
 import {
+  CreatePromotionDto,
   GetActivePromotionsDto,
   SearchPromotionsDto,
-} from './dto/promotion-common.dto';
-import { UpdatePromotionDto } from './dto/update-promotion.dto';
+  UpdatePromotionDto,
+} from './dto';
 import { PROMOTION_EVENTS } from './events/promotion.events';
 import { PromotionEventsPublisher } from './events/promotion-events.publisher';
 import { PromotionPolicyService } from './policies/promotion-policy.service';

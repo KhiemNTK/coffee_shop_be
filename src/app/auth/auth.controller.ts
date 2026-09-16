@@ -16,8 +16,13 @@ import { AuthService } from './auth.service';
 import { SkipAuth } from './auth.decorator';
 import { SkipCsrf } from './csrf.decorator';
 import { TokenKeys } from './consts/jwt.const';
-import { ForgotPasswordDto, ResetPasswordDto } from './dto/password.dto';
-import { SignInDto, SignInResponseDto, SignUpDto } from './dto/sign.dto';
+import {
+  ForgotPasswordDto,
+  ResetPasswordDto,
+  SignInDto,
+  SignInResponseDto,
+  SignUpDto,
+} from './dto';
 
 @Controller('auth')
 export class AuthController {

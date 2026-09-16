@@ -11,11 +11,8 @@ import {
   Put,
 } from '@nestjs/common';
 import { RolesService } from './roles.service';
-import { CreateRoleDto } from './dto/create-role.dto';
-import { UpdateRoleDto } from './dto/update-role.dto';
 import { ApiTags } from '@nestjs/swagger';
 import { IDDto } from '../../common/dto/param.dto';
-import { ExportRolesDto, GetRolesPaginationDto } from './dto/get-role.dto';
 import {
   ExportExcel,
   ImportExcel,
@@ -24,7 +21,13 @@ import { Employee } from '../../common/decorators/employee.decorator';
 import type { EmployeeInfo } from '../../common/types';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
-import { ReplaceRolePermissionsDto } from './dto/role-permissions.dto';
+import {
+  CreateRoleDto,
+  ExportRolesDto,
+  GetRolesPaginationDto,
+  ReplaceRolePermissionsDto,
+  UpdateRoleDto,
+} from './dto';
 
 @ApiTags('roles')
 @Controller('roles')

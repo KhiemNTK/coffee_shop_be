@@ -1,5 +1,8 @@
-import { createParamDecorator, ExecutionContext } from '@nestjs/common';
-import { InternalServerErrorException } from '@nestjs/common';
+import {
+  createParamDecorator,
+  type ExecutionContext,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import type { EmployeeInfo } from '../types';
 

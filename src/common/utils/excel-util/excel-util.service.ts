@@ -1,7 +1,6 @@
 import { SYSTEM_ERRORS } from './../../consts/message';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { Workbook } from 'exceljs';
-import type { CellValue, Worksheet } from 'exceljs';
+import { type CellValue, Workbook, type Worksheet } from 'exceljs';
 import { startCase } from 'lodash';
 import { File, GenerateExcelParams } from './dto/excel-util.interface';
 import { camelCase } from 'es-toolkit';

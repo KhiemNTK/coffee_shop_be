@@ -12,9 +12,11 @@ import { ApiTags } from '@nestjs/swagger';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
-import { CreatePermissionDto } from './dto/create-permission.dto';
-import { GetPermissionsPaginationDto } from './dto/get-permission.dto';
-import { UpdatePermissionDto } from './dto/update-permission.dto';
+import {
+  CreatePermissionDto,
+  GetPermissionsPaginationDto,
+  UpdatePermissionDto,
+} from './dto';
 import { PermissionsService } from './permissions.service';
 
 @ApiTags('permissions')

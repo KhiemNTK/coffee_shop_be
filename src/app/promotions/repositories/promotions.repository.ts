@@ -5,8 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { ExtendedPrismaClient } from '../../../common/prisma/prisma.service';
-import { PRISMA_SERVICE_TOKEN } from '../../../common/prisma/prisma.service';
+import {
+  type ExtendedPrismaClient,
+  PRISMA_SERVICE_TOKEN,
+} from '../../../common/prisma/prisma.service';
 import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 
 @Injectable()

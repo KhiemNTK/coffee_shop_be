@@ -12,9 +12,12 @@ import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
-import { CheckoutInvoiceDto, CreateInvoiceDto } from './dto/create-invoice.dto';
-import { GetInvoicesPaginationDto } from './dto/get-invoice.dto';
-import { UpdateInvoicePaymentDto } from './dto/update-invoice.dto';
+import {
+  CheckoutInvoiceDto,
+  CreateInvoiceDto,
+  GetInvoicesPaginationDto,
+  UpdateInvoicePaymentDto,
+} from './dto';
 import { InvoicesService } from './invoices.service';
 
 @ApiTags('invoices')
