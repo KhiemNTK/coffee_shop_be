@@ -34,6 +34,11 @@ describe('OrdersService', () => {
       },
       diningTable: {
         findUnique: jest.fn(),
+        findFirst: jest.fn(),
+        updateMany: jest.fn(),
+      },
+      reservation: {
+        findUnique: jest.fn(),
         updateMany: jest.fn(),
       },
       orderSession: {
@@ -324,7 +329,7 @@ describe('OrdersService', () => {
 
   it('does not open a session when the table cannot be claimed', async () => {
     tx.employee.findUnique.mockResolvedValue({ id: 'employee-id' });
-    tx.diningTable.findUnique.mockResolvedValue({
+    tx.diningTable.findFirst.mockResolvedValue({
       id: 'table-id',
       name: 'A1',
       status: TableStatus.EMPTY,
@@ -365,7 +370,7 @@ describe('OrdersService', () => {
         callback(tx),
       );
     tx.employee.findUnique.mockResolvedValue({ id: 'employee-id' });
-    tx.diningTable.findUnique.mockResolvedValue({
+    tx.diningTable.findFirst.mockResolvedValue({
       id: 'table-id',
       name: 'A1',
       status: TableStatus.EMPTY,
@@ -384,6 +389,47 @@ describe('OrdersService', () => {
     ).resolves.toEqual(session);
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks in a reservation and opens its order session atomically', async () => {
+    const session = {
+      id: 'session-id',
+      tableId: 'table-id',
+      employeeId: 'employee-id',
+      shiftId: null,
+    };
+    tx.reservation.findUnique.mockResolvedValue({
+      id: 1,
+      tableId: 'table-id',
+      guestCount: 3,
+      startsAt: new Date(Date.now() + 5 * 60 * 1000),
+      endsAt: new Date(Date.now() + 65 * 60 * 1000),
+      status: 'PENDING',
+      orderSessionId: null,
+      table: { id: 'table-id', name: 'A1', status: TableStatus.EMPTY },
+    });
+    tx.diningTable.findFirst.mockResolvedValue({
+      id: 'table-id',
+      name: 'A1',
+      status: TableStatus.EMPTY,
+    });
+    tx.diningTable.updateMany.mockResolvedValue({ count: 1 });
+    tx.orderSession.create.mockResolvedValue(session);
+    tx.reservation.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await service.checkInReservation(1, 'employee-id');
+
+    expect(result.orderSession).toBe(session);
+    expect(tx.reservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'ARRIVED',
+          orderSessionId: 'session-id',
+        }),
+      }),
+    );
+    expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
     expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
   });
 

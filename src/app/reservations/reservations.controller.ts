@@ -1,17 +1,23 @@
 import {
+  Body,
   Controller,
   Get,
-  Post,
-  Body,
-  Patch,
   Param,
-  Delete,
+  Patch,
+  Post,
+  Query,
 } from '@nestjs/common';
-import { ReservationsService } from './reservations.service';
-import { CreateReservationDto } from './dto/create-reservation.dto';
-import { UpdateReservationDto } from './dto/update-reservation.dto';
+import { Employee } from '../../common/decorators/employee.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import {
+  CancelReservationDto,
+  CreateReservationDto,
+  GetReservationsDto,
+  ReservationIdDto,
+  UpdateReservationDto,
+} from './dto';
+import { ReservationsService } from './reservations.service';
 
 @Controller('reservations')
 export class ReservationsController {
@@ -19,34 +25,51 @@ export class ReservationsController {
 
   @Post()
   @RequirePermissions(PermissionKeys.RESERVATIONS_CREATE)
-  create(@Body() createReservationDto: CreateReservationDto) {
-    return this.reservationsService.create(createReservationDto);
+  create(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CreateReservationDto,
+  ) {
+    return this.reservationsService.create(employeeId, dto);
   }
 
   @Get()
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
-  findAll() {
-    return this.reservationsService.findAll();
+  findAll(@Query() query: GetReservationsDto) {
+    return this.reservationsService.findAll(query);
   }
 
   @Get(':id')
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
-  findOne(@Param('id') id: string) {
-    return this.reservationsService.findOne(+id);
+  findOne(@Param() { id }: ReservationIdDto) {
+    return this.reservationsService.findOne(id);
   }
 
   @Patch(':id')
   @RequirePermissions(PermissionKeys.RESERVATIONS_UPDATE)
   update(
-    @Param('id') id: string,
-    @Body() updateReservationDto: UpdateReservationDto,
+    @Param() { id }: ReservationIdDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: UpdateReservationDto,
   ) {
-    return this.reservationsService.update(+id, updateReservationDto);
+    return this.reservationsService.update(id, employeeId, dto);
   }
 
-  @Delete(':id')
-  @RequirePermissions(PermissionKeys.RESERVATIONS_DELETE)
-  remove(@Param('id') id: string) {
-    return this.reservationsService.remove(+id);
+  @Post(':id/cancel')
+  @RequirePermissions(PermissionKeys.RESERVATIONS_CANCEL)
+  cancel(
+    @Param() { id }: ReservationIdDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CancelReservationDto,
+  ) {
+    return this.reservationsService.cancel(id, employeeId, dto);
+  }
+
+  @Post(':id/check-in')
+  @RequirePermissions(PermissionKeys.RESERVATIONS_CHECK_IN)
+  checkIn(
+    @Param() { id }: ReservationIdDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.reservationsService.checkIn(id, employeeId);
   }
 }

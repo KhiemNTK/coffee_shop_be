@@ -91,6 +91,13 @@ enum EquipmentStatus {
   LIQUIDATED // Đã thanh lý
 }
 
+enum SettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
 enum ShiftStatus {
   OPEN // Ca đang mở
   CLOSED // Đã chốt ca
@@ -269,13 +276,20 @@ model Unit {
 }
 
 model Equipment {
-  id           String          @id @default(uuid()) // MaThietBi
-  name         String
-  quantity     Int
-  unitPrice    Decimal         @db.Decimal(18, 2)
-  totalAmount  Decimal         @db.Decimal(18, 2)
-  purchaseDate DateTime
-  status       EquipmentStatus @default(IN_USE) // Quản lý vòng đời thiết bị
+  id                String          @id @default(uuid()) // MaThietBi
+  assetCode         String          @unique
+  serialNumber      String?         @unique
+  name              String
+  quantity          Int
+  unitPrice         Decimal         @db.Decimal(18, 2)
+  totalAmount       Decimal         @db.Decimal(18, 2)
+  purchaseDate      DateTime
+  warrantyExpiresAt DateTime?
+  nextMaintenanceAt DateTime?
+  location          String?
+  notes             String?
+  status            EquipmentStatus @default(IN_USE) // Quản lý vòng đời thiết bị
+  liquidatedAt      DateTime?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -286,6 +300,30 @@ model Equipment {
 
   cashTransactionId String?          @unique
   cashTransaction   CashTransaction? @relation(fields: [cashTransactionId], references: [id], onDelete: SetNull)
+
+  lifecycleEvents EquipmentLifecycleEvent[]
+
+  @@index([deletedAt, status])
+  @@index([nextMaintenanceAt])
+}
+
+model EquipmentLifecycleEvent {
+  id         String           @id @default(uuid())
+  fromStatus EquipmentStatus?
+  toStatus   EquipmentStatus
+  reason     String
+  cost       Decimal          @default(0) @db.Decimal(18, 2)
+  occurredAt DateTime         @default(now())
+  createdAt  DateTime         @default(now())
+
+  equipmentId String
+  equipment   Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  @@index([equipmentId, occurredAt])
+  @@index([employeeId])
 }
 
 // =============================================
@@ -319,11 +357,14 @@ model Employee {
   cashTransactions    CashTransaction[]
   reservations        Reservation[]
   equipment           Equipment[]
+  equipmentEvents     EquipmentLifecycleEvent[]
   printSetting        PrintSetting?
   shifts              CashierShift[]
   authSessions        AuthSession[]
   passwordResetTokens PasswordResetToken[]
   inventoryWastes     InventoryWaste[]
+  updatedSettings     SystemSetting[]           @relation("SystemSettingUpdatedBy")
+  settingRevisions    SystemSettingRevision[]   @relation("SystemSettingRevisionEmployee")
 }
 
 model AuthSession {
@@ -406,12 +447,18 @@ model InventoryItem {
 // =============================================
 
 model Reservation {
-  id              Int               @id @default(autoincrement()) // MaCTDatBan
-  customerName    String?
-  phoneNumber     String
-  reservationDate DateTime
-  reservationTime DateTime
-  status          ReservationStatus @default(PENDING) // Trạng thái đặt bàn
+  id                 Int               @id @default(autoincrement()) // MaCTDatBan
+  customerName       String?
+  phoneNumber        String
+  startsAt           DateTime
+  endsAt             DateTime
+  guestCount         Int               @default(1)
+  notes              String?
+  checkedInAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  noShowAt           DateTime?
+  status             ReservationStatus @default(PENDING) // Trạng thái đặt bàn
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -421,6 +468,13 @@ model Reservation {
 
   employeeId String // MaNhanVien
   employee   Employee @relation(fields: [employeeId], references: [id])
+
+  orderSessionId String?       @unique
+  orderSession   OrderSession? @relation(fields: [orderSessionId], references: [id], onDelete: SetNull)
+
+  @@index([status, startsAt])
+  @@index([tableId, startsAt])
+  @@index([phoneNumber])
 }
 
 model CashierShift {
@@ -520,12 +574,46 @@ model InventoryWaste {
 // =============================================
 
 model SystemSetting {
-  id          String  @id @default(uuid()) // MaCaiDat
-  value       String // GiaTri
+  id          String           @id @default(uuid()) // MaCaiDat
+  key         String           @unique
+  value       Json
+  valueType   SettingValueType
   description String? // MoTa
+  isPublic    Boolean          @default(false)
+  isSystem    Boolean          @default(false)
+  version     Int              @default(1)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  updatedById String?
+  updatedBy   Employee? @relation("SystemSettingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  revisions SystemSettingRevision[]
+
+  @@index([deletedAt, key])
+}
+
+model SystemSettingRevision {
+  id          String           @id @default(uuid())
+  version     Int
+  value       Json
+  valueType   SettingValueType
+  description String?
+  isPublic    Boolean
+  createdAt   DateTime         @default(now())
+  deletedAt   DateTime?
+
+  settingId String
+  setting   SystemSetting @relation(fields: [settingId], references: [id], onDelete: Restrict)
+
+  employeeId String?
+  employee   Employee? @relation("SystemSettingRevisionEmployee", fields: [employeeId], references: [id], onDelete: SetNull)
+
+  @@unique([settingId, version])
+  @@index([settingId, createdAt])
+  @@index([employeeId])
 }
 
 // =============================================
@@ -552,6 +640,8 @@ model OrderSession {
 
   shiftId String?
   shift   CashierShift? @relation(fields: [shiftId], references: [id])
+
+  reservation Reservation?
 
   @@index([sessionStatus, createdAt])
   @@index([tableId, sessionStatus])

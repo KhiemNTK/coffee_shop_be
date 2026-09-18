@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import {
   Prisma,
+  ReservationStatus,
   ServeStatus,
   SessionStatus,
   TableStatus,
@@ -37,6 +38,10 @@ import type {
   SplittableOrderItem,
 } from '../../common/types';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
+import {
+  RESERVATION_CHECK_IN_EARLY_MS,
+  RESERVATION_NO_SHOW_GRACE_MS,
+} from '../../common/consts/reservation';
 
 @Injectable()
 export class OrdersService {
@@ -180,83 +185,162 @@ export class OrdersService {
     guestCount,
     shiftId,
   }: OpenSessionInput) {
-    const session = await this.runSerializableTransaction(async (tx) => {
-      const employee = await tx.employee.findUnique({
-        where: { id: employeeId },
+    const session = await this.runSerializableTransaction((tx) =>
+      this.createOrderSession(tx, {
+        tableId,
+        employeeId,
+        guestCount,
+        shiftId,
+      }),
+    );
+
+    this.emitSessionOpened(session);
+
+    return session;
+  }
+
+  async checkInReservation(reservationId: number, employeeId: string) {
+    const result = await this.runSerializableTransaction(async (tx) => {
+      const now = new Date();
+      const reservation = await tx.reservation.findUnique({
+        where: { id: reservationId },
+      });
+      if (!reservation) {
+        throw new NotFoundException(
+          `Reservation with ID ${reservationId} not found.`,
+        );
+      }
+      if (
+        reservation.status !== ReservationStatus.PENDING ||
+        reservation.orderSessionId !== null
+      ) {
+        throw new ConflictException('Reservation is no longer pending.');
+      }
+
+      const checkInOpensAt = new Date(
+        reservation.startsAt.getTime() - RESERVATION_CHECK_IN_EARLY_MS,
+      );
+      const checkInClosesAt = new Date(
+        reservation.startsAt.getTime() + RESERVATION_NO_SHOW_GRACE_MS,
+      );
+      if (now < checkInOpensAt) {
+        throw new BadRequestException(
+          'Check-in opens 30 minutes before the reservation.',
+        );
+      }
+      if (now >= checkInClosesAt) {
+        throw new ConflictException('The reservation check-in window closed.');
+      }
+
+      const session = await this.createOrderSession(tx, {
+        tableId: reservation.tableId,
+        employeeId,
+        guestCount: reservation.guestCount,
+        shiftId: null,
+      });
+      const checkedIn = await tx.reservation.updateMany({
+        where: {
+          id: reservationId,
+          status: ReservationStatus.PENDING,
+          orderSessionId: null,
+        },
+        data: {
+          status: ReservationStatus.ARRIVED,
+          checkedInAt: now,
+          orderSessionId: session.id,
+        },
+      });
+      if (checkedIn.count !== 1) {
+        throw new ConflictException('Reservation status has changed.');
+      }
+
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'RESERVATION_CHECKED_IN',
+          details: {
+            reservationId,
+            orderSessionId: session.id,
+            tableId: reservation.tableId,
+          },
+        },
       });
 
-      if (!employee) {
+      return {
+        reservation: {
+          id: reservation.id,
+          status: ReservationStatus.ARRIVED,
+          checkedInAt: now,
+          orderSessionId: session.id,
+        },
+        orderSession: session,
+      };
+    });
+
+    this.emitSessionOpened(result.orderSession);
+    return result;
+  }
+
+  private async createOrderSession(
+    tx: ExtendedPrismaTransactionClient,
+    { tableId, employeeId, guestCount, shiftId }: OpenSessionInput,
+  ) {
+    await this.assertActiveEmployee(tx, employeeId);
+
+    if (shiftId) {
+      const shift = await tx.cashierShift.findUnique({
+        where: { id: shiftId },
+        select: { id: true },
+      });
+      if (!shift) {
         throw new NotFoundException(
-          `Employee with ID ${employeeId} not found.`,
+          `Cashier shift with ID ${shiftId} not found.`,
+        );
+      }
+    }
+
+    const table = tableId
+      ? await tx.diningTable.findFirst({
+          where: { id: tableId, deletedAt: null },
+          select: { id: true, name: true, status: true },
+        })
+      : null;
+
+    if (tableId) {
+      if (!table) {
+        throw new NotFoundException(
+          `Dining table with ID ${tableId} not found.`,
         );
       }
 
-      if (shiftId) {
-        const shift = await tx.cashierShift.findUnique({
-          where: { id: shiftId },
-        });
-
-        if (!shift) {
-          throw new NotFoundException(
-            `Cashier shift with ID ${shiftId} not found.`,
-          );
-        }
-      }
-
-      const table = tableId
-        ? await tx.diningTable.findUnique({
-            where: { id: tableId },
-          })
-        : null;
-
-      if (tableId) {
-        if (!table) {
-          throw new NotFoundException(
-            `Dining table with ID ${tableId} not found.`,
-          );
-        }
-
-        const claimedTable = await tx.diningTable.updateMany({
-          where: {
-            id: tableId,
-            status: TableStatus.EMPTY,
-          },
-          data: { status: TableStatus.OCCUPIED },
-        });
-
-        if (claimedTable.count !== 1) {
-          throw new BadRequestException(
-            `Cannot open order session because table '${table.name}' is ${table.status}.`,
-          );
-        }
-
-        const activeSession = await tx.orderSession.findFirst({
-          where: {
-            tableId,
-            sessionStatus: SessionStatus.ACTIVE,
-          },
-        });
-
-        if (activeSession) {
-          throw new ConflictException(
-            `Dining table '${table.name}' already has an active order session.`,
-          );
-        }
-      }
-
-      const session = await tx.orderSession.create({
-        data: {
-          tableId: tableId ?? null,
-          employeeId,
-          guestCount,
-          shiftId: shiftId ?? null,
-        },
-        include: this.orderSessionInclude,
+      const claimedTable = await tx.diningTable.updateMany({
+        where: { id: tableId, deletedAt: null, status: TableStatus.EMPTY },
+        data: { status: TableStatus.OCCUPIED },
       });
+      if (claimedTable.count !== 1) {
+        throw new BadRequestException(
+          `Cannot open order session because table '${table.name}' is ${table.status}.`,
+        );
+      }
+    }
 
-      return session;
+    return tx.orderSession.create({
+      data: {
+        tableId: tableId ?? null,
+        employeeId,
+        guestCount,
+        shiftId: shiftId ?? null,
+      },
+      include: this.orderSessionInclude,
     });
+  }
 
+  private emitSessionOpened(session: {
+    id: string;
+    tableId: string | null;
+    employeeId: string;
+    shiftId: string | null;
+  }) {
     this.orderEventsPublisher.emit(ORDER_EVENTS.SESSION_OPENED, {
       ...this.createEventBase([session.tableId]),
       sessionId: session.id,
@@ -264,8 +348,6 @@ export class OrdersService {
       employeeId: session.employeeId,
       shiftId: session.shiftId,
     });
-
-    return session;
   }
 
   async getActiveSessions() {

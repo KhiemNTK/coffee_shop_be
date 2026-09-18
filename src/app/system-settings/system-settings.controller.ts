@@ -1,17 +1,25 @@
 import {
-  Controller,
-  Get,
-  Post,
   Body,
-  Patch,
-  Param,
+  Controller,
   Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
 } from '@nestjs/common';
-import { SystemSettingsService } from './system-settings.service';
-import { CreateSystemSettingDto } from './dto/create-system-setting.dto';
-import { UpdateSystemSettingDto } from './dto/update-system-setting.dto';
 import { PermissionKeys } from '../../common/consts/permission-keys';
+import { Employee } from '../../common/decorators/employee.decorator';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import {
+  CreateSystemSettingDto,
+  DeleteSystemSettingDto,
+  GetSystemSettingRevisionsDto,
+  GetSystemSettingsDto,
+  SystemSettingKeyDto,
+  UpdateSystemSettingDto,
+} from './dto';
+import { SystemSettingsService } from './system-settings.service';
 
 @Controller('system-settings')
 export class SystemSettingsController {
@@ -19,34 +27,55 @@ export class SystemSettingsController {
 
   @Post()
   @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_CREATE)
-  create(@Body() createSystemSettingDto: CreateSystemSettingDto) {
-    return this.systemSettingsService.create(createSystemSettingDto);
+  create(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CreateSystemSettingDto,
+  ) {
+    return this.systemSettingsService.create(employeeId, dto);
   }
 
   @Get()
   @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_READ)
-  findAll() {
-    return this.systemSettingsService.findAll();
+  findAll(@Query() query: GetSystemSettingsDto) {
+    return this.systemSettingsService.findAll(query);
   }
 
-  @Get(':id')
+  @Get(':key')
   @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_READ)
-  findOne(@Param('id') id: string) {
-    return this.systemSettingsService.findOne(+id);
+  findOne(@Param() { key }: SystemSettingKeyDto) {
+    return this.systemSettingsService.findOne(key);
   }
 
-  @Patch(':id')
+  @Get(':key/revisions')
+  @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_READ)
+  findRevisions(
+    @Param() { key }: SystemSettingKeyDto,
+    @Query() query: GetSystemSettingRevisionsDto,
+  ) {
+    return this.systemSettingsService.findRevisions(key, query);
+  }
+
+  @Patch(':key')
   @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_UPDATE)
   update(
-    @Param('id') id: string,
-    @Body() updateSystemSettingDto: UpdateSystemSettingDto,
+    @Param() { key }: SystemSettingKeyDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: UpdateSystemSettingDto,
   ) {
-    return this.systemSettingsService.update(+id, updateSystemSettingDto);
+    return this.systemSettingsService.update(key, employeeId, dto);
   }
 
-  @Delete(':id')
+  @Delete(':key')
   @RequirePermissions(PermissionKeys.SYSTEM_SETTINGS_DELETE)
-  remove(@Param('id') id: string) {
-    return this.systemSettingsService.remove(+id);
+  remove(
+    @Param() { key }: SystemSettingKeyDto,
+    @Employee('employeeId') employeeId: string,
+    @Query() query: DeleteSystemSettingDto,
+  ) {
+    return this.systemSettingsService.remove(
+      key,
+      employeeId,
+      query.expectedVersion,
+    );
   }
 }

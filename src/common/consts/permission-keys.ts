@@ -69,6 +69,8 @@ export const PermissionKeys = {
   RESERVATIONS_CREATE: '/reservations_create',
   RESERVATIONS_UPDATE: '/reservations_update',
   RESERVATIONS_DELETE: '/reservations_delete',
+  RESERVATIONS_CANCEL: '/reservations_cancel',
+  RESERVATIONS_CHECK_IN: '/reservations_check-in',
 
   PROMOTIONS_READ: '/promotions_read',
   PROMOTIONS_CREATE: '/promotions_create',
@@ -79,6 +81,7 @@ export const PermissionKeys = {
   EQUIPMENT_CREATE: '/equipment_create',
   EQUIPMENT_UPDATE: '/equipment_update',
   EQUIPMENT_DELETE: '/equipment_delete',
+  EQUIPMENT_TRANSITION: '/equipment_transition',
 
   SYSTEM_SETTINGS_READ: '/system-settings_read',
   SYSTEM_SETTINGS_CREATE: '/system-settings_create',
