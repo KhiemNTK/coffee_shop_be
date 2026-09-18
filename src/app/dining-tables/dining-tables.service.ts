@@ -26,10 +26,11 @@ export class DiningTablesService {
   ) {}
 
   async createTable(createDto: CreateDiningTableDto) {
-    const { name, status } = createDto;
+    const { name } = createDto;
 
     const existingTable = await this.prisma.diningTable.findFirst({
       where: {
+        deletedAt: null,
         name: { equals: name, mode: 'insensitive' },
       },
     });
@@ -43,16 +44,16 @@ export class DiningTablesService {
     return this.prisma.diningTable.create({
       data: {
         name,
-        status: status ?? TableStatus.EMPTY,
+        status: TableStatus.EMPTY,
       },
     });
   }
 
   async updateTable(id: string, updateDto: UpdateDiningTableDto) {
-    const { name, status } = updateDto;
+    const { name } = updateDto;
 
-    const table = await this.prisma.diningTable.findUnique({
-      where: { id },
+    const table = await this.prisma.diningTable.findFirst({
+      where: { id, deletedAt: null },
     });
 
     if (!table) {
@@ -62,6 +63,8 @@ export class DiningTablesService {
     if (name && name.toLowerCase() !== table.name.toLowerCase()) {
       const duplicateName = await this.prisma.diningTable.findFirst({
         where: {
+          id: { not: id },
+          deletedAt: null,
           name: { equals: name, mode: 'insensitive' },
         },
       });
@@ -77,14 +80,13 @@ export class DiningTablesService {
       where: { id },
       data: {
         name,
-        status,
       },
     });
   }
 
   async deleteTable(id: string) {
-    const table = await this.prisma.diningTable.findUnique({
-      where: { id },
+    const table = await this.prisma.diningTable.findFirst({
+      where: { id, deletedAt: null },
     });
 
     if (!table) {
@@ -97,8 +99,9 @@ export class DiningTablesService {
       );
     }
 
-    await this.prisma.diningTable.delete({
+    await this.prisma.diningTable.update({
       where: { id },
+      data: { deletedAt: new Date() },
     });
 
     this.logger.log(
@@ -109,6 +112,7 @@ export class DiningTablesService {
 
   async getTables() {
     return this.prisma.diningTable.findMany({
+      where: { deletedAt: null },
       include: {
         orderSessions: {
           where: { sessionStatus: SessionStatus.ACTIVE },
