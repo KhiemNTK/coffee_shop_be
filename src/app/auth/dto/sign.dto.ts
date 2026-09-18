@@ -1,22 +1,29 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { EmployeeSchema } from '../../../generated/zod';
 import { withResponse } from '../../../common/interceptors/format-response/format-response.util';
 import { TokenKeys } from '../consts/jwt.const';
 import {
   ExistingPasswordSchema,
   NewPasswordSchema,
 } from '../../../common/validation/password.schema';
+import {
+  EmployeeAddressSchema,
+  EmployeeEmailSchema,
+  EmployeeFullNameSchema,
+  EmployeePhoneNumberSchema,
+  EmployeeUsernameSchema,
+} from '../../../common/validation/employee.schema';
 
-export const SignInSchema = EmployeeSchema.pick({ email: true }).extend({
+export const SignInSchema = z.object({
+  email: EmployeeEmailSchema,
   password: ExistingPasswordSchema,
 });
 
-const AdditionalSchema = EmployeeSchema.pick({
-  fullName: true,
-  address: true,
-  username: true,
-  phoneNumber: true,
+const AdditionalSchema = z.object({
+  fullName: EmployeeFullNameSchema,
+  address: EmployeeAddressSchema.optional().nullable(),
+  username: EmployeeUsernameSchema,
+  phoneNumber: EmployeePhoneNumberSchema.optional().nullable(),
 });
 
 export const SignUpSchema = SignInSchema.extend({

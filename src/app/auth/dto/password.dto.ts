@@ -1,12 +1,15 @@
-import { EmployeeSchema } from '../../../generated/zod';
 import z from 'zod';
 import { createZodDto } from 'nestjs-zod';
 import { NewPasswordSchema } from '../../../common/validation/password.schema';
+import {
+  EmployeeEmailSchema,
+  EmployeePhoneNumberSchema,
+} from '../../../common/validation/employee.schema';
 
 const ForgotPasswordInputSchema = z
   .object({
-    email: EmployeeSchema.shape.email.optional(),
-    phoneNumber: EmployeeSchema.shape.phoneNumber.optional(),
+    email: EmployeeEmailSchema.optional(),
+    phoneNumber: EmployeePhoneNumberSchema.optional().nullable(),
   })
   .refine((data) => data.email || data.phoneNumber, {
     message: 'Email or phone number is required',
