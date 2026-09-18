@@ -26,7 +26,7 @@
     "prisma:migrate:dev": "prisma migrate dev --name init",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
-    "prisma:preflight:p0": "ts-node prisma/preflight/production-baseline.ts",
+    "prisma:preflight": "ts-node prisma/preflight/production-baseline.ts",
     "prisma:generate:prod": "prisma generate --schema=prisma/schema.prod.prisma",
     "prisma:generate:zod": "prisma generate",
     "prisma:seed": "prisma db seed -- --environment dev",

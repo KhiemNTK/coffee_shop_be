@@ -165,7 +165,7 @@ model EmployeeRole {
 model Position {
   id     String  @id @default(uuid())
   name   String
-  salary Decimal
+  salary Decimal @db.Decimal(18, 2)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -190,7 +190,7 @@ model DiningTable {
 model Fund {
   id      String  @id @default(uuid())
   name    String // VD: Tiền mặt tại két, Tài khoản Vietcombank
-  balance Decimal @default(0)
+  balance Decimal @default(0) @db.Decimal(18, 2)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -209,12 +209,15 @@ model MenuCategory {
   deletedAt DateTime?
 
   menuItems MenuItem[]
+
+  @@index([deletedAt, name])
 }
 
 model MenuItem {
-  id    String  @id @default(uuid())
-  name  String
-  price Decimal
+  id          String  @id @default(uuid())
+  name        String
+  price       Decimal @db.Decimal(18, 2)
+  isAvailable Boolean @default(true)
 
   categoryId String
   category   MenuCategory @relation(fields: [categoryId], references: [id])
@@ -225,6 +228,8 @@ model MenuItem {
 
   orderItems  OrderItem[]
   ingredients MenuItemIngredient[]
+
+  @@index([deletedAt, categoryId, isAvailable])
 }
 
 model Promotion {
@@ -233,8 +238,8 @@ model Promotion {
   startDate     DateTime // NgayBatDau
   endDate       DateTime // NgayKetThuc
   discountType  DiscountType
-  discountValue Decimal // Giá trị giảm giá (ví dụ: 10 cho 10% hoặc 50000 cho 50.000đ)
-  maxDiscount   Decimal?
+  discountValue Decimal      @db.Decimal(18, 2) // Giá trị giảm giá (ví dụ: 10 cho 10% hoặc 50000 cho 50.000đ)
+  maxDiscount   Decimal?     @db.Decimal(18, 2)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -267,8 +272,8 @@ model Equipment {
   id           String          @id @default(uuid()) // MaThietBi
   name         String
   quantity     Int
-  unitPrice    Decimal
-  totalAmount  Decimal
+  unitPrice    Decimal         @db.Decimal(18, 2)
+  totalAmount  Decimal         @db.Decimal(18, 2)
   purchaseDate DateTime
   status       EquipmentStatus @default(IN_USE) // Quản lý vòng đời thiết bị
 
@@ -297,7 +302,7 @@ model Employee {
   username    String   @unique // TenDangNhap
   ///FAKE:faker.internet.password()
   password    String // MatKhau
-  salary      Decimal?
+  salary      Decimal? @db.Decimal(18, 2)
   isActive    Boolean  @default(true) // TrangThai
 
   createdAt DateTime  @default(now())
@@ -318,6 +323,7 @@ model Employee {
   shifts              CashierShift[]
   authSessions        AuthSession[]
   passwordResetTokens PasswordResetToken[]
+  inventoryWastes     InventoryWaste[]
 }
 
 model AuthSession {
@@ -372,7 +378,7 @@ model InventoryCategory {
 model InventoryItem {
   id    String  @id @default(uuid()) // MaHangHoa
   name  String // TenHangHoa
-  stock Decimal @default(0) // Số lượng tồn kho hiện tại
+  stock Decimal @default(0) @db.Decimal(18, 4) // Số lượng tồn kho hiện tại
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -386,6 +392,7 @@ model InventoryItem {
 
   ingredients  MenuItemIngredient[]
   transactions InventoryTransaction[]
+  snapshots    OrderItemIngredientSnapshot[]
 
   @@index([categoryId])
   @@index([unitId])
@@ -420,9 +427,9 @@ model CashierShift {
   id                 String      @id @default(uuid())
   openedAt           DateTime    @default(now())
   closedAt           DateTime?
-  startingCash       Decimal     @default(0) // Tiền lẻ có sẵn đầu ca
-  reportedEndingCash Decimal? // Số tiền mặt thu ngân đếm được khi chốt ca
-  actualEndingCash   Decimal? // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
+  startingCash       Decimal     @default(0) @db.Decimal(18, 2) // Tiền lẻ có sẵn đầu ca
+  reportedEndingCash Decimal?    @db.Decimal(18, 2) // Số tiền mặt thu ngân đếm được khi chốt ca
+  actualEndingCash   Decimal?    @db.Decimal(18, 2) // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
   status             ShiftStatus @default(OPEN)
 
   employeeId String // Ai là người giữ ca này
@@ -440,19 +447,20 @@ model MenuItemIngredient {
   inventoryItemId String // MaHangHoa
   inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
 
-  quantity Decimal // DinhLuong
+  quantity Decimal @db.Decimal(18, 4) // DinhLuong
 
   createdAt DateTime @default(now())
 
   @@id([menuItemId, inventoryItemId])
+  @@index([inventoryItemId])
 }
 
 model InventoryTransaction {
   id              String          @id @default(uuid())
   type            InventoryTxType // IMPORT (Nhập), EXPORT (Xuất)
-  quantity        Decimal
-  unitPrice       Decimal?
-  totalAmount     Decimal?
+  quantity        Decimal         @db.Decimal(18, 4)
+  unitPrice       Decimal?        @db.Decimal(18, 2)
+  totalAmount     Decimal?        @db.Decimal(18, 2)
   transactionDate DateTime
   note            String?
 
@@ -461,10 +469,50 @@ model InventoryTransaction {
   inventoryItemId String
   inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id])
 
+  orderItemId String?
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id])
+
+  @@unique([orderItemId, inventoryItemId])
   @@index([inventoryItemId])
   @@index([type, transactionDate])
   @@index([transactionDate])
   @@index([inventoryItemId, transactionDate])
+}
+
+model OrderItemIngredientSnapshot {
+  orderItemId       String
+  inventoryItemId   String
+  inventoryItemName String
+  unitName          String
+  quantityPerItem   Decimal  @db.Decimal(18, 4)
+  totalQuantity     Decimal  @db.Decimal(18, 4)
+  createdAt         DateTime @default(now())
+
+  orderItem     OrderItem       @relation(fields: [orderItemId], references: [id])
+  inventoryItem InventoryItem   @relation(fields: [inventoryItemId], references: [id])
+  waste         InventoryWaste?
+
+  @@id([orderItemId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model InventoryWaste {
+  id              String   @id @default(uuid())
+  orderItemId     String
+  inventoryItemId String
+  quantity        Decimal  @db.Decimal(18, 4)
+  reason          String
+  createdAt       DateTime @default(now())
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  snapshot OrderItemIngredientSnapshot @relation(fields: [orderItemId, inventoryItemId], references: [orderItemId, inventoryItemId])
+
+  @@unique([orderItemId, inventoryItemId])
+  @@index([inventoryItemId, createdAt])
+  @@index([employeeId])
+  @@index([createdAt])
 }
 
 // =============================================
@@ -515,7 +563,7 @@ model OrderSession {
 model OrderItem {
   id          String  @id @default(uuid())
   quantity    Int
-  priceAtTime Decimal // GiaTien tai thoi diem goi
+  priceAtTime Decimal @db.Decimal(18, 2) // GiaTien tai thoi diem goi
   note        String? // Ghi chu (VD: Khong hanh)
 
   serveStatus ServeStatus @default(PENDING) // TrangThaiBep: PENDING, COOKING, SERVED, CANCELLED
@@ -533,6 +581,9 @@ model OrderItem {
   invoiceId String?
   invoice   Invoice? @relation(fields: [invoiceId], references: [id])
 
+  ingredientSnapshots   OrderItemIngredientSnapshot[]
+  inventoryTransactions InventoryTransaction[]
+
   @@index([orderSessionId])
   @@index([menuItemId])
   @@index([invoiceId])
@@ -544,15 +595,15 @@ model OrderItem {
 model Invoice {
   id             String        @id @default(uuid())
   invoiceNumber  String        @unique
-  subTotal       Decimal // Tổng tiền hàng
-  discountAmount Decimal       @default(0) // Tiền giảm giá
-  totalAmount    Decimal // Tiền thực thu
-  amountTendered Decimal? // Tiền khách đưa
-  changeAmount   Decimal? // Tiền thối lại
+  subTotal       Decimal       @db.Decimal(18, 2) // Tổng tiền hàng
+  discountAmount Decimal       @default(0) @db.Decimal(18, 2) // Tiền giảm giá
+  totalAmount    Decimal       @db.Decimal(18, 2) // Tiền thực thu
+  amountTendered Decimal?      @db.Decimal(18, 2) // Tiền khách đưa
+  changeAmount   Decimal?      @db.Decimal(18, 2) // Tiền thối lại
   paymentMethod  PaymentMethod @default(CASH)
   paymentStatus  PaymentStatus @default(PENDING)
-  taxAmount      Decimal       @default(0) // Số tiền thuế
-  taxRate        Decimal       @default(0) // % Thuế (VD: 8, 10)
+  taxAmount      Decimal       @default(0) @db.Decimal(18, 2) // Số tiền thuế
+  taxRate        Decimal       @default(0) @db.Decimal(5, 2) // % Thuế (VD: 8, 10)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -582,7 +633,7 @@ model Invoice {
 model CashTransaction {
   id              String       @id @default(uuid())
   type            CashFlowType // INCOME (Thu), EXPENSE (Chi)
-  amount          Decimal
+  amount          Decimal      @db.Decimal(18, 2)
   description     String
   transactionDate DateTime
 

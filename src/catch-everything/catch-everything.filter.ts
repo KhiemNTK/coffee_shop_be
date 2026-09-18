@@ -28,6 +28,10 @@ const PRISMA_ERROR_MAP: Record<
   },
   P2025: { status: HttpStatus.NOT_FOUND, message: 'Requested data not found.' },
   P2003: { status: HttpStatus.BAD_REQUEST, message: 'Invalid related data.' },
+  P2004: {
+    status: HttpStatus.BAD_REQUEST,
+    message: 'Data violates database constraints.',
+  },
   P2014: {
     status: HttpStatus.BAD_REQUEST,
     message: 'Operation violates data constraints.',
