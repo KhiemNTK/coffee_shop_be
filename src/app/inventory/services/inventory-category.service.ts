@@ -131,16 +131,18 @@ export class InventoryCategoryService {
   }
 
   async remove(id: string, employeeId: string) {
-    await this.inventoryRepository.ensureActiveCategoryExists(id);
-    const linkedItemsCount =
-      await this.inventoryRepository.client.inventoryItem.count({
-        where: { categoryId: id },
-      });
-    this.inventoryPolicy.assertCanDeleteCategory(linkedItemsCount);
-
     await this.inventoryTransactionService.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
-      await tx.inventoryCategory.delete({ where: { id } });
+      await this.inventoryRepository.ensureActiveCategoryExists(id, tx);
+      const linkedItemsCount = await tx.inventoryItem.count({
+        where: { categoryId: id },
+      });
+      this.inventoryPolicy.assertCanDeleteCategory(linkedItemsCount);
+
+      await tx.inventoryCategory.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
       await this.inventoryAuditService.log(tx, {
         employeeId,
         actionType: 'INVENTORY_CATEGORY_DELETED',

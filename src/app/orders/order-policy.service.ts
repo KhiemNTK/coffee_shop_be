@@ -52,4 +52,16 @@ export class OrderPolicyService {
       throw new BadRequestException('Cannot change a cancelled order item.');
     }
   }
+
+  assertServeStatusTransition(current: ServeStatus, next: ServeStatus) {
+    const isAllowed =
+      (current === ServeStatus.PENDING && next === ServeStatus.COOKING) ||
+      (current === ServeStatus.COOKING && next === ServeStatus.SERVED);
+
+    if (!isAllowed) {
+      throw new BadRequestException(
+        `Cannot change order item status from ${current} to ${next}.`,
+      );
+    }
+  }
 }

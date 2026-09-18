@@ -50,10 +50,30 @@ export const BulkInventoryMovementItemSchema = InventoryMovementSchema.extend({
 export const InventoryTransactionsQuerySchema =
   InventoryPaginationSchema.extend({
     inventoryItemId: z.uuid('Invalid UUID for inventory item').optional(),
+    orderItemId: z.uuid('Invalid UUID for order item').optional(),
     type: z.enum(InventoryTxType).optional(),
     transactionFrom: OptionalDateSchema,
     transactionTo: OptionalDateSchema,
   });
+
+export const InventoryWasteQuerySchema = InventoryPaginationSchema.pick({
+  itemPerPage: true,
+  page: true,
+})
+  .extend({
+    inventoryItemId: z.uuid('Invalid UUID for inventory item').optional(),
+    orderItemId: z.uuid('Invalid UUID for order item').optional(),
+    createdFrom: OptionalDateSchema,
+    createdTo: OptionalDateSchema,
+  })
+  .refine(
+    ({ createdFrom, createdTo }) =>
+      !createdFrom || !createdTo || createdFrom <= createdTo,
+    {
+      message: 'createdFrom must be before or equal to createdTo',
+      path: ['createdFrom'],
+    },
+  );
 
 export class InventoryMovementDto extends createZodDto(
   InventoryMovementSchema,
@@ -71,4 +91,8 @@ export class BulkInventoryMovementDto extends createZodDto(
 
 export class GetInventoryTransactionsDto extends createZodDto(
   InventoryTransactionsQuerySchema,
+) {}
+
+export class GetInventoryWasteDto extends createZodDto(
+  InventoryWasteQuerySchema,
 ) {}

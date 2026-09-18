@@ -21,6 +21,7 @@ import {
   GetInventoryCategoriesDto,
   GetInventoryItemsDto,
   GetInventoryTransactionsDto,
+  GetInventoryWasteDto,
   GetUnitsDto,
   InventoryMovementDto,
   UpdateInventoryCategoryDto,
@@ -196,5 +197,11 @@ export class InventoryController {
   @RequirePermissions(PermissionKeys.INVENTORY_READ)
   getTransactions(@Query() query: GetInventoryTransactionsDto) {
     return this.inventoryService.getTransactions(query);
+  }
+
+  @Get('waste')
+  @RequirePermissions(PermissionKeys.INVENTORY_READ)
+  getWaste(@Query() query: GetInventoryWasteDto) {
+    return this.inventoryService.getWaste(query);
   }
 }

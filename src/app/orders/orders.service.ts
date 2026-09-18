@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   Prisma,
@@ -35,6 +36,7 @@ import type {
   OrderEventBase,
   SplittableOrderItem,
 } from '../../common/types';
+import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 
 @Injectable()
 export class OrdersService {
@@ -49,6 +51,7 @@ export class OrdersService {
     private readonly prisma: ExtendedPrismaClient,
     private readonly orderEventsPublisher: OrderEventsPublisher,
     private readonly orderPolicy: OrderPolicyService,
+    private readonly inventoryConsumption: InventoryConsumptionService,
   ) {}
 
   private readonly orderSessionInclude = {
@@ -156,6 +159,19 @@ export class OrdersService {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === 'P2034'
     );
+  }
+
+  private async assertActiveEmployee(
+    tx: ExtendedPrismaTransactionClient,
+    employeeId: string,
+  ) {
+    const employee = await tx.employee.findFirst({
+      where: { id: employeeId, isActive: true, deletedAt: null },
+      select: { id: true },
+    });
+    if (!employee) {
+      throw new UnauthorizedException('Employee is inactive or not found.');
+    }
   }
 
   async openSession({
@@ -300,6 +316,8 @@ export class OrdersService {
           id: {
             in: menuItemIds,
           },
+          deletedAt: null,
+          isAvailable: true,
         },
         select: {
           id: true,
@@ -308,7 +326,9 @@ export class OrdersService {
       })) as MenuItemPriceSnapshot[];
 
       if (menuItems.length !== menuItemIds.length) {
-        throw new NotFoundException('One or more menu items were not found.');
+        throw new NotFoundException(
+          'One or more menu items were not found or are unavailable.',
+        );
       }
 
       const menuItemsById = new Map(
@@ -361,19 +381,16 @@ export class OrdersService {
 
   async updateItemStatus(
     id: string,
+    employeeId: string,
     { serveStatus }: UpdateOrderItemStatusDto,
   ) {
-    if (serveStatus === ServeStatus.CANCELLED) {
-      throw new BadRequestException(
-        'Use the cancel item operation to cancel an order item.',
-      );
-    }
-
     const result = await this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
       const item = await tx.orderItem.findUnique({
         where: { id },
         include: {
           orderSession: true,
+          menuItem: true,
         },
       });
 
@@ -386,6 +403,20 @@ export class OrdersService {
         'Cannot update item status in an inactive order session.',
       );
       this.orderPolicy.assertItemCanBeChanged(item);
+
+      if (item.serveStatus === serveStatus) {
+        return {
+          item,
+          updatedItem: item,
+          inventoryMovements: [],
+          changed: false,
+        };
+      }
+
+      this.orderPolicy.assertServeStatusTransition(
+        item.serveStatus,
+        serveStatus,
+      );
 
       const updateResult = await tx.orderItem.updateMany({
         where: {
@@ -408,6 +439,29 @@ export class OrdersService {
         );
       }
 
+      const inventoryMovements =
+        serveStatus === ServeStatus.COOKING
+          ? await this.inventoryConsumption.consumeOrderItem(tx, item)
+          : [];
+
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_ITEM_STATUS_UPDATED',
+          details: {
+            orderItemId: id,
+            previousStatus: item.serveStatus,
+            currentStatus: serveStatus,
+            inventoryMovements: inventoryMovements.map((movement) => ({
+              inventoryItemId: movement.inventoryItemId,
+              transactionId: movement.transactionId,
+              quantity: movement.quantity.toString(),
+              stockAfter: movement.stockAfter.toString(),
+            })),
+          },
+        },
+      });
+
       const updatedItem = await tx.orderItem.findUnique({
         where: { id },
         include: {
@@ -419,24 +473,32 @@ export class OrdersService {
         throw new NotFoundException(`Order item with ID ${id} not found.`);
       }
 
-      return { item, updatedItem };
+      return { item, updatedItem, inventoryMovements, changed: true };
     });
 
-    this.orderEventsPublisher.emit(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
-      ...this.createEventBase([result.item.orderSession.tableId]),
-      orderItemId: result.updatedItem.id,
-      orderSessionId: result.item.orderSessionId,
-      tableId: result.item.orderSession.tableId,
-      previousStatus: result.item.serveStatus,
-      currentStatus: result.updatedItem.serveStatus,
-      isServed: result.updatedItem.serveStatus === ServeStatus.SERVED,
-    });
+    if (result.changed) {
+      this.inventoryConsumption.emitConsumption(result.inventoryMovements);
+      this.orderEventsPublisher.emit(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        ...this.createEventBase([result.item.orderSession.tableId]),
+        orderItemId: result.updatedItem.id,
+        orderSessionId: result.item.orderSessionId,
+        tableId: result.item.orderSession.tableId,
+        previousStatus: result.item.serveStatus,
+        currentStatus: result.updatedItem.serveStatus,
+        isServed: result.updatedItem.serveStatus === ServeStatus.SERVED,
+      });
+    }
 
     return result.updatedItem;
   }
 
-  async cancelItem(id: string, { reason }: CancelOrderItemDto) {
+  async cancelItem(
+    id: string,
+    employeeId: string,
+    { reason }: CancelOrderItemDto,
+  ) {
     const result = await this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
       const item = await tx.orderItem.findUnique({
         where: { id },
         include: {
@@ -459,6 +521,15 @@ export class OrdersService {
 
       if (item.serveStatus === ServeStatus.CANCELLED) {
         throw new BadRequestException('Order item is already cancelled.');
+      }
+
+      const wasPrepared =
+        item.serveStatus === ServeStatus.COOKING ||
+        item.serveStatus === ServeStatus.SERVED;
+      if (wasPrepared && !reason) {
+        throw new BadRequestException(
+          'A cancellation reason is required for a prepared order item.',
+        );
       }
 
       const note = reason
@@ -488,6 +559,32 @@ export class OrdersService {
           'Order item was changed by another operation. Please refresh and try again.',
         );
       }
+
+      const wasteRecords =
+        wasPrepared && reason
+          ? await this.inventoryConsumption.recordWaste(tx, {
+              orderItemId: id,
+              employeeId,
+              reason,
+            })
+          : [];
+
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_ITEM_CANCELLED',
+          details: {
+            orderItemId: id,
+            previousStatus: item.serveStatus,
+            reason: reason ?? null,
+            waste: wasteRecords.map((waste) => ({
+              inventoryItemId: waste.inventoryItemId,
+              wasteId: waste.id,
+              quantity: waste.quantity.toString(),
+            })),
+          },
+        },
+      });
 
       const updatedItem = await tx.orderItem.findUnique({
         where: { id },
@@ -912,6 +1009,15 @@ export class OrdersService {
         if (payloadItem.quantityToMove > dbItem.quantity) {
           throw new BadRequestException(
             'Cannot move more items than originally ordered.',
+          );
+        }
+
+        if (
+          payloadItem.quantityToMove < dbItem.quantity &&
+          dbItem.serveStatus !== ServeStatus.PENDING
+        ) {
+          throw new BadRequestException(
+            'Processed order items can only be moved as a whole line.',
           );
         }
       }

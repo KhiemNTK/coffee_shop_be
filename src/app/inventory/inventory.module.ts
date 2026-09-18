@@ -13,6 +13,7 @@ import { InventoryMovementService } from './services/inventory-movement.service'
 import { InventoryQueryService } from './services/inventory-query.service';
 import { InventoryTransactionService } from './services/inventory-transaction.service';
 import { UnitService } from './services/unit.service';
+import { InventoryConsumptionService } from './services/inventory-consumption.service';
 
 @Module({
   imports: [PaginationUtilModule, QueryUtilModule],
@@ -27,6 +28,7 @@ import { UnitService } from './services/unit.service';
     UnitService,
     InventoryItemService,
     InventoryMovementService,
+    InventoryConsumptionService,
     InventoryQueryService,
     InventoryEventsPublisher,
   ],
@@ -35,6 +37,7 @@ import { UnitService } from './services/unit.service';
     InventoryMovementService,
     InventoryQueryService,
     InventoryEventsPublisher,
+    InventoryConsumptionService,
   ],
 })
 export class InventoryModule {}

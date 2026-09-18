@@ -63,18 +63,24 @@ export class OrdersController {
   @RequirePermissions(PermissionKeys.ORDERS_ITEMS_UPDATE_STATUS)
   updateItemStatus(
     @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
     @Body() updateItemStatusDto: UpdateOrderItemStatusDto,
   ) {
-    return this.ordersService.updateItemStatus(id, updateItemStatusDto);
+    return this.ordersService.updateItemStatus(
+      id,
+      employeeId,
+      updateItemStatusDto,
+    );
   }
 
   @Patch('items/:id/cancel')
   @RequirePermissions(PermissionKeys.ORDERS_ITEMS_CANCEL)
   cancelItem(
     @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
     @Body() cancelItemDto: CancelOrderItemDto,
   ) {
-    return this.ordersService.cancelItem(id, cancelItemDto);
+    return this.ordersService.cancelItem(id, employeeId, cancelItemDto);
   }
 
   @Delete('sessions/:id')

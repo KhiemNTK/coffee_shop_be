@@ -8,19 +8,26 @@ import {
   SessionStatus,
   TableStatus,
 } from '@prisma/client';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { OrderPolicyService } from './order-policy.service';
+import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 
 describe('OrdersService', () => {
   let service: OrdersService;
   let prisma: any;
   let tx: any;
   let orderEventsPublisher: { emit: jest.Mock; on: jest.Mock };
+  let inventoryConsumption: {
+    consumeOrderItem: jest.Mock;
+    emitConsumption: jest.Mock;
+    recordWaste: jest.Mock;
+  };
 
   beforeEach(async () => {
     tx = {
       employee: {
         findUnique: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue({ id: 'employee-id' }),
       },
       cashierShift: {
         findUnique: jest.fn(),
@@ -46,6 +53,9 @@ describe('OrdersService', () => {
       menuItem: {
         findMany: jest.fn(),
       },
+      actionLog: {
+        create: jest.fn(),
+      },
     };
 
     prisma = {
@@ -62,6 +72,11 @@ describe('OrdersService', () => {
       emit: jest.fn(),
       on: jest.fn(),
     };
+    inventoryConsumption = {
+      consumeOrderItem: jest.fn().mockResolvedValue([]),
+      emitConsumption: jest.fn(),
+      recordWaste: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -75,6 +90,10 @@ describe('OrdersService', () => {
           useValue: orderEventsPublisher,
         },
         OrderPolicyService,
+        {
+          provide: InventoryConsumptionService,
+          useValue: inventoryConsumption,
+        },
       ],
     }).compile();
 
@@ -85,14 +104,108 @@ describe('OrdersService', () => {
     expect(service).toBeDefined();
   });
 
-  it('rejects cancelling an item through updateItemStatus', async () => {
+  it('rejects skipping directly from pending to served', async () => {
+    tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'order-item-id',
+      isPaid: false,
+      invoiceId: null,
+      serveStatus: ServeStatus.PENDING,
+      orderSession: { sessionStatus: SessionStatus.ACTIVE },
+    });
+
     await expect(
-      service.updateItemStatus('order-item-id', {
-        serveStatus: ServeStatus.CANCELLED,
+      service.updateItemStatus('order-item-id', 'employee-id', {
+        serveStatus: ServeStatus.SERVED,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+  });
+
+  it('consumes inventory once when an item starts cooking', async () => {
+    const pendingItem = {
+      id: 'order-item-id',
+      menuItemId: 'menu-item-id',
+      quantity: 2,
+      isPaid: false,
+      invoiceId: null,
+      serveStatus: ServeStatus.PENDING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+      menuItem: { id: 'menu-item-id', name: 'Latte' },
+    };
+    const movement = {
+      inventoryItemId: 'inventory-id',
+      transactionId: 'transaction-id',
+      type: 'EXPORT',
+      quantity: new Prisma.Decimal('0.5'),
+      stockAfter: new Prisma.Decimal('9.5'),
+    };
+    tx.orderItem.findUnique
+      .mockResolvedValueOnce(pendingItem)
+      .mockResolvedValueOnce({
+        ...pendingItem,
+        serveStatus: ServeStatus.COOKING,
+      });
+    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+    inventoryConsumption.consumeOrderItem.mockResolvedValue([movement]);
+
+    const result = await service.updateItemStatus(
+      'order-item-id',
+      'employee-id',
+      { serveStatus: ServeStatus.COOKING },
+    );
+
+    expect(inventoryConsumption.consumeOrderItem).toHaveBeenCalledWith(
+      tx,
+      pendingItem,
+    );
+    expect(tx.actionLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          actionType: 'ORDER_ITEM_STATUS_UPDATED',
+        }),
+      }),
+    );
+    expect(inventoryConsumption.emitConsumption).toHaveBeenCalledWith([
+      movement,
+    ]);
+    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+    expect(result.serveStatus).toBe(ServeStatus.COOKING);
+  });
+
+  it('treats a repeated cooking status request as a no-op', async () => {
+    const cookingItem = {
+      id: 'order-item-id',
+      menuItemId: 'menu-item-id',
+      quantity: 1,
+      isPaid: false,
+      invoiceId: null,
+      serveStatus: ServeStatus.COOKING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+      menuItem: { id: 'menu-item-id', name: 'Latte' },
+    };
+    tx.orderItem.findUnique.mockResolvedValue(cookingItem);
+
+    await expect(
+      service.updateItemStatus('order-item-id', 'employee-id', {
+        serveStatus: ServeStatus.COOKING,
+      }),
+    ).resolves.toEqual(cookingItem);
+
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
   });
 
   it('rejects cancelling a paid order item', async () => {
@@ -109,11 +222,104 @@ describe('OrdersService', () => {
     });
 
     await expect(
-      service.cancelItem('order-item-id', { reason: 'Wrong item' }),
+      service.cancelItem('order-item-id', 'employee-id', {
+        reason: 'Wrong item',
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+  });
+
+  it('requires a reason before cancelling a prepared item', async () => {
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'order-item-id',
+      isPaid: false,
+      invoiceId: null,
+      serveStatus: ServeStatus.COOKING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+    });
+
+    await expect(
+      service.cancelItem('order-item-id', 'employee-id', {}),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.recordWaste).not.toHaveBeenCalled();
+  });
+
+  it('records waste when cancelling a prepared item', async () => {
+    const cookingItem = {
+      id: 'order-item-id',
+      isPaid: false,
+      invoiceId: null,
+      note: null,
+      serveStatus: ServeStatus.COOKING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+    };
+    tx.orderItem.findUnique
+      .mockResolvedValueOnce(cookingItem)
+      .mockResolvedValueOnce({
+        ...cookingItem,
+        serveStatus: ServeStatus.CANCELLED,
+      });
+    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+    inventoryConsumption.recordWaste.mockResolvedValue([
+      {
+        id: 'waste-id',
+        inventoryItemId: 'inventory-id',
+        quantity: new Prisma.Decimal('0.5'),
+      },
+    ]);
+
+    await service.cancelItem('order-item-id', 'employee-id', {
+      reason: 'Customer changed order',
+    });
+
+    expect(inventoryConsumption.recordWaste).toHaveBeenCalledWith(tx, {
+      orderItemId: 'order-item-id',
+      employeeId: 'employee-id',
+      reason: 'Customer changed order',
+    });
+    expect(tx.actionLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ actionType: 'ORDER_ITEM_CANCELLED' }),
+      }),
+    );
+    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('only adds active and available menu items to an order', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      sessionStatus: SessionStatus.ACTIVE,
+    });
+    tx.menuItem.findMany.mockResolvedValue([]);
+
+    await expect(
+      service.addOrderItems('session-id', {
+        items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(tx.menuItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: { in: ['menu-item-id'] },
+          deletedAt: null,
+          isAvailable: true,
+        },
+      }),
+    );
+    expect(tx.orderItem.createManyAndReturn).not.toHaveBeenCalled();
   });
 
   it('does not open a session when the table cannot be claimed', async () => {
@@ -245,5 +451,47 @@ describe('OrdersService', () => {
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.create).not.toHaveBeenCalled();
     expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+  });
+
+  it('rejects partially splitting a processed item', async () => {
+    tx.diningTable.findUnique.mockResolvedValue({
+      id: 'destination-table-id',
+      status: TableStatus.EMPTY,
+    });
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'source-session-id',
+      employeeId: 'employee-id',
+      shiftId: 'shift-id',
+      sessionStatus: SessionStatus.ACTIVE,
+    });
+    tx.orderSession.findFirst.mockResolvedValue(null);
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'order-item-id',
+        menuItemId: 'menu-item-id',
+        orderSessionId: 'source-session-id',
+        isPaid: false,
+        invoiceId: null,
+        serveStatus: ServeStatus.COOKING,
+        quantity: 2,
+      },
+    ]);
+
+    await expect(
+      service.splitTable({
+        sourceOrderSessionId: 'source-session-id',
+        destinationTableId: 'destination-table-id',
+        itemsToMove: [
+          {
+            orderItemId: 'order-item-id',
+            quantityToMove: 1,
+            expectedOriginalQuantity: 2,
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderSession.create).not.toHaveBeenCalled();
   });
 });

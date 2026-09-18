@@ -188,7 +188,10 @@ export class InventoryItemService {
         stock: item.stock,
       });
 
-      await tx.inventoryItem.delete({ where: { id } });
+      await tx.inventoryItem.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
       await this.inventoryAuditService.log(tx, {
         employeeId,
         actionType: 'INVENTORY_ITEM_DELETED',

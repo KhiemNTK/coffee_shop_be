@@ -7,6 +7,7 @@ import {
   GetInventoryCategoriesDto,
   GetInventoryItemsDto,
   GetInventoryTransactionsDto,
+  GetInventoryWasteDto,
   GetUnitsDto,
   InventoryMovementDto,
   UpdateInventoryCategoryDto,
@@ -111,5 +112,9 @@ export class InventoryService {
 
   getTransactions(query: GetInventoryTransactionsDto) {
     return this.queryService.findTransactions(query);
+  }
+
+  getWaste(query: GetInventoryWasteDto) {
+    return this.queryService.findWaste(query);
   }
 }

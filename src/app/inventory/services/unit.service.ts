@@ -103,16 +103,18 @@ export class UnitService {
   }
 
   async remove(id: string, employeeId: string) {
-    await this.inventoryRepository.ensureActiveUnitExists(id);
-    const linkedItemsCount =
-      await this.inventoryRepository.client.inventoryItem.count({
-        where: { unitId: id },
-      });
-    this.inventoryPolicy.assertCanDeleteUnit(linkedItemsCount);
-
     await this.inventoryTransactionService.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
-      await tx.unit.delete({ where: { id } });
+      await this.inventoryRepository.ensureActiveUnitExists(id, tx);
+      const linkedItemsCount = await tx.inventoryItem.count({
+        where: { unitId: id },
+      });
+      this.inventoryPolicy.assertCanDeleteUnit(linkedItemsCount);
+
+      await tx.unit.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
       await this.inventoryAuditService.log(tx, {
         employeeId,
         actionType: 'INVENTORY_UNIT_DELETED',

@@ -3,7 +3,10 @@ import { InventoryTxType, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PaginationUtilService } from '../../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../../common/utils/query-util/query-util.service';
-import { GetInventoryTransactionsDto } from '../dto/inventory-common.dto';
+import {
+  GetInventoryTransactionsDto,
+  GetInventoryWasteDto,
+} from '../dto/inventory-common.dto';
 import { GetInventoryItemsDto } from '../dto/inventory-item.dto';
 import { InventoryRepository } from '../repositories/inventory.repository';
 
@@ -69,6 +72,7 @@ export class InventoryQueryService {
     itemPerPage,
     select,
     inventoryItemId,
+    orderItemId,
     type,
     transactionFrom,
     transactionTo,
@@ -77,6 +81,7 @@ export class InventoryQueryService {
       this.queryUtilService.convertFieldsSelectOption<any>(select);
     const where: Prisma.InventoryTransactionWhereInput = {
       ...(inventoryItemId ? { inventoryItemId } : {}),
+      ...(orderItemId ? { orderItemId } : {}),
       ...(type ? { type: type } : {}),
       ...(transactionFrom || transactionTo
         ? {
@@ -110,13 +115,73 @@ export class InventoryQueryService {
                     category: { select: { id: true, name: true } },
                   },
                 },
+                orderItem: {
+                  select: {
+                    id: true,
+                    orderSessionId: true,
+                    menuItem: { select: { id: true, name: true } },
+                  },
+                },
               },
             }),
         where,
         skip: paging.skip,
         take: paging.itemPerPage,
-        orderBy: { transactionDate: 'desc' },
+        orderBy: [{ transactionDate: 'desc' }, { id: 'desc' }],
       });
+
+    return paging.format(list);
+  }
+
+  async findWaste({
+    page,
+    itemPerPage,
+    inventoryItemId,
+    orderItemId,
+    createdFrom,
+    createdTo,
+  }: GetInventoryWasteDto) {
+    const where: Prisma.InventoryWasteWhereInput = {
+      ...(inventoryItemId ? { inventoryItemId } : {}),
+      ...(orderItemId ? { orderItemId } : {}),
+      ...(createdFrom || createdTo
+        ? {
+            createdAt: {
+              ...(createdFrom ? { gte: createdFrom } : {}),
+              ...(createdTo ? { lte: createdTo } : {}),
+            },
+          }
+        : {}),
+    };
+    const totalItems =
+      await this.inventoryRepository.client.inventoryWaste.count({ where });
+    const paging = this.paginationUtilService.paging({
+      page,
+      itemPerPage,
+      totalItems,
+    });
+    const list = await this.inventoryRepository.client.inventoryWaste.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: {
+        employee: { select: { id: true, fullName: true } },
+        snapshot: {
+          select: {
+            inventoryItemName: true,
+            unitName: true,
+            orderItem: {
+              select: {
+                id: true,
+                orderSessionId: true,
+                menuItem: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+    });
 
     return paging.format(list);
   }
