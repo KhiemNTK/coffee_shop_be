@@ -6,6 +6,9 @@ import {
 } from '../../common/prisma/prisma.service';
 import type {
   ExtendedPrismaTransactionClient,
+  ReportCashRiskOverviewRow,
+  ReportCashVarianceTrendRow,
+  ReportEmployeeCashRiskRow,
   ReportInventoryWasteRow,
   ReportMenuItemRow,
   ReportPaymentMethodRow,
@@ -59,6 +62,7 @@ export class ReportsService {
           period,
           query.topLimit,
         );
+        const cashRisk = await this.getCashRisk(tx, period, query.topLimit);
 
         return {
           summary,
@@ -74,6 +78,7 @@ export class ReportsService {
             unitName: item.unit.name,
           })),
           inventoryWaste,
+          cashRisk,
         };
       },
       {
@@ -107,6 +112,9 @@ export class ReportsService {
         { sheetName: 'Reservations', data: report.reservations },
         { sheetName: 'Low Stock', data: report.lowStockItems },
         { sheetName: 'Inventory Waste', data: report.inventoryWaste },
+        { sheetName: 'Cash Risk Summary', data: [report.cashRisk.overview] },
+        { sheetName: 'Cash Variance', data: report.cashRisk.varianceTrend },
+        { sheetName: 'Employee Cash Risk', data: report.cashRisk.employees },
       ],
     });
   }
@@ -354,6 +362,252 @@ export class ReportsService {
       unitName: row.unitName,
       wasteQuantity: row.wasteQuantity.toFixed(4),
     }));
+  }
+
+  private async getCashRisk(
+    tx: ExtendedPrismaTransactionClient,
+    period: ReportQueryPeriod,
+    limit: number,
+  ) {
+    const overview = await this.getCashRiskOverview(tx, period);
+    const varianceTrend = await this.getCashVarianceTrend(tx, period);
+    const employees = await this.getEmployeeCashRisk(tx, period, limit);
+
+    return { overview, varianceTrend, employees };
+  }
+
+  private async getCashRiskOverview(
+    tx: ExtendedPrismaTransactionClient,
+    period: ReportQueryPeriod,
+  ) {
+    const [row] = await tx.$queryRaw<ReportCashRiskOverviewRow[]>(Prisma.sql`
+      SELECT
+        shift_risk.*,
+        expense_risk.*,
+        handover_risk.*
+      FROM (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE cs."openingDifference" <> 0
+          )::bigint AS "openingDiscrepantShiftCount",
+          COALESCE(SUM(GREATEST(-cs."openingDifference", 0)), 0)::numeric
+            AS "openingShortageAmount",
+          COALESCE(SUM(GREATEST(cs."openingDifference", 0)), 0)::numeric
+            AS "openingOverageAmount",
+          (
+            SELECT COUNT(*)::bigint
+            FROM (
+              SELECT repeated_shift."employeeId"
+              FROM "CashierShift" repeated_shift
+              WHERE repeated_shift."status" = 'CLOSED'
+                AND repeated_shift."closedAt" >= ${period.from}
+                AND repeated_shift."closedAt" < ${period.to}
+              GROUP BY repeated_shift."employeeId"
+              HAVING COUNT(*) FILTER (
+                WHERE repeated_shift."actualEndingCash"
+                  > repeated_shift."reportedEndingCash"
+              ) >= 2
+            ) repeated_employee
+          ) AS "repeatShortageEmployeeCount"
+        FROM "CashierShift" cs
+        WHERE cs."status" = 'CLOSED'
+          AND cs."closedAt" >= ${period.from}
+          AND cs."closedAt" < ${period.to}
+      ) shift_risk
+      CROSS JOIN (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE cer."status" = 'PENDING'
+          )::bigint AS "currentPendingExpenseRequestCount",
+          COALESCE(SUM(cer."amount") FILTER (
+            WHERE cer."status" = 'PENDING'
+          ), 0)::numeric AS "currentPendingExpenseRequestAmount",
+          COUNT(*) FILTER (
+            WHERE cer."status" = 'REJECTED'
+              AND cer."resolvedAt" >= ${period.from}
+              AND cer."resolvedAt" < ${period.to}
+          )::bigint AS "rejectedExpenseRequestCount",
+          COALESCE(SUM(cer."amount") FILTER (
+            WHERE cer."status" = 'REJECTED'
+              AND cer."resolvedAt" >= ${period.from}
+              AND cer."resolvedAt" < ${period.to}
+          ), 0)::numeric AS "rejectedExpenseRequestAmount"
+        FROM "CashExpenseRequest" cer
+        WHERE cer."status" = 'PENDING'
+          OR (
+            cer."status" = 'REJECTED'
+            AND cer."resolvedAt" >= ${period.from}
+            AND cer."resolvedAt" < ${period.to}
+          )
+      ) expense_risk
+      CROSS JOIN (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE ch."status" = 'PENDING'
+          )::bigint AS "currentPendingHandoverCount",
+          COALESCE(SUM(ch."transferAmount") FILTER (
+            WHERE ch."status" = 'PENDING'
+          ), 0)::numeric AS "currentPendingHandoverAmount",
+          COUNT(*) FILTER (
+            WHERE ch."status" = 'APPROVED'
+              AND ch."resolvedAt" >= ${period.from}
+              AND ch."resolvedAt" < ${period.to}
+          )::bigint AS "approvedHandoverCount",
+          COALESCE(SUM(ch."transferAmount") FILTER (
+            WHERE ch."status" = 'APPROVED'
+              AND ch."resolvedAt" >= ${period.from}
+              AND ch."resolvedAt" < ${period.to}
+          ), 0)::numeric AS "approvedHandoverAmount"
+        FROM "CashHandover" ch
+        WHERE ch."status" = 'PENDING'
+          OR (
+            ch."status" = 'APPROVED'
+            AND ch."resolvedAt" >= ${period.from}
+            AND ch."resolvedAt" < ${period.to}
+          )
+      ) handover_risk
+    `);
+
+    return {
+      openingDiscrepantShiftCount: Number(
+        row?.openingDiscrepantShiftCount ?? 0,
+      ),
+      openingShortageAmount: this.money(row?.openingShortageAmount),
+      openingOverageAmount: this.money(row?.openingOverageAmount),
+      repeatShortageEmployeeCount: Number(
+        row?.repeatShortageEmployeeCount ?? 0,
+      ),
+      currentPendingExpenseRequestCount: Number(
+        row?.currentPendingExpenseRequestCount ?? 0,
+      ),
+      currentPendingExpenseRequestAmount: this.money(
+        row?.currentPendingExpenseRequestAmount,
+      ),
+      rejectedExpenseRequestCount: Number(
+        row?.rejectedExpenseRequestCount ?? 0,
+      ),
+      rejectedExpenseRequestAmount: this.money(
+        row?.rejectedExpenseRequestAmount,
+      ),
+      currentPendingHandoverCount: Number(
+        row?.currentPendingHandoverCount ?? 0,
+      ),
+      currentPendingHandoverAmount: this.money(
+        row?.currentPendingHandoverAmount,
+      ),
+      approvedHandoverCount: Number(row?.approvedHandoverCount ?? 0),
+      approvedHandoverAmount: this.money(row?.approvedHandoverAmount),
+    };
+  }
+
+  private async getCashVarianceTrend(
+    tx: ExtendedPrismaTransactionClient,
+    period: ReportQueryPeriod,
+  ) {
+    const format =
+      period.granularity === 'hour' ? 'YYYY-MM-DD HH24:00' : 'YYYY-MM-DD';
+    const rows = await tx.$queryRaw<ReportCashVarianceTrendRow[]>(Prisma.sql`
+      SELECT
+        to_char(
+          date_trunc(
+            ${period.granularity},
+            cs."closedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${period.timeZone}
+          ),
+          ${format}
+        ) AS "bucket",
+        COUNT(*)::bigint AS "closedShiftCount",
+        COUNT(*) FILTER (
+          WHERE cs."reportedEndingCash" <> cs."actualEndingCash"
+        )::bigint AS "discrepantShiftCount",
+        COALESCE(SUM(GREATEST(
+          cs."actualEndingCash" - cs."reportedEndingCash",
+          0
+        )), 0)::numeric AS "cashShortageAmount",
+        COALESCE(SUM(GREATEST(
+          cs."reportedEndingCash" - cs."actualEndingCash",
+          0
+        )), 0)::numeric AS "cashOverageAmount"
+      FROM "CashierShift" cs
+      WHERE cs."status" = 'CLOSED'
+        AND cs."closedAt" >= ${period.from}
+        AND cs."closedAt" < ${period.to}
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `);
+
+    return rows.map((row) => ({
+      bucket: row.bucket,
+      closedShiftCount: Number(row.closedShiftCount),
+      discrepantShiftCount: Number(row.discrepantShiftCount),
+      cashShortageAmount: this.money(row.cashShortageAmount),
+      cashOverageAmount: this.money(row.cashOverageAmount),
+    }));
+  }
+
+  private async getEmployeeCashRisk(
+    tx: ExtendedPrismaTransactionClient,
+    period: ReportQueryPeriod,
+    limit: number,
+  ) {
+    const rows = await tx.$queryRaw<ReportEmployeeCashRiskRow[]>(Prisma.sql`
+      SELECT
+        e."id" AS "employeeId",
+        e."fullName" AS "employeeName",
+        COUNT(*)::bigint AS "closedShiftCount",
+        COUNT(*) FILTER (
+          WHERE cs."actualEndingCash" > cs."reportedEndingCash"
+        )::bigint AS "shortageShiftCount",
+        COUNT(*) FILTER (
+          WHERE cs."reportedEndingCash" > cs."actualEndingCash"
+        )::bigint AS "overageShiftCount",
+        COALESCE(SUM(GREATEST(
+          cs."actualEndingCash" - cs."reportedEndingCash",
+          0
+        )), 0)::numeric AS "totalShortageAmount",
+        COALESCE(SUM(GREATEST(
+          cs."reportedEndingCash" - cs."actualEndingCash",
+          0
+        )), 0)::numeric AS "totalOverageAmount",
+        COALESCE(SUM(GREATEST(-cs."openingDifference", 0)), 0)::numeric
+          AS "openingShortageAmount",
+        COALESCE(SUM(GREATEST(cs."openingDifference", 0)), 0)::numeric
+          AS "openingOverageAmount"
+      FROM "CashierShift" cs
+      JOIN "Employee" e ON e."id" = cs."employeeId"
+      WHERE cs."status" = 'CLOSED'
+        AND cs."closedAt" >= ${period.from}
+        AND cs."closedAt" < ${period.to}
+      GROUP BY e."id", e."fullName"
+      HAVING COUNT(*) FILTER (
+        WHERE cs."reportedEndingCash" <> cs."actualEndingCash"
+          OR cs."openingDifference" <> 0
+      ) > 0
+      ORDER BY "totalShortageAmount" DESC,
+        "shortageShiftCount" DESC,
+        e."fullName" ASC
+      LIMIT ${limit}
+    `);
+
+    return rows.map((row) => {
+      const closedShiftCount = Number(row.closedShiftCount);
+      const shortageShiftCount = Number(row.shortageShiftCount);
+
+      return {
+        employeeId: row.employeeId,
+        employeeName: row.employeeName,
+        closedShiftCount,
+        shortageShiftCount,
+        shortageRatePercent: (
+          (shortageShiftCount / closedShiftCount) *
+          100
+        ).toFixed(2),
+        overageShiftCount: Number(row.overageShiftCount),
+        totalShortageAmount: this.money(row.totalShortageAmount),
+        totalOverageAmount: this.money(row.totalOverageAmount),
+        openingShortageAmount: this.money(row.openingShortageAmount),
+        openingOverageAmount: this.money(row.openingOverageAmount),
+      };
+    });
   }
 
   private resolvePeriod(query: GetDashboardReportDto): ReportQueryPeriod {

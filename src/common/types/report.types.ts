@@ -64,3 +64,38 @@ export interface ReportInventoryWasteRow {
   unitName: string;
   wasteQuantity: Decimal;
 }
+
+export interface ReportCashRiskOverviewRow {
+  openingDiscrepantShiftCount: bigint;
+  openingShortageAmount: Decimal;
+  openingOverageAmount: Decimal;
+  repeatShortageEmployeeCount: bigint;
+  currentPendingExpenseRequestCount: bigint;
+  currentPendingExpenseRequestAmount: Decimal;
+  rejectedExpenseRequestCount: bigint;
+  rejectedExpenseRequestAmount: Decimal;
+  currentPendingHandoverCount: bigint;
+  currentPendingHandoverAmount: Decimal;
+  approvedHandoverCount: bigint;
+  approvedHandoverAmount: Decimal;
+}
+
+export interface ReportEmployeeCashRiskRow {
+  employeeId: string;
+  employeeName: string;
+  closedShiftCount: bigint;
+  shortageShiftCount: bigint;
+  overageShiftCount: bigint;
+  totalShortageAmount: Decimal;
+  totalOverageAmount: Decimal;
+  openingShortageAmount: Decimal;
+  openingOverageAmount: Decimal;
+}
+
+export interface ReportCashVarianceTrendRow {
+  bucket: string;
+  closedShiftCount: bigint;
+  discrepantShiftCount: bigint;
+  cashShortageAmount: Decimal;
+  cashOverageAmount: Decimal;
+}

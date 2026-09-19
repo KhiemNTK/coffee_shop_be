@@ -92,6 +92,44 @@ describe('ReportsService', () => {
           unitName: 'kg',
           wasteQuantity: new Prisma.Decimal('0.125'),
         },
+      ])
+      .mockResolvedValueOnce([
+        {
+          openingDiscrepantShiftCount: 1n,
+          openingShortageAmount: new Prisma.Decimal('10000'),
+          openingOverageAmount: new Prisma.Decimal('0'),
+          repeatShortageEmployeeCount: 1n,
+          currentPendingExpenseRequestCount: 2n,
+          currentPendingExpenseRequestAmount: new Prisma.Decimal('300000'),
+          rejectedExpenseRequestCount: 1n,
+          rejectedExpenseRequestAmount: new Prisma.Decimal('50000'),
+          currentPendingHandoverCount: 1n,
+          currentPendingHandoverAmount: new Prisma.Decimal('700000'),
+          approvedHandoverCount: 3n,
+          approvedHandoverAmount: new Prisma.Decimal('2100000'),
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          bucket: '2026-01-01',
+          closedShiftCount: 2n,
+          discrepantShiftCount: 1n,
+          cashShortageAmount: new Prisma.Decimal('5000'),
+          cashOverageAmount: new Prisma.Decimal('0'),
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          employeeId: 'employee-id',
+          employeeName: 'Cashier',
+          closedShiftCount: 2n,
+          shortageShiftCount: 1n,
+          overageShiftCount: 0n,
+          totalShortageAmount: new Prisma.Decimal('5000'),
+          totalOverageAmount: new Prisma.Decimal('0'),
+          openingShortageAmount: new Prisma.Decimal('10000'),
+          openingOverageAmount: new Prisma.Decimal('0'),
+        },
       ]);
     tx.inventoryItem.findMany.mockResolvedValue([
       {
@@ -142,6 +180,39 @@ describe('ReportsService', () => {
     expect(result.reservations).toHaveLength(4);
     expect(result.lowStockItems[0].stock).toBe('2.5000');
     expect(result.inventoryWaste[0].wasteQuantity).toBe('0.1250');
+    expect(result.cashRisk.overview).toEqual({
+      openingDiscrepantShiftCount: 1,
+      openingShortageAmount: '10000.00',
+      openingOverageAmount: '0.00',
+      repeatShortageEmployeeCount: 1,
+      currentPendingExpenseRequestCount: 2,
+      currentPendingExpenseRequestAmount: '300000.00',
+      rejectedExpenseRequestCount: 1,
+      rejectedExpenseRequestAmount: '50000.00',
+      currentPendingHandoverCount: 1,
+      currentPendingHandoverAmount: '700000.00',
+      approvedHandoverCount: 3,
+      approvedHandoverAmount: '2100000.00',
+    });
+    expect(result.cashRisk.varianceTrend[0]).toEqual({
+      bucket: '2026-01-01',
+      closedShiftCount: 2,
+      discrepantShiftCount: 1,
+      cashShortageAmount: '5000.00',
+      cashOverageAmount: '0.00',
+    });
+    expect(result.cashRisk.employees[0]).toEqual({
+      employeeId: 'employee-id',
+      employeeName: 'Cashier',
+      closedShiftCount: 2,
+      shortageShiftCount: 1,
+      shortageRatePercent: '50.00',
+      overageShiftCount: 0,
+      totalShortageAmount: '5000.00',
+      totalOverageAmount: '0.00',
+      openingShortageAmount: '10000.00',
+      openingOverageAmount: '0.00',
+    });
   });
 
   it('rejects unbounded and invalid report ranges before querying', async () => {
@@ -179,6 +250,9 @@ describe('ReportsService', () => {
         expect.objectContaining({ sheetName: 'Summary' }),
         expect.objectContaining({ sheetName: 'Promotions' }),
         expect.objectContaining({ sheetName: 'Inventory Waste' }),
+        expect.objectContaining({ sheetName: 'Cash Risk Summary' }),
+        expect.objectContaining({ sheetName: 'Cash Variance' }),
+        expect.objectContaining({ sheetName: 'Employee Cash Risk' }),
       ]),
     });
   });

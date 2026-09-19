@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
+  CashExpenseRequestStatus,
+  FundType,
   PaymentMethod,
   PaymentStatus,
   Prisma,
@@ -7,7 +9,6 @@ import {
   ReservationStatus,
   ServeStatus,
   ShiftStatus,
-  FundType,
 } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import { ExcelUtilService } from '../src/common/utils/excel-util/excel-util.service';
@@ -24,6 +25,7 @@ describe('Reports queries (e2e)', () => {
 
   let positionId: string | undefined;
   let employeeId: string | undefined;
+  let reviewerEmployeeId: string | undefined;
   let tableId: string | undefined;
   let menuCategoryId: string | undefined;
   let menuItemId: string | undefined;
@@ -35,8 +37,41 @@ describe('Reports queries (e2e)', () => {
   let inventoryItemId: string | undefined;
   let fundId: string | undefined;
   let shiftId: string | undefined;
+  const shiftIds: string[] = [];
+  let pendingExpenseBaselineCount = 0;
+  let pendingExpenseBaselineAmount = new Prisma.Decimal(0);
+  let pendingHandoverBaselineCount = 0;
+  let pendingHandoverBaselineAmount = new Prisma.Decimal(0);
+  let approvedHandoverBaselineCount = 0;
+  let approvedHandoverBaselineAmount = new Prisma.Decimal(0);
 
   beforeAll(async () => {
+    const [pendingHandoverBaseline, approvedHandoverBaseline] =
+      await Promise.all([
+        prisma.cashHandover.aggregate({
+          where: { status: 'PENDING' },
+          _count: true,
+          _sum: { transferAmount: true },
+        }),
+        prisma.cashHandover.aggregate({
+          where: {
+            status: 'APPROVED',
+            resolvedAt: {
+              gte: new Date('2026-06-01T00:00:00.000Z'),
+              lt: new Date('2026-06-03T00:00:00.000Z'),
+            },
+          },
+          _count: true,
+          _sum: { transferAmount: true },
+        }),
+      ]);
+    pendingHandoverBaselineCount = pendingHandoverBaseline._count;
+    pendingHandoverBaselineAmount =
+      pendingHandoverBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+    approvedHandoverBaselineCount = approvedHandoverBaseline._count;
+    approvedHandoverBaselineAmount =
+      approvedHandoverBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+
     const position = await prisma.position.create({
       data: { name: `Report Position ${suffix}`, salary: 0 },
     });
@@ -52,6 +87,17 @@ describe('Reports queries (e2e)', () => {
       },
     });
     employeeId = employee.id;
+
+    const reviewer = await prisma.employee.create({
+      data: {
+        email: `report-reviewer-${suffix}@example.com`,
+        username: `report-reviewer-${suffix}`,
+        fullName: 'Report Test Reviewer',
+        password: 'not-used-in-report-tests',
+        positionId,
+      },
+    });
+    reviewerEmployeeId = reviewer.id;
 
     const fund = await prisma.fund.create({
       data: {
@@ -69,11 +115,76 @@ describe('Reports queries (e2e)', () => {
         openedAt: new Date(occurredAt.getTime() - 8 * 60 * 60 * 1000),
         closedAt: occurredAt,
         startingCash: new Prisma.Decimal('100'),
+        expectedStartingCash: new Prisma.Decimal('100'),
+        openingDifference: new Prisma.Decimal(0),
         actualEndingCash: new Prisma.Decimal('100'),
         reportedEndingCash: new Prisma.Decimal('90'),
       },
     });
     shiftId = shift.id;
+    shiftIds.push(shift.id);
+
+    const repeatedShortageShift = await prisma.cashierShift.create({
+      data: {
+        employeeId,
+        fundId,
+        status: ShiftStatus.CLOSED,
+        openedAt: new Date(occurredAt.getTime() - 4 * 60 * 60 * 1000),
+        closedAt: new Date(occurredAt.getTime() + 30 * 60 * 1000),
+        startingCash: new Prisma.Decimal('90'),
+        expectedStartingCash: new Prisma.Decimal('100'),
+        openingDifference: new Prisma.Decimal('-10'),
+        actualEndingCash: new Prisma.Decimal('100'),
+        reportedEndingCash: new Prisma.Decimal('95'),
+      },
+    });
+    shiftIds.push(repeatedShortageShift.id);
+
+    const pendingExpenseBaseline = await prisma.cashExpenseRequest.aggregate({
+      where: { status: CashExpenseRequestStatus.PENDING },
+      _count: true,
+      _sum: { amount: true },
+    });
+    pendingExpenseBaselineCount = pendingExpenseBaseline._count;
+    pendingExpenseBaselineAmount =
+      pendingExpenseBaseline._sum.amount ?? new Prisma.Decimal(0);
+
+    const openShift = await prisma.cashierShift.create({
+      data: {
+        employeeId: reviewerEmployeeId,
+        fundId,
+        status: ShiftStatus.OPEN,
+        startingCash: new Prisma.Decimal(0),
+        expectedStartingCash: new Prisma.Decimal(0),
+        openingDifference: new Prisma.Decimal(0),
+      },
+    });
+    shiftIds.push(openShift.id);
+
+    await prisma.cashExpenseRequest.createMany({
+      data: [
+        {
+          amount: new Prisma.Decimal('30'),
+          description: 'Rejected report test expense',
+          status: CashExpenseRequestStatus.REJECTED,
+          resolutionNote: 'Not a valid business expense',
+          resolvedAt: occurredAt,
+          createdAt: occurredAt,
+          requestedById: employeeId,
+          resolvedById: reviewerEmployeeId,
+          shiftId: repeatedShortageShift.id,
+          fundId,
+        },
+        {
+          amount: new Prisma.Decimal('20'),
+          description: 'Pending report test expense',
+          status: CashExpenseRequestStatus.PENDING,
+          requestedById: reviewerEmployeeId,
+          shiftId: openShift.id,
+          fundId,
+        },
+      ],
+    });
 
     const table = await prisma.diningTable.create({
       data: { name: `Report Table ${suffix}` },
@@ -235,8 +346,13 @@ describe('Reports queries (e2e)', () => {
           where: { id: orderSessionId },
         });
       }
-      if (shiftId) {
-        await prisma.cashierShift.deleteMany({ where: { id: shiftId } });
+      if (shiftIds.length > 0) {
+        await prisma.cashExpenseRequest.deleteMany({
+          where: { shiftId: { in: shiftIds } },
+        });
+        await prisma.cashierShift.deleteMany({
+          where: { id: { in: shiftIds } },
+        });
       }
       if (fundId) await prisma.fund.deleteMany({ where: { id: fundId } });
       if (promotionId) {
@@ -254,7 +370,12 @@ describe('Reports queries (e2e)', () => {
         await prisma.diningTable.deleteMany({ where: { id: tableId } });
       }
       if (employeeId) {
-        await prisma.employee.deleteMany({ where: { id: employeeId } });
+        const employeeIds = reviewerEmployeeId
+          ? [employeeId, reviewerEmployeeId]
+          : [employeeId];
+        await prisma.employee.deleteMany({
+          where: { id: { in: employeeIds } },
+        });
       }
       if (positionId) {
         await prisma.position.deleteMany({ where: { id: positionId } });
@@ -283,9 +404,9 @@ describe('Reports queries (e2e)', () => {
       averageTicket: '97.20',
       cancelledItemCount: 1,
       wasteEntryCount: 1,
-      closedShiftCount: 1,
-      discrepantShiftCount: 1,
-      cashShortageAmount: '10.00',
+      closedShiftCount: 2,
+      discrepantShiftCount: 2,
+      cashShortageAmount: '15.00',
       cashOverageAmount: '0.00',
     });
     expect(report.trend).toEqual([
@@ -315,6 +436,43 @@ describe('Reports queries (e2e)', () => {
         wasteQuantity: '0.2500',
       }),
     );
+    expect(report.cashRisk.overview).toEqual({
+      openingDiscrepantShiftCount: 1,
+      openingShortageAmount: '10.00',
+      openingOverageAmount: '0.00',
+      repeatShortageEmployeeCount: 1,
+      currentPendingExpenseRequestCount: pendingExpenseBaselineCount + 1,
+      currentPendingExpenseRequestAmount: pendingExpenseBaselineAmount
+        .plus(20)
+        .toFixed(2),
+      rejectedExpenseRequestCount: 1,
+      rejectedExpenseRequestAmount: '30.00',
+      currentPendingHandoverCount: pendingHandoverBaselineCount,
+      currentPendingHandoverAmount: pendingHandoverBaselineAmount.toFixed(2),
+      approvedHandoverCount: approvedHandoverBaselineCount,
+      approvedHandoverAmount: approvedHandoverBaselineAmount.toFixed(2),
+    });
+    expect(report.cashRisk.varianceTrend).toEqual([
+      {
+        bucket: '2026-06-02',
+        closedShiftCount: 2,
+        discrepantShiftCount: 2,
+        cashShortageAmount: '15.00',
+        cashOverageAmount: '0.00',
+      },
+    ]);
+    expect(report.cashRisk.employees[0]).toEqual({
+      employeeId,
+      employeeName: 'Report Test Employee',
+      closedShiftCount: 2,
+      shortageShiftCount: 2,
+      shortageRatePercent: '100.00',
+      overageShiftCount: 0,
+      totalShortageAmount: '15.00',
+      totalOverageAmount: '0.00',
+      openingShortageAmount: '10.00',
+      openingOverageAmount: '0.00',
+    });
   });
 
   it('generates a bounded Excel workbook from the same report data', async () => {
