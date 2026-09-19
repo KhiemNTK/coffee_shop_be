@@ -35,6 +35,8 @@ import { PermissionsModule } from './permissions/permissions.module';
 import { CsrfGuard } from './auth/csrf.guard';
 import { HealthModule } from './health/health.module';
 import { validateEnvironment } from '../config/environment';
+import { ReportsModule } from './reports/reports.module';
+import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -63,6 +65,8 @@ import { validateEnvironment } from '../config/environment';
     MailUtilModule,
     OrdersModule,
     HealthModule,
+    ReportsModule,
+    CashierShiftsModule,
   ],
   controllers: [AppController],
   providers: [

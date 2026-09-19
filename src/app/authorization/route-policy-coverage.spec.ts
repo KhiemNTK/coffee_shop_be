@@ -4,6 +4,8 @@ import { basename, join, resolve } from 'node:path';
 import { AppController } from '../app.controller';
 import { AuthController } from '../auth/auth.controller';
 import { IS_SKIP_AUTH } from '../auth/auth.decorator';
+import { CashierShiftsController } from '../cashier-shifts/cashier-shifts.controller';
+import { FundsController } from '../cashier-shifts/funds.controller';
 import { DiningTablesController } from '../dining-tables/dining-tables.controller';
 import { EmployeesController } from '../employees/employees.controller';
 import { EquipmentController } from '../equipment/equipment.controller';
@@ -15,6 +17,7 @@ import { OrdersController } from '../orders/orders.controller';
 import { PermissionsController } from '../permissions/permissions.controller';
 import { PositionsController } from '../positions/positions.controller';
 import { PromotionsController } from '../promotions/promotions.controller';
+import { ReportsController } from '../reports/reports.controller';
 import { ReservationsController } from '../reservations/reservations.controller';
 import { RolesController } from '../roles/roles.controller';
 import { SystemSettingsController } from '../system-settings/system-settings.controller';
@@ -23,9 +26,11 @@ import { REQUIRED_PERMISSIONS_KEY } from './authorization.decorator';
 const controllers = [
   AppController,
   AuthController,
+  CashierShiftsController,
   DiningTablesController,
   EmployeesController,
   EquipmentController,
+  FundsController,
   HealthController,
   InventoryController,
   InvoicesController,
@@ -34,6 +39,7 @@ const controllers = [
   PermissionsController,
   PositionsController,
   PromotionsController,
+  ReportsController,
   ReservationsController,
   RolesController,
   SystemSettingsController,

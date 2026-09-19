@@ -87,4 +87,16 @@ export const PermissionKeys = {
   SYSTEM_SETTINGS_CREATE: '/system-settings_create',
   SYSTEM_SETTINGS_UPDATE: '/system-settings_update',
   SYSTEM_SETTINGS_DELETE: '/system-settings_delete',
+
+  REPORTS_READ: '/reports_read',
+  REPORTS_EXPORT: '/reports_export',
+
+  FUNDS_READ: '/funds_read',
+  FUNDS_MANAGE: '/funds_manage',
+
+  CASHIER_SHIFTS_CURRENT: '/cashier-shifts_current',
+  CASHIER_SHIFTS_READ: '/cashier-shifts_read',
+  CASHIER_SHIFTS_OPEN: '/cashier-shifts_open',
+  CASHIER_SHIFTS_CLOSE: '/cashier-shifts_close',
+  CASHIER_SHIFTS_TRANSACTIONS_CREATE: '/cashier-shifts_transactions-create',
 } as const;

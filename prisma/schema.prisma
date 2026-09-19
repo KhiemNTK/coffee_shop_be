@@ -72,6 +72,12 @@ enum CashFlowType {
   EXPENSE // Chi
 }
 
+enum FundType {
+  CASH
+  BANK
+  OTHER
+}
+
 enum DiscountType {
   PERCENTAGE // Giảm giá theo %
   FIXED_AMOUNT // Giảm giá theo số tiền cố định
@@ -195,15 +201,19 @@ model DiningTable {
 }
 
 model Fund {
-  id      String  @id @default(uuid())
+  id      String   @id @default(uuid())
   name    String // VD: Tiền mặt tại két, Tài khoản Vietcombank
-  balance Decimal @default(0) @db.Decimal(18, 2)
+  balance Decimal  @default(0) @db.Decimal(18, 2)
+  type    FundType
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
   cashTransactions CashTransaction[]
+  shifts           CashierShift[]
+
+  @@index([deletedAt, type])
 }
 
 model MenuCategory {
@@ -484,14 +494,22 @@ model CashierShift {
   startingCash       Decimal     @default(0) @db.Decimal(18, 2) // Tiền lẻ có sẵn đầu ca
   reportedEndingCash Decimal?    @db.Decimal(18, 2) // Số tiền mặt thu ngân đếm được khi chốt ca
   actualEndingCash   Decimal?    @db.Decimal(18, 2) // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
+  closingNote        String?
   status             ShiftStatus @default(OPEN)
 
   employeeId String // Ai là người giữ ca này
   employee   Employee @relation(fields: [employeeId], references: [id])
 
+  fundId String?
+  fund   Fund?   @relation(fields: [fundId], references: [id], onDelete: Restrict)
+
   orderSessions    OrderSession[]
   invoices         Invoice[]
   cashTransactions CashTransaction[] // Lưu các khoản thu/chi phát sinh trong ca
+
+  @@index([employeeId, status, openedAt])
+  @@index([fundId, status])
+  @@index([status, closedAt])
 }
 
 model MenuItemIngredient {
@@ -710,7 +728,8 @@ model Invoice {
   promotionId String?
   promotion   Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
 
-  orderItems OrderItem[]
+  orderItems      OrderItem[]
+  cashTransaction CashTransaction?
 
   @@index([orderSessionId])
   @@index([employeeId])
@@ -739,7 +758,14 @@ model CashTransaction {
   shiftId String? // Khoản chi/thu này phát sinh trong ca nào
   shift   CashierShift? @relation(fields: [shiftId], references: [id])
 
+  invoiceId String?  @unique
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
   equipment Equipment?
+
+  @@index([fundId, transactionDate])
+  @@index([shiftId, transactionDate])
+  @@index([employeeId, transactionDate])
 }
 
 // Cài đặt in ấn máy POS
