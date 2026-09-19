@@ -11,6 +11,7 @@ import {
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { OrderPolicyService } from './order-policy.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
+import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 
 describe('OrdersService', () => {
   let service: OrdersService;
@@ -22,6 +23,7 @@ describe('OrdersService', () => {
     emitConsumption: jest.Mock;
     recordWaste: jest.Mock;
   };
+  let cashierShiftLedger: { findOpenShiftId: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -82,6 +84,9 @@ describe('OrdersService', () => {
       emitConsumption: jest.fn(),
       recordWaste: jest.fn().mockResolvedValue([]),
     };
+    cashierShiftLedger = {
+      findOpenShiftId: jest.fn().mockResolvedValue(null),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -98,6 +103,10 @@ describe('OrdersService', () => {
         {
           provide: InventoryConsumptionService,
           useValue: inventoryConsumption,
+        },
+        {
+          provide: CashierShiftLedgerService,
+          useValue: cashierShiftLedger,
         },
       ],
     }).compile();
@@ -341,12 +350,34 @@ describe('OrdersService', () => {
         tableId: 'table-id',
         employeeId: 'employee-id',
         guestCount: 2,
-        shiftId: null,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderSession.create).not.toHaveBeenCalled();
     expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+  });
+
+  it('attaches the employee open shift without accepting a client shift ID', async () => {
+    cashierShiftLedger.findOpenShiftId.mockResolvedValue('shift-id');
+    tx.orderSession.create.mockImplementation(({ data }: any) => ({
+      id: 'session-id',
+      ...data,
+    }));
+
+    await service.openSession({
+      employeeId: 'employee-id',
+      guestCount: 1,
+    });
+
+    expect(cashierShiftLedger.findOpenShiftId).toHaveBeenCalledWith(
+      tx,
+      'employee-id',
+    );
+    expect(tx.orderSession.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ shiftId: 'shift-id' }),
+      }),
+    );
   });
 
   it('retries serializable transaction conflicts', async () => {
@@ -384,7 +415,6 @@ describe('OrdersService', () => {
         tableId: 'table-id',
         employeeId: 'employee-id',
         guestCount: 2,
-        shiftId: null,
       }),
     ).resolves.toEqual(session);
 

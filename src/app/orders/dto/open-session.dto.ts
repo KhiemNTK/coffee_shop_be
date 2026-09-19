@@ -11,10 +11,6 @@ export const OpenSessionSchema = z.object({
     .int()
     .positive({ message: 'Guest count must be positive' })
     .optional(),
-  shiftId: z
-    .uuid({ message: 'shiftId must be a valid UUID' })
-    .nullish()
-    .default(null),
 });
 
 export class OpenSessionDto extends createZodDto(OpenSessionSchema) {}

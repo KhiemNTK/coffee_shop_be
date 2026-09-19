@@ -40,6 +40,7 @@ import {
 } from './dto';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
+import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 
 @Injectable()
 export class InvoicesService {
@@ -58,6 +59,7 @@ export class InvoicesService {
     private readonly invoiceNumberService: InvoiceNumberService,
     private readonly orderEventsPublisher: OrderEventsPublisher,
     private readonly promotionCalculatorService: PromotionCalculatorService,
+    private readonly cashierShiftLedger: CashierShiftLedgerService,
   ) {}
 
   private readonly invoiceInclude = {
@@ -266,6 +268,10 @@ export class InvoicesService {
         amountTendered,
         totalAmount: existingInvoice.totalAmount,
       });
+      const shift = await this.cashierShiftLedger.requireOpenShift(
+        tx,
+        employeeId,
+      );
 
       await tx.invoice.update({
         where: { id },
@@ -277,8 +283,19 @@ export class InvoicesService {
             ? amountTendered.minus(existingInvoice.totalAmount)
             : new Decimal(0),
           employeeId,
+          shiftId: shift.id,
         },
       });
+
+      if (paymentMethod === PaymentMethod.CASH) {
+        await this.cashierShiftLedger.recordCashInvoice(tx, {
+          shift,
+          invoiceId: existingInvoice.id,
+          invoiceNumber: existingInvoice.invoiceNumber,
+          employeeId,
+          amount: existingInvoice.totalAmount,
+        });
+      }
 
       await tx.orderItem.updateMany({
         where: {
@@ -380,7 +397,6 @@ export class InvoicesService {
           id: true,
           sessionStatus: true,
           tableId: true,
-          shiftId: true,
         },
       });
 
@@ -390,6 +406,10 @@ export class InvoicesService {
         );
       }
       this.invoicePolicy.assertActiveSession(session.sessionStatus);
+      const shift =
+        paymentStatus === PaymentStatus.PAID
+          ? await this.cashierShiftLedger.requireOpenShift(tx, employeeId)
+          : null;
 
       const items = await this.getInvoiceItems(tx, {
         orderSessionId: input.orderSessionId,
@@ -428,10 +448,10 @@ export class InvoicesService {
           taxRate: calculation.taxRate,
           orderSessionId: session.id,
           employeeId,
-          shiftId: session.shiftId,
+          shiftId: shift?.id ?? null,
           promotionId: promotionCalculation?.promotionId ?? null,
         },
-        select: { id: true },
+        select: { id: true, invoiceNumber: true },
       });
 
       const updatedItems = await tx.orderItem.updateMany({
@@ -452,6 +472,20 @@ export class InvoicesService {
         throw new ConflictException(
           'One or more order items were changed by another operation. Please refresh and try again.',
         );
+      }
+
+      if (
+        paymentStatus === PaymentStatus.PAID &&
+        paymentMethod === PaymentMethod.CASH &&
+        shift
+      ) {
+        await this.cashierShiftLedger.recordCashInvoice(tx, {
+          shift,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          employeeId,
+          amount: calculation.totalAmount,
+        });
       }
 
       if (paymentStatus === PaymentStatus.PAID && closeSessionAfterPayment) {

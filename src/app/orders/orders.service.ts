@@ -42,6 +42,7 @@ import {
   RESERVATION_CHECK_IN_EARLY_MS,
   RESERVATION_NO_SHOW_GRACE_MS,
 } from '../../common/consts/reservation';
+import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 
 @Injectable()
 export class OrdersService {
@@ -57,6 +58,7 @@ export class OrdersService {
     private readonly orderEventsPublisher: OrderEventsPublisher,
     private readonly orderPolicy: OrderPolicyService,
     private readonly inventoryConsumption: InventoryConsumptionService,
+    private readonly cashierShiftLedger: CashierShiftLedgerService,
   ) {}
 
   private readonly orderSessionInclude = {
@@ -179,18 +181,12 @@ export class OrdersService {
     }
   }
 
-  async openSession({
-    tableId,
-    employeeId,
-    guestCount,
-    shiftId,
-  }: OpenSessionInput) {
+  async openSession({ tableId, employeeId, guestCount }: OpenSessionInput) {
     const session = await this.runSerializableTransaction((tx) =>
       this.createOrderSession(tx, {
         tableId,
         employeeId,
         guestCount,
-        shiftId,
       }),
     );
 
@@ -236,7 +232,6 @@ export class OrdersService {
         tableId: reservation.tableId,
         employeeId,
         guestCount: reservation.guestCount,
-        shiftId: null,
       });
       const checkedIn = await tx.reservation.updateMany({
         where: {
@@ -283,21 +278,13 @@ export class OrdersService {
 
   private async createOrderSession(
     tx: ExtendedPrismaTransactionClient,
-    { tableId, employeeId, guestCount, shiftId }: OpenSessionInput,
+    { tableId, employeeId, guestCount }: OpenSessionInput,
   ) {
     await this.assertActiveEmployee(tx, employeeId);
-
-    if (shiftId) {
-      const shift = await tx.cashierShift.findUnique({
-        where: { id: shiftId },
-        select: { id: true },
-      });
-      if (!shift) {
-        throw new NotFoundException(
-          `Cashier shift with ID ${shiftId} not found.`,
-        );
-      }
-    }
+    const shiftId = await this.cashierShiftLedger.findOpenShiftId(
+      tx,
+      employeeId,
+    );
 
     const table = tableId
       ? await tx.diningTable.findFirst({
@@ -329,7 +316,7 @@ export class OrdersService {
         tableId: tableId ?? null,
         employeeId,
         guestCount,
-        shiftId: shiftId ?? null,
+        shiftId,
       },
       include: this.orderSessionInclude,
     });

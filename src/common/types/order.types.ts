@@ -4,7 +4,6 @@ export interface OpenSessionInput {
   tableId?: string | null;
   employeeId: string;
   guestCount?: number;
-  shiftId?: string | null;
 }
 
 export interface MenuItemPriceSnapshot {
