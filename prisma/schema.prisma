@@ -109,6 +109,20 @@ enum ShiftStatus {
   CLOSED // Đã chốt ca
 }
 
+enum CashExpenseRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CashHandoverStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
 // =============================================
 // 0. AUTH & AUTHORIZATION (Phân quyền hệ thống)
 // =============================================
@@ -210,8 +224,11 @@ model Fund {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  cashTransactions CashTransaction[]
-  shifts           CashierShift[]
+  cashTransactions  CashTransaction[]
+  shifts            CashierShift[]
+  expenseRequests   CashExpenseRequest[]
+  outgoingHandovers CashHandover[]       @relation("CashHandoverSourceFund")
+  incomingHandovers CashHandover[]       @relation("CashHandoverDestinationFund")
 
   @@index([deletedAt, type])
 }
@@ -360,21 +377,25 @@ model Employee {
   positionId String // MaChucVu
   position   Position @relation(fields: [positionId], references: [id])
 
-  employeeRoles       EmployeeRole[]
-  orderSessions       OrderSession[]
-  invoices            Invoice[]
-  actionLogs          ActionLog[]
-  cashTransactions    CashTransaction[]
-  reservations        Reservation[]
-  equipment           Equipment[]
-  equipmentEvents     EquipmentLifecycleEvent[]
-  printSetting        PrintSetting?
-  shifts              CashierShift[]
-  authSessions        AuthSession[]
-  passwordResetTokens PasswordResetToken[]
-  inventoryWastes     InventoryWaste[]
-  updatedSettings     SystemSetting[]           @relation("SystemSettingUpdatedBy")
-  settingRevisions    SystemSettingRevision[]   @relation("SystemSettingRevisionEmployee")
+  employeeRoles          EmployeeRole[]
+  orderSessions          OrderSession[]
+  invoices               Invoice[]
+  actionLogs             ActionLog[]
+  cashTransactions       CashTransaction[]
+  reservations           Reservation[]
+  equipment              Equipment[]
+  equipmentEvents        EquipmentLifecycleEvent[]
+  printSetting           PrintSetting?
+  shifts                 CashierShift[]
+  authSessions           AuthSession[]
+  passwordResetTokens    PasswordResetToken[]
+  inventoryWastes        InventoryWaste[]
+  updatedSettings        SystemSetting[]           @relation("SystemSettingUpdatedBy")
+  settingRevisions       SystemSettingRevision[]   @relation("SystemSettingRevisionEmployee")
+  requestedCashExpenses  CashExpenseRequest[]      @relation("CashExpenseRequestedBy")
+  resolvedCashExpenses   CashExpenseRequest[]      @relation("CashExpenseResolvedBy")
+  requestedCashHandovers CashHandover[]            @relation("CashHandoverRequestedBy")
+  resolvedCashHandovers  CashHandover[]            @relation("CashHandoverResolvedBy")
 }
 
 model AuthSession {
@@ -488,14 +509,16 @@ model Reservation {
 }
 
 model CashierShift {
-  id                 String      @id @default(uuid())
-  openedAt           DateTime    @default(now())
-  closedAt           DateTime?
-  startingCash       Decimal     @default(0) @db.Decimal(18, 2) // Tiền lẻ có sẵn đầu ca
-  reportedEndingCash Decimal?    @db.Decimal(18, 2) // Số tiền mặt thu ngân đếm được khi chốt ca
-  actualEndingCash   Decimal?    @db.Decimal(18, 2) // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
-  closingNote        String?
-  status             ShiftStatus @default(OPEN)
+  id                   String      @id @default(uuid())
+  openedAt             DateTime    @default(now())
+  closedAt             DateTime?
+  startingCash         Decimal     @default(0) @db.Decimal(18, 2) // Tiền lẻ có sẵn đầu ca
+  expectedStartingCash Decimal     @default(0) @db.Decimal(18, 2)
+  openingDifference    Decimal     @default(0) @db.Decimal(18, 2)
+  reportedEndingCash   Decimal?    @db.Decimal(18, 2) // Số tiền mặt thu ngân đếm được khi chốt ca
+  actualEndingCash     Decimal?    @db.Decimal(18, 2) // Số tiền mặt hệ thống tính toán (để kiểm tra chênh lệch)
+  closingNote          String?
+  status               ShiftStatus @default(OPEN)
 
   employeeId String // Ai là người giữ ca này
   employee   Employee @relation(fields: [employeeId], references: [id])
@@ -506,6 +529,8 @@ model CashierShift {
   orderSessions    OrderSession[]
   invoices         Invoice[]
   cashTransactions CashTransaction[] // Lưu các khoản thu/chi phát sinh trong ca
+  expenseRequests  CashExpenseRequest[]
+  cashHandovers    CashHandover[]
 
   @@index([employeeId, status, openedAt])
   @@index([fundId, status])
@@ -761,11 +786,92 @@ model CashTransaction {
   invoiceId String?  @unique
   invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
 
+  expenseRequest CashExpenseRequest?
+
+  sourceHandover      CashHandover? @relation("CashHandoverSourceTransaction")
+  destinationHandover CashHandover? @relation("CashHandoverDestinationTransaction")
+  varianceHandover    CashHandover? @relation("CashHandoverVarianceTransaction")
+
   equipment Equipment?
 
   @@index([fundId, transactionDate])
   @@index([shiftId, transactionDate])
   @@index([employeeId, transactionDate])
+}
+
+model CashExpenseRequest {
+  id             String                   @id @default(uuid())
+  amount         Decimal                  @db.Decimal(18, 2)
+  description    String
+  status         CashExpenseRequestStatus @default(PENDING)
+  resolutionNote String?
+  resolvedAt     DateTime?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  requestedById String
+  requestedBy   Employee @relation("CashExpenseRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  resolvedById String?
+  resolvedBy   Employee? @relation("CashExpenseResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  shiftId String
+  shift   CashierShift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  fundId String
+  fund   Fund   @relation(fields: [fundId], references: [id], onDelete: Restrict)
+
+  cashTransactionId String?          @unique
+  cashTransaction   CashTransaction? @relation(fields: [cashTransactionId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([shiftId, status])
+  @@index([requestedById, status])
+}
+
+model CashHandover {
+  id             String             @id @default(uuid())
+  expectedCash   Decimal            @db.Decimal(18, 2)
+  countedCash    Decimal            @db.Decimal(18, 2)
+  varianceAmount Decimal            @db.Decimal(18, 2)
+  retainedCash   Decimal            @db.Decimal(18, 2)
+  transferAmount Decimal            @db.Decimal(18, 2)
+  note           String?
+  status         CashHandoverStatus @default(PENDING)
+  resolutionNote String?
+  resolvedAt     DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  requestedById String
+  requestedBy   Employee @relation("CashHandoverRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  resolvedById String?
+  resolvedBy   Employee? @relation("CashHandoverResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  shiftId String
+  shift   CashierShift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  sourceFundId String
+  sourceFund   Fund   @relation("CashHandoverSourceFund", fields: [sourceFundId], references: [id], onDelete: Restrict)
+
+  destinationFundId String
+  destinationFund   Fund   @relation("CashHandoverDestinationFund", fields: [destinationFundId], references: [id], onDelete: Restrict)
+
+  sourceTransactionId String?          @unique
+  sourceTransaction   CashTransaction? @relation("CashHandoverSourceTransaction", fields: [sourceTransactionId], references: [id], onDelete: Restrict)
+
+  destinationTransactionId String?          @unique
+  destinationTransaction   CashTransaction? @relation("CashHandoverDestinationTransaction", fields: [destinationTransactionId], references: [id], onDelete: Restrict)
+
+  varianceTransactionId String?          @unique
+  varianceTransaction   CashTransaction? @relation("CashHandoverVarianceTransaction", fields: [varianceTransactionId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([shiftId, status])
+  @@index([sourceFundId, createdAt])
+  @@index([destinationFundId, createdAt])
+  @@index([requestedById, status])
 }
 
 // Cài đặt in ấn máy POS

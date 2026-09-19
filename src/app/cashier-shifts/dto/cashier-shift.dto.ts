@@ -1,4 +1,10 @@
-import { CashFlowType, FundType, ShiftStatus } from '@prisma/client';
+import {
+  CashExpenseRequestStatus,
+  CashFlowType,
+  CashHandoverStatus,
+  FundType,
+  ShiftStatus,
+} from '@prisma/client';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
@@ -83,5 +89,62 @@ export class GetCashierShiftsDto extends createZodDto(
     fundId: z.uuid('Invalid fund ID').optional(),
     openedFrom: OptionalDateSchema,
     openedTo: OptionalDateSchema,
+  }),
+) {}
+
+export class GetCashExpenseRequestsDto extends createZodDto(
+  z.object({
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    page: z.coerce.number().int().min(1).default(1),
+    status: z.enum(CashExpenseRequestStatus).optional(),
+    requestedById: z.uuid('Invalid employee ID').optional(),
+    shiftId: z.uuid('Invalid cashier shift ID').optional(),
+  }),
+) {}
+
+export class ApproveCashExpenseRequestDto extends createZodDto(
+  z.object({
+    note: z.string().trim().min(1).max(500).nullish(),
+  }),
+) {}
+
+export class RejectCashExpenseRequestDto extends createZodDto(
+  z.object({
+    reason: z.string().trim().min(1).max(500),
+  }),
+) {}
+
+export class CreateCashHandoverDto extends createZodDto(
+  z.object({
+    shiftId: z.uuid('Invalid cashier shift ID'),
+    destinationFundId: z.uuid('Invalid destination fund ID'),
+    retainedCash: CashAmountSchema,
+    note: z.string().trim().min(1).max(500).nullish(),
+  }),
+) {}
+
+export class GetCashHandoversDto extends createZodDto(
+  z.object({
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    page: z.coerce.number().int().min(1).default(1),
+    status: z.enum(CashHandoverStatus).optional(),
+    shiftId: z.uuid('Invalid cashier shift ID').optional(),
+    requestedById: z.uuid('Invalid employee ID').optional(),
+    sourceFundId: z.uuid('Invalid source fund ID').optional(),
+    destinationFundId: z.uuid('Invalid destination fund ID').optional(),
+    createdFrom: OptionalDateSchema,
+    createdTo: OptionalDateSchema,
+  }),
+) {}
+
+export class ApproveCashHandoverDto extends createZodDto(
+  z.object({
+    note: z.string().trim().min(1).max(500).nullish(),
+  }),
+) {}
+
+export class RejectCashHandoverDto extends createZodDto(
+  z.object({
+    reason: z.string().trim().min(1).max(500),
   }),
 ) {}

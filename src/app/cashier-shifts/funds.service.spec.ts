@@ -19,6 +19,7 @@ describe('FundsService', () => {
         update: jest.fn(),
       },
       cashierShift: { findFirst: jest.fn() },
+      cashHandover: { findFirst: jest.fn().mockResolvedValue(null) },
       actionLog: { create: jest.fn() },
     };
     const prisma = {
@@ -61,6 +62,18 @@ describe('FundsService', () => {
       service.remove('fund-id', 'employee-id'),
     ).rejects.toBeInstanceOf(ConflictException);
 
+    expect(tx.fund.update).not.toHaveBeenCalled();
+  });
+
+  it('does not change a fund type while a handover is pending', async () => {
+    tx.fund.findFirst.mockResolvedValue({ id: 'fund-id', type: FundType.CASH });
+    tx.cashHandover.findFirst.mockResolvedValue({ id: 'handover-id' });
+
+    await expect(
+      service.update('fund-id', 'employee-id', { type: FundType.BANK }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(tx.cashierShift.findFirst).not.toHaveBeenCalled();
     expect(tx.fund.update).not.toHaveBeenCalled();
   });
 });

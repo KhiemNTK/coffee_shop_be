@@ -6,10 +6,13 @@ import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import { CashierShiftsService } from './cashier-shifts.service';
 import {
+  ApproveCashExpenseRequestDto,
   CloseCashierShiftDto,
   CreateCashMovementDto,
+  GetCashExpenseRequestsDto,
   GetCashierShiftsDto,
   OpenCashierShiftDto,
+  RejectCashExpenseRequestDto,
 } from './dto';
 
 @ApiTags('cashier-shifts')
@@ -41,6 +44,24 @@ export class CashierShiftsController {
     return this.cashierShiftsService.addMovement(employeeId, dto);
   }
 
+  @Get('current/expense-requests')
+  @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_TRANSACTIONS_CREATE)
+  findCurrentExpenseRequests(
+    @Employee('employeeId') employeeId: string,
+    @Query() query: GetCashExpenseRequestsDto,
+  ) {
+    return this.cashierShiftsService.findExpenseRequests(query, employeeId);
+  }
+
+  @Post('current/expense-requests/:id/cancel')
+  @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_TRANSACTIONS_CREATE)
+  cancelExpenseRequest(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.cashierShiftsService.cancelExpenseRequest(id, employeeId);
+  }
+
   @Post('current/close')
   @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_CLOSE)
   close(
@@ -48,6 +69,32 @@ export class CashierShiftsController {
     @Body() dto: CloseCashierShiftDto,
   ) {
     return this.cashierShiftsService.close(employeeId, dto);
+  }
+
+  @Get('expense-requests')
+  @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_EXPENSES_REVIEW)
+  findExpenseRequests(@Query() query: GetCashExpenseRequestsDto) {
+    return this.cashierShiftsService.findExpenseRequests(query);
+  }
+
+  @Post('expense-requests/:id/approve')
+  @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_EXPENSES_REVIEW)
+  approveExpenseRequest(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: ApproveCashExpenseRequestDto,
+  ) {
+    return this.cashierShiftsService.approveExpenseRequest(id, employeeId, dto);
+  }
+
+  @Post('expense-requests/:id/reject')
+  @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_EXPENSES_REVIEW)
+  rejectExpenseRequest(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: RejectCashExpenseRequestDto,
+  ) {
+    return this.cashierShiftsService.rejectExpenseRequest(id, employeeId, dto);
   }
 
   @Get()

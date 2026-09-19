@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -7,14 +9,18 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import {
+  CashExpenseRequestStatus,
   CashFlowType,
+  CashHandoverStatus,
   FundType,
   PaymentMethod,
   PaymentStatus,
   Prisma,
+  SettingValueType,
   SessionStatus,
   ShiftStatus,
 } from '@prisma/client';
+import { CashControlSettingKeys } from '../../common/consts/cash-control-settings';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -23,10 +29,13 @@ import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
 import {
+  ApproveCashExpenseRequestDto,
   CloseCashierShiftDto,
   CreateCashMovementDto,
+  GetCashExpenseRequestsDto,
   GetCashierShiftsDto,
   OpenCashierShiftDto,
+  RejectCashExpenseRequestDto,
 } from './dto';
 
 @Injectable()
@@ -46,7 +55,7 @@ export class CashierShiftsService {
         await this.assertActiveEmployee(tx, employeeId);
         const fund = await tx.fund.findFirst({
           where: { id: dto.fundId, deletedAt: null },
-          select: { id: true, type: true },
+          select: { id: true, type: true, balance: true },
         });
         if (!fund) {
           throw new NotFoundException(`Fund with ID ${dto.fundId} not found.`);
@@ -54,12 +63,27 @@ export class CashierShiftsService {
         if (fund.type !== FundType.CASH) {
           throw new ConflictException('Cashier shifts require a CASH fund.');
         }
+        const pendingHandover = await tx.cashHandover.findFirst({
+          where: {
+            sourceFundId: fund.id,
+            status: CashHandoverStatus.PENDING,
+          },
+          select: { id: true },
+        });
+        if (pendingHandover) {
+          throw new ConflictException(
+            'The fund has a pending cash handover and cannot open a new shift.',
+          );
+        }
 
+        const startingCash = new Prisma.Decimal(dto.startingCash);
         const shift = await tx.cashierShift.create({
           data: {
             employeeId,
             fundId: fund.id,
-            startingCash: new Prisma.Decimal(dto.startingCash),
+            startingCash,
+            expectedStartingCash: fund.balance,
+            openingDifference: startingCash.minus(fund.balance),
           },
           include: this.shiftInclude,
         });
@@ -67,6 +91,8 @@ export class CashierShiftsService {
           shiftId: shift.id,
           fundId: fund.id,
           startingCash: shift.startingCash.toString(),
+          expectedStartingCash: shift.expectedStartingCash.toString(),
+          openingDifference: shift.openingDifference.toString(),
         });
         return shift;
       });
@@ -141,51 +167,170 @@ export class CashierShiftsService {
     });
   }
 
+  async findExpenseRequests(
+    query: GetCashExpenseRequestsDto,
+    requestedById?: string,
+  ) {
+    const where: Prisma.CashExpenseRequestWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.shiftId ? { shiftId: query.shiftId } : {}),
+      ...(requestedById
+        ? { requestedById }
+        : query.requestedById
+          ? { requestedById: query.requestedById }
+          : {}),
+    };
+    const totalItems = await this.prisma.cashExpenseRequest.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const requests = await this.prisma.cashExpenseRequest.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: this.expenseRequestInclude,
+    });
+    return paging.format(requests);
+  }
+
   async addMovement(employeeId: string, dto: CreateCashMovementDto) {
     return this.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
       const shift = await this.ledger.requireOpenShift(tx, employeeId);
       const amount = new Prisma.Decimal(dto.amount);
-      const fundUpdate =
-        dto.type === CashFlowType.INCOME
-          ? await tx.fund.updateMany({
-              where: { id: shift.fundId, deletedAt: null },
-              data: { balance: { increment: amount } },
-            })
-          : await tx.fund.updateMany({
-              where: {
-                id: shift.fundId,
-                deletedAt: null,
-                balance: { gte: amount },
-              },
-              data: { balance: { decrement: amount } },
-            });
-      if (fundUpdate.count !== 1) {
-        throw new ConflictException('Insufficient fund balance.');
+      if (dto.type === CashFlowType.EXPENSE) {
+        const threshold = await this.getCashControlThreshold(
+          tx,
+          CashControlSettingKeys.EXPENSE_APPROVAL_THRESHOLD,
+        );
+        if (amount.gte(threshold)) {
+          const expenseRequest = await tx.cashExpenseRequest.create({
+            data: {
+              amount,
+              description: dto.description,
+              requestedById: employeeId,
+              shiftId: shift.id,
+              fundId: shift.fundId,
+            },
+            include: this.expenseRequestInclude,
+          });
+          const fund = await tx.fund.findUniqueOrThrow({
+            where: { id: shift.fundId },
+            select: { balance: true },
+          });
+          await this.log(tx, employeeId, 'CASH_EXPENSE_REQUESTED', {
+            requestId: expenseRequest.id,
+            shiftId: shift.id,
+            amount: amount.toString(),
+          });
+          return {
+            movement: null,
+            fundBalance: fund.balance,
+            expenseRequest,
+          };
+        }
       }
 
-      const movement = await tx.cashTransaction.create({
-        data: {
-          type: dto.type,
-          amount,
-          description: dto.description,
-          transactionDate: new Date(),
-          fundId: shift.fundId,
-          shiftId: shift.id,
-          employeeId,
-        },
-      });
-      const fund = await tx.fund.findUniqueOrThrow({
-        where: { id: shift.fundId },
-        select: { balance: true },
+      const result = await this.postMovement(tx, {
+        shift,
+        employeeId,
+        type: dto.type,
+        amount,
+        description: dto.description,
       });
       await this.log(tx, employeeId, 'CASH_MOVEMENT_CREATED', {
         shiftId: shift.id,
-        transactionId: movement.id,
+        transactionId: result.movement.id,
         type: dto.type,
         amount: amount.toString(),
       });
-      return { movement, fundBalance: fund.balance };
+      return { ...result, expenseRequest: null };
+    });
+  }
+
+  async approveExpenseRequest(
+    id: string,
+    employeeId: string,
+    dto: ApproveCashExpenseRequestDto,
+  ) {
+    return this.runSerializable(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const request = await this.findExpenseRequestOrThrow(tx, id);
+      this.assertPendingExpenseRequest(request.status);
+      if (request.requestedById === employeeId) {
+        throw new ForbiddenException(
+          'Employees cannot approve their own expense requests.',
+        );
+      }
+      if (
+        request.shift.status !== ShiftStatus.OPEN ||
+        request.shift.fundId !== request.fundId ||
+        request.fund.deletedAt !== null ||
+        request.fund.type !== FundType.CASH
+      ) {
+        throw new ConflictException(
+          'The expense request is no longer attached to an active cash shift.',
+        );
+      }
+
+      const result = await this.postMovement(tx, {
+        shift: { id: request.shiftId, fundId: request.fundId },
+        employeeId: request.requestedById,
+        type: CashFlowType.EXPENSE,
+        amount: request.amount,
+        description: request.description,
+      });
+      const resolvedAt = new Date();
+      const approved = await tx.cashExpenseRequest.updateMany({
+        where: { id, status: CashExpenseRequestStatus.PENDING },
+        data: {
+          status: CashExpenseRequestStatus.APPROVED,
+          resolvedAt,
+          resolvedById: employeeId,
+          resolutionNote: dto.note,
+          cashTransactionId: result.movement.id,
+        },
+      });
+      if (approved.count !== 1) {
+        throw new ConflictException(
+          'Expense request has already been resolved.',
+        );
+      }
+      await this.log(tx, employeeId, 'CASH_EXPENSE_APPROVED', {
+        requestId: id,
+        shiftId: request.shiftId,
+        transactionId: result.movement.id,
+        amount: request.amount.toString(),
+      });
+      return tx.cashExpenseRequest.findUniqueOrThrow({
+        where: { id },
+        include: this.expenseRequestInclude,
+      });
+    });
+  }
+
+  async rejectExpenseRequest(
+    id: string,
+    employeeId: string,
+    dto: RejectCashExpenseRequestDto,
+  ) {
+    return this.resolveExpenseRequest({
+      id,
+      employeeId,
+      status: CashExpenseRequestStatus.REJECTED,
+      note: dto.reason,
+      requireDifferentEmployee: true,
+      actionType: 'CASH_EXPENSE_REJECTED',
+    });
+  }
+
+  async cancelExpenseRequest(id: string, employeeId: string) {
+    return this.resolveExpenseRequest({
+      id,
+      employeeId,
+      status: CashExpenseRequestStatus.CANCELLED,
+      note: 'Cancelled by requester',
+      requireRequester: true,
+      actionType: 'CASH_EXPENSE_CANCELLED',
     });
   }
 
@@ -199,6 +344,17 @@ export class CashierShiftsService {
       if (!shift) {
         throw new ConflictException('An open cashier shift is required.');
       }
+      const pendingExpenseRequests = await tx.cashExpenseRequest.count({
+        where: {
+          shiftId: shift.id,
+          status: CashExpenseRequestStatus.PENDING,
+        },
+      });
+      if (pendingExpenseRequests > 0) {
+        throw new ConflictException(
+          'Cannot close a shift with pending expense requests.',
+        );
+      }
       const activeSessions = await tx.orderSession.count({
         where: { shiftId: shift.id, sessionStatus: SessionStatus.ACTIVE },
       });
@@ -210,6 +366,22 @@ export class CashierShiftsService {
 
       const reconciliation = await this.calculateReconciliation(tx, shift);
       const reportedEndingCash = new Prisma.Decimal(dto.reportedEndingCash);
+      const difference = reportedEndingCash.minus(
+        reconciliation.actualEndingCash,
+      );
+      const noteThreshold = await this.getCashControlThreshold(
+        tx,
+        CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+      );
+      if (
+        !difference.isZero() &&
+        difference.abs().gte(noteThreshold) &&
+        !dto.closingNote
+      ) {
+        throw new BadRequestException(
+          'A closing note is required for this cash discrepancy.',
+        );
+      }
       const closedAt = new Date();
       const closed = await tx.cashierShift.updateMany({
         where: { id: shift.id, status: ShiftStatus.OPEN },
@@ -229,9 +401,7 @@ export class CashierShiftsService {
         shiftId: shift.id,
         reportedEndingCash: reportedEndingCash.toString(),
         actualEndingCash: reconciliation.actualEndingCash.toString(),
-        difference: reportedEndingCash
-          .minus(reconciliation.actualEndingCash)
-          .toString(),
+        difference: difference.toString(),
       });
       return {
         ...(await tx.cashierShift.findUniqueOrThrow({
@@ -241,7 +411,7 @@ export class CashierShiftsService {
         reconciliation: {
           ...reconciliation,
           reportedEndingCash,
-          difference: reportedEndingCash.minus(reconciliation.actualEndingCash),
+          difference,
         },
       };
     });
@@ -252,10 +422,19 @@ export class CashierShiftsService {
     fund: { select: { id: true, name: true, type: true, balance: true } },
   } as const;
 
+  private readonly expenseRequestInclude = {
+    requestedBy: { select: { id: true, fullName: true } },
+    resolvedBy: { select: { id: true, fullName: true } },
+    shift: { select: { id: true, status: true, openedAt: true } },
+    fund: { select: { id: true, name: true, type: true } },
+    cashTransaction: { select: { id: true, transactionDate: true } },
+  } as const;
+
   private async withReconciliation<
     T extends {
       id: string;
       startingCash: Prisma.Decimal;
+      expectedStartingCash: Prisma.Decimal;
       reportedEndingCash: Prisma.Decimal | null;
     },
   >(tx: ExtendedPrismaTransactionClient, shift: T) {
@@ -275,7 +454,7 @@ export class CashierShiftsService {
 
   private async calculateReconciliation(
     tx: ExtendedPrismaTransactionClient,
-    shift: { id: string; startingCash: Prisma.Decimal },
+    shift: { id: string; expectedStartingCash: Prisma.Decimal },
   ) {
     const invoiceGroups = await tx.invoice.groupBy({
       by: ['paymentMethod'],
@@ -324,7 +503,7 @@ export class CashierShiftsService {
     return {
       ...invoiceTotals,
       ...manualTotals,
-      actualEndingCash: shift.startingCash
+      actualEndingCash: shift.expectedStartingCash
         .plus(invoiceTotals.cashSales)
         .plus(manualTotals.manualIncome)
         .minus(manualTotals.manualExpense),
@@ -342,6 +521,153 @@ export class CashierShiftsService {
     if (!employee) {
       throw new UnauthorizedException('Employee is inactive or not found.');
     }
+  }
+
+  private async postMovement(
+    tx: ExtendedPrismaTransactionClient,
+    input: {
+      shift: { id: string; fundId: string };
+      employeeId: string;
+      type: CashFlowType;
+      amount: Prisma.Decimal;
+      description: string;
+    },
+  ) {
+    const fundUpdate =
+      input.type === CashFlowType.INCOME
+        ? await tx.fund.updateMany({
+            where: { id: input.shift.fundId, deletedAt: null },
+            data: { balance: { increment: input.amount } },
+          })
+        : await tx.fund.updateMany({
+            where: {
+              id: input.shift.fundId,
+              deletedAt: null,
+              balance: { gte: input.amount },
+            },
+            data: { balance: { decrement: input.amount } },
+          });
+    if (fundUpdate.count !== 1) {
+      throw new ConflictException('Insufficient fund balance.');
+    }
+
+    const movement = await tx.cashTransaction.create({
+      data: {
+        type: input.type,
+        amount: input.amount,
+        description: input.description,
+        transactionDate: new Date(),
+        fundId: input.shift.fundId,
+        shiftId: input.shift.id,
+        employeeId: input.employeeId,
+      },
+    });
+    const fund = await tx.fund.findUniqueOrThrow({
+      where: { id: input.shift.fundId },
+      select: { balance: true },
+    });
+    return { movement, fundBalance: fund.balance };
+  }
+
+  private async resolveExpenseRequest(input: {
+    id: string;
+    employeeId: string;
+    status:
+      | typeof CashExpenseRequestStatus.REJECTED
+      | typeof CashExpenseRequestStatus.CANCELLED;
+    note: string;
+    requireDifferentEmployee?: boolean;
+    requireRequester?: boolean;
+    actionType: string;
+  }) {
+    return this.runSerializable(async (tx) => {
+      await this.assertActiveEmployee(tx, input.employeeId);
+      const request = await this.findExpenseRequestOrThrow(tx, input.id);
+      this.assertPendingExpenseRequest(request.status);
+      if (
+        input.requireDifferentEmployee &&
+        request.requestedById === input.employeeId
+      ) {
+        throw new ForbiddenException(
+          'Employees cannot review their own expense requests.',
+        );
+      }
+      if (
+        input.requireRequester &&
+        request.requestedById !== input.employeeId
+      ) {
+        throw new ForbiddenException(
+          'Only the requester can cancel this expense request.',
+        );
+      }
+
+      const resolved = await tx.cashExpenseRequest.updateMany({
+        where: { id: input.id, status: CashExpenseRequestStatus.PENDING },
+        data: {
+          status: input.status,
+          resolvedAt: new Date(),
+          resolvedById: input.employeeId,
+          resolutionNote: input.note,
+        },
+      });
+      if (resolved.count !== 1) {
+        throw new ConflictException(
+          'Expense request has already been resolved.',
+        );
+      }
+      await this.log(tx, input.employeeId, input.actionType, {
+        requestId: input.id,
+        shiftId: request.shiftId,
+        amount: request.amount.toString(),
+      });
+      return tx.cashExpenseRequest.findUniqueOrThrow({
+        where: { id: input.id },
+        include: this.expenseRequestInclude,
+      });
+    });
+  }
+
+  private async findExpenseRequestOrThrow(
+    tx: ExtendedPrismaTransactionClient,
+    id: string,
+  ) {
+    const request = await tx.cashExpenseRequest.findUnique({
+      where: { id },
+      include: {
+        shift: { select: { id: true, status: true, fundId: true } },
+        fund: { select: { id: true, type: true, deletedAt: true } },
+      },
+    });
+    if (!request) {
+      throw new NotFoundException(
+        `Cash expense request with ID ${id} not found.`,
+      );
+    }
+    return request;
+  }
+
+  private assertPendingExpenseRequest(status: CashExpenseRequestStatus) {
+    if (status !== CashExpenseRequestStatus.PENDING) {
+      throw new ConflictException('Expense request has already been resolved.');
+    }
+  }
+
+  private async getCashControlThreshold(
+    tx: ExtendedPrismaTransactionClient,
+    key: string,
+  ) {
+    const setting = await tx.systemSetting.findFirst({
+      where: {
+        key,
+        valueType: SettingValueType.NUMBER,
+        deletedAt: null,
+      },
+      select: { value: true },
+    });
+    const value = setting?.value;
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? new Prisma.Decimal(value)
+      : new Prisma.Decimal(0);
   }
 
   private async log(

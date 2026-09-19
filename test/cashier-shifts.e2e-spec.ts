@@ -1,17 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import {
+  CashExpenseRequestStatus,
   CashFlowType,
   FundType,
   PaymentMethod,
   PaymentStatus,
   Prisma,
   PrismaClient,
+  SettingValueType,
   SessionStatus,
 } from '@prisma/client';
 import { CashierShiftLedgerService } from '../src/app/cashier-shifts/cashier-shift-ledger.service';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
+import {
+  CashControlSettingDefaults,
+  CashControlSettingKeys,
+} from '../src/common/consts/cash-control-settings';
 
 describe('Cashier shift ledger (e2e)', () => {
   const prisma = new PrismaClient();
@@ -28,6 +34,11 @@ describe('Cashier shift ledger (e2e)', () => {
   let employeeTwoId: string;
   let mainFundId: string;
   let raceFundId: string;
+  let approvalFundId: string;
+  const previousSettings = new Map<
+    string,
+    Awaited<ReturnType<typeof prisma.systemSetting.findUnique>>
+  >();
 
   beforeAll(async () => {
     const position = await prisma.position.create({
@@ -58,7 +69,37 @@ describe('Cashier shift ledger (e2e)', () => {
     employeeOneId = employeeOne.id;
     employeeTwoId = employeeTwo.id;
 
-    const [mainFund, raceFund] = await Promise.all([
+    for (const [key, value] of [
+      [
+        CashControlSettingKeys.EXPENSE_APPROVAL_THRESHOLD,
+        CashControlSettingDefaults.EXPENSE_APPROVAL_THRESHOLD,
+      ],
+      [
+        CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+        CashControlSettingDefaults.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+      ],
+    ] as const) {
+      const existing = await prisma.systemSetting.findUnique({
+        where: { key },
+      });
+      previousSettings.set(key, existing);
+      await prisma.systemSetting.upsert({
+        where: { key },
+        create: {
+          key,
+          value,
+          valueType: SettingValueType.NUMBER,
+          isSystem: true,
+        },
+        update: {
+          value,
+          valueType: SettingValueType.NUMBER,
+          deletedAt: null,
+        },
+      });
+    }
+
+    const [mainFund, raceFund, approvalFund] = await Promise.all([
       prisma.fund.create({
         data: {
           name: `Main Drawer ${suffix}`,
@@ -72,14 +113,25 @@ describe('Cashier shift ledger (e2e)', () => {
           type: FundType.CASH,
         },
       }),
+      prisma.fund.create({
+        data: {
+          name: `Approval Drawer ${suffix}`,
+          type: FundType.CASH,
+          balance: new Prisma.Decimal('1000000'),
+        },
+      }),
     ]);
     mainFundId = mainFund.id;
     raceFundId = raceFund.id;
+    approvalFundId = approvalFund.id;
   });
 
   afterAll(async () => {
     try {
       const employeeIds = [employeeOneId, employeeTwoId].filter(Boolean);
+      await prisma.cashExpenseRequest.deleteMany({
+        where: { requestedById: { in: employeeIds } },
+      });
       await prisma.cashTransaction.deleteMany({
         where: { employeeId: { in: employeeIds } },
       });
@@ -96,13 +148,34 @@ describe('Cashier shift ledger (e2e)', () => {
         where: { employeeId: { in: employeeIds } },
       });
       await prisma.fund.deleteMany({
-        where: { id: { in: [mainFundId, raceFundId].filter(Boolean) } },
+        where: {
+          id: {
+            in: [mainFundId, raceFundId, approvalFundId].filter(Boolean),
+          },
+        },
       });
       await prisma.employee.deleteMany({
         where: { id: { in: employeeIds } },
       });
       if (positionId) {
         await prisma.position.deleteMany({ where: { id: positionId } });
+      }
+      for (const [key, previous] of previousSettings) {
+        if (previous) {
+          await prisma.systemSetting.update({
+            where: { key },
+            data: {
+              value: previous.value as Prisma.InputJsonValue,
+              valueType: previous.valueType,
+              description: previous.description,
+              isPublic: previous.isPublic,
+              isSystem: previous.isSystem,
+              deletedAt: previous.deletedAt,
+            },
+          });
+        } else {
+          await prisma.systemSetting.deleteMany({ where: { key } });
+        }
       }
     } finally {
       await prisma.$disconnect();
@@ -194,6 +267,61 @@ describe('Cashier shift ledger (e2e)', () => {
       where: { fundId: raceFundId, status: 'OPEN' },
     });
     await shifts.close(openShift.employeeId, { reportedEndingCash: '0' });
+  });
+
+  it('posts a large expense once after independent approval', async () => {
+    const shift = await shifts.open(employeeOneId, {
+      fundId: approvalFundId,
+      startingCash: '990000',
+    });
+    expect(shift.expectedStartingCash.toString()).toBe('1000000');
+    expect(shift.openingDifference.toString()).toBe('-10000');
+
+    const pending = await shifts.addMovement(employeeOneId, {
+      type: CashFlowType.EXPENSE,
+      amount: '600000',
+      description: 'Replace failed espresso machine pump',
+    });
+    expect(pending.movement).toBeNull();
+    expect(pending.expenseRequest?.status).toBe(
+      CashExpenseRequestStatus.PENDING,
+    );
+
+    const requestId = pending.expenseRequest!.id;
+    const results = await Promise.allSettled([
+      shifts.approveExpenseRequest(requestId, employeeTwoId, {
+        note: 'Emergency repair approved',
+      }),
+      shifts.approveExpenseRequest(requestId, employeeTwoId, {
+        note: 'Duplicate concurrent approval',
+      }),
+    ]);
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    expect(results.filter(({ status }) => status === 'rejected')).toHaveLength(
+      1,
+    );
+
+    const [fund, request, transactions] = await Promise.all([
+      prisma.fund.findUniqueOrThrow({ where: { id: approvalFundId } }),
+      prisma.cashExpenseRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      }),
+      prisma.cashTransaction.count({
+        where: { shiftId: shift.id, type: CashFlowType.EXPENSE },
+      }),
+    ]);
+    expect(fund.balance.toString()).toBe('400000');
+    expect(request.status).toBe(CashExpenseRequestStatus.APPROVED);
+    expect(transactions).toBe(1);
+
+    const closed = await shifts.close(employeeOneId, {
+      reportedEndingCash: '390000',
+      closingNote: 'Opening count was ten thousand short',
+    });
+    expect(closed.reconciliation.actualEndingCash.toString()).toBe('400000');
+    expect(closed.reconciliation.difference.toString()).toBe('-10000');
   });
 
   it('rejects a negative fund balance at the database boundary', async () => {

@@ -1,6 +1,10 @@
 import 'dotenv/config';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, SettingValueType } from '@prisma/client';
 import bcrypt from 'bcrypt';
+import {
+  CashControlSettingDefaults,
+  CashControlSettingKeys,
+} from '../src/common/consts/cash-control-settings';
 import {
   PermissionKeys,
   SYSTEM_ROLE_NAMES,
@@ -98,6 +102,10 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.CASHIER_SHIFTS_OPEN,
       PermissionKeys.CASHIER_SHIFTS_CLOSE,
       PermissionKeys.CASHIER_SHIFTS_TRANSACTIONS_CREATE,
+      PermissionKeys.CASHIER_SHIFTS_EXPENSES_REVIEW,
+      PermissionKeys.CASH_HANDOVERS_CREATE,
+      PermissionKeys.CASH_HANDOVERS_READ,
+      PermissionKeys.CASH_HANDOVERS_REVIEW,
     ],
   },
   {
@@ -129,6 +137,7 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.CASHIER_SHIFTS_OPEN,
       PermissionKeys.CASHIER_SHIFTS_CLOSE,
       PermissionKeys.CASHIER_SHIFTS_TRANSACTIONS_CREATE,
+      PermissionKeys.CASH_HANDOVERS_CREATE,
     ],
   },
   {
@@ -225,7 +234,58 @@ async function upsertRole(seed: RoleSeed) {
   });
 }
 
+async function seedCashControlSettings() {
+  const seeds = [
+    {
+      key: CashControlSettingKeys.EXPENSE_APPROVAL_THRESHOLD,
+      value: CashControlSettingDefaults.EXPENSE_APPROVAL_THRESHOLD,
+      description: 'Cash expense amount that requires manager approval',
+    },
+    {
+      key: CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+      value: CashControlSettingDefaults.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+      description: 'Cash discrepancy amount that requires a closing note',
+    },
+  ];
+
+  for (const seed of seeds) {
+    const existing = await prisma.systemSetting.findUnique({
+      where: { key: seed.key },
+      select: { id: true, valueType: true },
+    });
+    if (existing) {
+      if (existing.valueType !== SettingValueType.NUMBER) {
+        throw new Error(`System setting '${seed.key}' must use NUMBER type`);
+      }
+      await prisma.systemSetting.update({
+        where: { id: existing.id },
+        data: { isSystem: true, deletedAt: null },
+      });
+      continue;
+    }
+
+    await prisma.systemSetting.create({
+      data: {
+        ...seed,
+        valueType: SettingValueType.NUMBER,
+        isPublic: false,
+        isSystem: true,
+        revisions: {
+          create: {
+            version: 1,
+            value: seed.value,
+            valueType: SettingValueType.NUMBER,
+            description: seed.description,
+            isPublic: false,
+          },
+        },
+      },
+    });
+  }
+}
+
 async function main() {
+  await seedCashControlSettings();
   const permissions = await Promise.all(permissionSeeds.map(upsertPermission));
   const permissionByKey = new Map(
     permissions.map((permission) => [permission.key, permission.id]),

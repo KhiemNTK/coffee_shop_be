@@ -5,7 +5,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, ShiftStatus } from '@prisma/client';
+import { CashHandoverStatus, Prisma, ShiftStatus } from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -95,6 +95,18 @@ export class FundsService {
           throw new NotFoundException(`Fund with ID ${id} not found.`);
         }
         if (dto.type && dto.type !== existing.type) {
+          const pendingHandover = await tx.cashHandover.findFirst({
+            where: {
+              status: CashHandoverStatus.PENDING,
+              OR: [{ sourceFundId: id }, { destinationFundId: id }],
+            },
+            select: { id: true },
+          });
+          if (pendingHandover) {
+            throw new ConflictException(
+              'Cannot change the type of a fund used by a pending handover.',
+            );
+          }
           const openShift = await tx.cashierShift.findFirst({
             where: { fundId: id, status: ShiftStatus.OPEN },
             select: { id: true },
@@ -139,6 +151,18 @@ export class FundsService {
       if (openShift) {
         throw new ConflictException(
           'A fund with an open shift cannot be deleted.',
+        );
+      }
+      const pendingHandover = await tx.cashHandover.findFirst({
+        where: {
+          status: CashHandoverStatus.PENDING,
+          OR: [{ sourceFundId: id }, { destinationFundId: id }],
+        },
+        select: { id: true },
+      });
+      if (pendingHandover) {
+        throw new ConflictException(
+          'A fund used by a pending handover cannot be deleted.',
         );
       }
 

@@ -99,4 +99,9 @@ export const PermissionKeys = {
   CASHIER_SHIFTS_OPEN: '/cashier-shifts_open',
   CASHIER_SHIFTS_CLOSE: '/cashier-shifts_close',
   CASHIER_SHIFTS_TRANSACTIONS_CREATE: '/cashier-shifts_transactions-create',
+  CASHIER_SHIFTS_EXPENSES_REVIEW: '/cashier-shifts_expenses-review',
+
+  CASH_HANDOVERS_CREATE: '/cash-handovers_create',
+  CASH_HANDOVERS_READ: '/cash-handovers_read',
+  CASH_HANDOVERS_REVIEW: '/cash-handovers_review',
 } as const;
