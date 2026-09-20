@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { OrdersService } from './orders.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
-import { OrderEventsPublisher } from './events/order-events.publisher';
+import { OutboxService } from '../durable/outbox.service';
 import {
   Prisma,
   ServeStatus,
@@ -17,10 +17,9 @@ describe('OrdersService', () => {
   let service: OrdersService;
   let prisma: any;
   let tx: any;
-  let orderEventsPublisher: { emit: jest.Mock; on: jest.Mock };
+  let outbox: { enqueue: jest.Mock };
   let inventoryConsumption: {
     consumeOrderItem: jest.Mock;
-    emitConsumption: jest.Mock;
     recordWaste: jest.Mock;
   };
   let cashierShiftLedger: { findOpenShiftId: jest.Mock };
@@ -75,13 +74,9 @@ describe('OrdersService', () => {
       },
     };
 
-    orderEventsPublisher = {
-      emit: jest.fn(),
-      on: jest.fn(),
-    };
+    outbox = { enqueue: jest.fn() };
     inventoryConsumption = {
       consumeOrderItem: jest.fn().mockResolvedValue([]),
-      emitConsumption: jest.fn(),
       recordWaste: jest.fn().mockResolvedValue([]),
     };
     cashierShiftLedger = {
@@ -96,8 +91,8 @@ describe('OrdersService', () => {
           useValue: prisma,
         },
         {
-          provide: OrderEventsPublisher,
-          useValue: orderEventsPublisher,
+          provide: OutboxService,
+          useValue: outbox,
         },
         OrderPolicyService,
         {
@@ -186,10 +181,7 @@ describe('OrdersService', () => {
         }),
       }),
     );
-    expect(inventoryConsumption.emitConsumption).toHaveBeenCalledWith([
-      movement,
-    ]);
-    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
     expect(result.serveStatus).toBe(ServeStatus.COOKING);
   });
 
@@ -219,7 +211,7 @@ describe('OrdersService', () => {
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
     expect(tx.actionLog.create).not.toHaveBeenCalled();
-    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('rejects cancelling a paid order item', async () => {
@@ -242,7 +234,7 @@ describe('OrdersService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
-    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('requires a reason before cancelling a prepared item', async () => {
@@ -308,7 +300,7 @@ describe('OrdersService', () => {
         data: expect.objectContaining({ actionType: 'ORDER_ITEM_CANCELLED' }),
       }),
     );
-    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('only adds active and available menu items to an order', async () => {
@@ -354,7 +346,7 @@ describe('OrdersService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderSession.create).not.toHaveBeenCalled();
-    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('attaches the employee open shift without accepting a client shift ID', async () => {
@@ -419,7 +411,7 @@ describe('OrdersService', () => {
     ).resolves.toEqual(session);
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
-    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('checks in a reservation and opens its order session atomically', async () => {
@@ -460,7 +452,7 @@ describe('OrdersService', () => {
       }),
     );
     expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
-    expect(orderEventsPublisher.emit).toHaveBeenCalledTimes(1);
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('rejects merging sessions that contain paid items', async () => {
@@ -484,7 +476,7 @@ describe('OrdersService', () => {
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
-    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('rejects splitting an item that does not belong to the source session', async () => {
@@ -526,7 +518,7 @@ describe('OrdersService', () => {
 
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.create).not.toHaveBeenCalled();
-    expect(orderEventsPublisher.emit).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('rejects partially splitting a processed item', async () => {

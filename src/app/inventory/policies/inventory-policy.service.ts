@@ -33,14 +33,6 @@ export class InventoryPolicyService {
     }
   }
 
-  assertNoIdempotencyKey(idempotencyKey?: string) {
-    if (idempotencyKey) {
-      throw new BadRequestException(
-        'idempotencyKey requires a persisted idempotency store before it can be supported safely.',
-      );
-    }
-  }
-
   assertBulkSize(size: number) {
     if (size < 1 || size > this.bulkMovementLimit) {
       throw new BadRequestException(

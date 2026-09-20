@@ -1,16 +1,15 @@
 import { ConflictException } from '@nestjs/common';
 import { InventoryTxType, Prisma } from '@prisma/client';
-import { INVENTORY_EVENTS } from '../events/inventory.events';
 import { InventoryConsumptionService } from './inventory-consumption.service';
 
 describe('InventoryConsumptionService', () => {
   let service: InventoryConsumptionService;
-  let publisher: { emit: jest.Mock };
+  let outbox: { enqueue: jest.Mock };
   let tx: any;
 
   beforeEach(() => {
-    publisher = { emit: jest.fn() };
-    service = new InventoryConsumptionService(publisher as never);
+    outbox = { enqueue: jest.fn() };
+    service = new InventoryConsumptionService(outbox as never);
     tx = {
       menuItemIngredient: { findMany: jest.fn() },
       inventoryItem: {
@@ -111,6 +110,13 @@ describe('InventoryConsumptionService', () => {
         stockAfter: new Prisma.Decimal('4.8'),
       }),
     ]);
+    expect(outbox.enqueue).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        eventName: 'inventory.stock.exported',
+        aggregateId: 'order-item-id',
+      }),
+    );
   });
 
   it('rejects insufficient stock before writing snapshots or ledger rows', async () => {
@@ -173,25 +179,5 @@ describe('InventoryConsumptionService', () => {
       select: { id: true, inventoryItemId: true, quantity: true },
     });
     expect(result).toHaveLength(1);
-  });
-
-  it('emits stock changes only when inventory was consumed', () => {
-    service.emitConsumption([]);
-    expect(publisher.emit).not.toHaveBeenCalled();
-
-    service.emitConsumption([
-      {
-        inventoryItemId: 'coffee-id',
-        transactionId: 'transaction-id',
-        type: InventoryTxType.EXPORT,
-        quantity: new Prisma.Decimal('0.5'),
-        stockAfter: new Prisma.Decimal('9.5'),
-      },
-    ]);
-
-    expect(publisher.emit).toHaveBeenCalledWith(
-      INVENTORY_EVENTS.STOCK_EXPORTED,
-      expect.objectContaining({ inventoryItemIds: ['coffee-id'] }),
-    );
   });
 });

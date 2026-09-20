@@ -4,15 +4,15 @@ import { InventoryTxType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type {
   ExtendedPrismaTransactionClient,
-  InventoryEventBase,
   InventoryMovementResult,
 } from '../../../common/types';
+import { IdempotencyService } from '../../durable/idempotency.service';
+import { OutboxService } from '../../durable/outbox.service';
 import {
   BulkInventoryMovementDto,
   InventoryMovementDto,
 } from '../dto/inventory-common.dto';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
-import { InventoryEventsPublisher } from '../events/inventory-events.publisher';
 import { InventoryPolicyService } from '../policies/inventory-policy.service';
 import { InventoryRepository } from '../repositories/inventory.repository';
 import { InventoryAuditService } from './inventory-audit.service';
@@ -25,7 +25,8 @@ export class InventoryMovementService {
     private readonly inventoryPolicy: InventoryPolicyService,
     private readonly inventoryTransactionService: InventoryTransactionService,
     private readonly inventoryAuditService: InventoryAuditService,
-    private readonly inventoryEventsPublisher: InventoryEventsPublisher,
+    private readonly idempotency: IdempotencyService,
+    private readonly outbox: OutboxService,
   ) {}
 
   async importItem(
@@ -33,19 +34,22 @@ export class InventoryMovementService {
     employeeId: string,
     dto: InventoryMovementDto,
   ) {
-    this.inventoryPolicy.assertNoIdempotencyKey(dto.idempotencyKey);
-    const [movement] = await this.moveStock(employeeId, [
-      {
-        inventoryItemId,
-        type: InventoryTxType.IMPORT,
-        quantity: dto.quantity,
-        unitPrice: dto.unitPrice,
-        transactionDate: dto.transactionDate,
-        note: dto.note,
-      },
-    ]);
-
-    this.emitStockEvent(INVENTORY_EVENTS.STOCK_IMPORTED, [movement]);
+    const [movement] = await this.executeMovement(
+      employeeId,
+      'inventory.stock.import',
+      dto.idempotencyKey,
+      { inventoryItemId, ...dto, idempotencyKey: undefined },
+      [
+        {
+          inventoryItemId,
+          type: InventoryTxType.IMPORT,
+          quantity: dto.quantity,
+          unitPrice: dto.unitPrice,
+          transactionDate: dto.transactionDate,
+          note: dto.note,
+        },
+      ],
+    );
     return movement;
   }
 
@@ -54,50 +58,54 @@ export class InventoryMovementService {
     employeeId: string,
     dto: InventoryMovementDto,
   ) {
-    this.inventoryPolicy.assertNoIdempotencyKey(dto.idempotencyKey);
-    const [movement] = await this.moveStock(employeeId, [
-      {
-        inventoryItemId,
-        type: InventoryTxType.EXPORT,
-        quantity: dto.quantity,
-        unitPrice: dto.unitPrice,
-        transactionDate: dto.transactionDate,
-        note: dto.note,
-      },
-    ]);
-
-    this.emitStockEvent(INVENTORY_EVENTS.STOCK_EXPORTED, [movement]);
+    const [movement] = await this.executeMovement(
+      employeeId,
+      'inventory.stock.export',
+      dto.idempotencyKey,
+      { inventoryItemId, ...dto, idempotencyKey: undefined },
+      [
+        {
+          inventoryItemId,
+          type: InventoryTxType.EXPORT,
+          quantity: dto.quantity,
+          unitPrice: dto.unitPrice,
+          transactionDate: dto.transactionDate,
+          note: dto.note,
+        },
+      ],
+    );
     return movement;
   }
 
   async bulkImport(employeeId: string, dto: BulkInventoryMovementDto) {
-    this.inventoryPolicy.assertNoIdempotencyKey(dto.idempotencyKey);
     this.inventoryPolicy.assertBulkSize(dto.items.length);
     this.inventoryPolicy.assertNoDuplicateInventoryItems(
       dto.items.map((item) => item.inventoryItemId),
     );
 
-    const movements = await this.moveStock(
+    return this.executeMovement(
       employeeId,
+      'inventory.stock.bulk-import',
+      dto.idempotencyKey,
+      { ...dto, idempotencyKey: undefined },
       dto.items.map((item) => ({
         ...item,
         type: InventoryTxType.IMPORT,
       })),
     );
-
-    this.emitStockEvent(INVENTORY_EVENTS.STOCK_IMPORTED, movements);
-    return movements;
   }
 
   async bulkExport(employeeId: string, dto: BulkInventoryMovementDto) {
-    this.inventoryPolicy.assertNoIdempotencyKey(dto.idempotencyKey);
     this.inventoryPolicy.assertBulkSize(dto.items.length);
     this.inventoryPolicy.assertNoDuplicateInventoryItems(
       dto.items.map((item) => item.inventoryItemId),
     );
 
-    const movements = await this.moveStock(
+    return this.executeMovement(
       employeeId,
+      'inventory.stock.bulk-export',
+      dto.idempotencyKey,
+      { ...dto, idempotencyKey: undefined },
       dto.items
         .map((item) => ({
           ...item,
@@ -105,12 +113,34 @@ export class InventoryMovementService {
         }))
         .sort((a, b) => a.inventoryItemId.localeCompare(b.inventoryItemId)),
     );
-
-    this.emitStockEvent(INVENTORY_EVENTS.STOCK_EXPORTED, movements);
-    return movements;
   }
 
-  private async moveStock(
+  private executeMovement(
+    employeeId: string,
+    operation: string,
+    idempotencyKey: string | undefined,
+    request: unknown,
+    movements: Array<{
+      inventoryItemId: string;
+      type: InventoryTxType;
+      quantity: string | number;
+      unitPrice?: string | number;
+      transactionDate?: Date;
+      note?: string | null;
+    }>,
+  ) {
+    const execute = (tx: ExtendedPrismaTransactionClient) =>
+      this.moveStockInTransaction(tx, employeeId, movements);
+    return idempotencyKey
+      ? this.idempotency.execute(
+          { employeeId, operation, key: idempotencyKey, request },
+          execute,
+        )
+      : this.inventoryTransactionService.runSerializable(execute);
+  }
+
+  private async moveStockInTransaction(
+    tx: ExtendedPrismaTransactionClient,
     employeeId: string,
     movements: Array<{
       inventoryItemId: string;
@@ -121,37 +151,35 @@ export class InventoryMovementService {
       note?: string | null;
     }>,
   ) {
-    return this.inventoryTransactionService.runSerializable(async (tx) => {
-      const employee = await tx.employee.findUnique({
-        where: { id: employeeId },
-        select: { isActive: true },
-      });
-      this.inventoryPolicy.assertActiveEmployee(employee);
-
-      const results: InventoryMovementResult[] = [];
-      for (const movement of movements) {
-        results.push(await this.applyMovement(tx, movement));
-      }
-
-      await this.inventoryAuditService.log(tx, {
-        employeeId,
-        actionType:
-          movements[0]?.type === InventoryTxType.IMPORT
-            ? 'INVENTORY_IMPORT'
-            : 'INVENTORY_EXPORT',
-        details: {
-          movements: results.map((result) => ({
-            inventoryItemId: result.inventoryItemId,
-            transactionId: result.transactionId,
-            type: result.type,
-            quantity: result.quantity.toString(),
-            stockAfter: result.stockAfter.toString(),
-          })),
-        },
-      });
-
-      return results;
+    const employee = await tx.employee.findUnique({
+      where: { id: employeeId },
+      select: { isActive: true },
     });
+    this.inventoryPolicy.assertActiveEmployee(employee);
+
+    const results: InventoryMovementResult[] = [];
+    for (const movement of movements) {
+      results.push(await this.applyMovement(tx, movement));
+    }
+
+    await this.inventoryAuditService.log(tx, {
+      employeeId,
+      actionType:
+        movements[0]?.type === InventoryTxType.IMPORT
+          ? 'INVENTORY_IMPORT'
+          : 'INVENTORY_EXPORT',
+      details: {
+        movements: results.map((result) => ({
+          inventoryItemId: result.inventoryItemId,
+          transactionId: result.transactionId,
+          type: result.type,
+          quantity: result.quantity.toString(),
+          stockAfter: result.stockAfter.toString(),
+        })),
+      },
+    });
+    await this.enqueueStockEvent(tx, results);
+    return results;
   }
 
   private async applyMovement(
@@ -237,26 +265,28 @@ export class InventoryMovementService {
     };
   }
 
-  private emitStockEvent(
-    eventName:
-      | typeof INVENTORY_EVENTS.STOCK_IMPORTED
-      | typeof INVENTORY_EVENTS.STOCK_EXPORTED,
+  private enqueueStockEvent(
+    tx: ExtendedPrismaTransactionClient,
     movements: InventoryMovementResult[],
   ) {
-    this.inventoryEventsPublisher.emit(eventName, {
-      ...this.createEventBase(
-        movements.map((movement) => movement.inventoryItemId),
-      ),
-      type: movements[0]?.type ?? InventoryTxType.IMPORT,
-      movements,
+    const type = movements[0]?.type ?? InventoryTxType.IMPORT;
+    return this.outbox.enqueue(tx, {
+      topic: 'inventory',
+      eventName:
+        type === InventoryTxType.IMPORT
+          ? INVENTORY_EVENTS.STOCK_IMPORTED
+          : INVENTORY_EVENTS.STOCK_EXPORTED,
+      aggregateType: 'InventoryMovement',
+      aggregateId: movements[0]?.transactionId ?? randomUUID(),
+      payload: {
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        inventoryItemIds: [
+          ...new Set(movements.map(({ inventoryItemId }) => inventoryItemId)),
+        ],
+        type,
+        movements,
+      },
     });
-  }
-
-  private createEventBase(inventoryItemIds: string[]): InventoryEventBase {
-    return {
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-      inventoryItemIds: [...new Set(inventoryItemIds)],
-    };
   }
 }

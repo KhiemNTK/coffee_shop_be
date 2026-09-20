@@ -5,14 +5,12 @@ import type {
   ExtendedPrismaTransactionClient,
   InventoryMovementResult,
 } from '../../../common/types';
+import { OutboxService } from '../../durable/outbox.service';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
-import { InventoryEventsPublisher } from '../events/inventory-events.publisher';
 
 @Injectable()
 export class InventoryConsumptionService {
-  constructor(
-    private readonly inventoryEventsPublisher: InventoryEventsPublisher,
-  ) {}
+  constructor(private readonly outbox: OutboxService) {}
 
   async consumeOrderItem(
     tx: ExtendedPrismaTransactionClient,
@@ -103,7 +101,7 @@ export class InventoryConsumptionService {
     );
     const stocks = new Map(stockRows.map((item) => [item.id, item.stock]));
 
-    return ingredients.map((ingredient) => {
+    const movements = ingredients.map((ingredient) => {
       const transactionId = transactionIds.get(ingredient.inventoryItemId);
       const stockAfter = stocks.get(ingredient.inventoryItemId);
       if (!transactionId || !stockAfter) {
@@ -120,18 +118,22 @@ export class InventoryConsumptionService {
         stockAfter,
       };
     });
-  }
-
-  emitConsumption(movements: InventoryMovementResult[]) {
-    if (movements.length === 0) return;
-
-    this.inventoryEventsPublisher.emit(INVENTORY_EVENTS.STOCK_EXPORTED, {
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-      inventoryItemIds: movements.map(({ inventoryItemId }) => inventoryItemId),
-      type: InventoryTxType.EXPORT,
-      movements,
+    await this.outbox.enqueue(tx, {
+      topic: 'inventory',
+      eventName: INVENTORY_EVENTS.STOCK_EXPORTED,
+      aggregateType: 'OrderItem',
+      aggregateId: orderItem.id,
+      payload: {
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        inventoryItemIds: movements.map(
+          ({ inventoryItemId }) => inventoryItemId,
+        ),
+        type: InventoryTxType.EXPORT,
+        movements,
+      },
     });
+    return movements;
   }
 
   async recordWaste(

@@ -2,16 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InventoryTxType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import type {
-  ExtendedPrismaTransactionClient,
-  InventoryEventBase,
-} from '../../../common/types';
+import type { ExtendedPrismaTransactionClient } from '../../../common/types';
+import { OutboxService } from '../../durable/outbox.service';
 import {
   CreateInventoryItemDto,
   UpdateInventoryItemDto,
 } from '../dto/inventory-item.dto';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
-import { InventoryEventsPublisher } from '../events/inventory-events.publisher';
 import { InventoryPolicyService } from '../policies/inventory-policy.service';
 import { InventoryRepository } from '../repositories/inventory.repository';
 import { InventoryAuditService } from './inventory-audit.service';
@@ -24,7 +21,7 @@ export class InventoryItemService {
     private readonly inventoryPolicy: InventoryPolicyService,
     private readonly inventoryTransactionService: InventoryTransactionService,
     private readonly inventoryAuditService: InventoryAuditService,
-    private readonly inventoryEventsPublisher: InventoryEventsPublisher,
+    private readonly outbox: OutboxService,
   ) {}
 
   async create(employeeId: string, dto: CreateInventoryItemDto) {
@@ -87,12 +84,15 @@ export class InventoryItemService {
             initialStock: initialStock.toString(),
           },
         });
+        await this.enqueueItemEvent(
+          tx,
+          INVENTORY_EVENTS.ITEM_CREATED,
+          created.id,
+        );
 
         return created;
       },
     );
-
-    this.emitItemEvent(INVENTORY_EVENTS.ITEM_CREATED, item.id);
     return item;
   }
 
@@ -160,11 +160,10 @@ export class InventoryItemService {
           actionType: 'INVENTORY_ITEM_UPDATED',
           details: { inventoryItemId: id, changes: dto },
         });
+        await this.enqueueItemEvent(tx, INVENTORY_EVENTS.ITEM_UPDATED, id);
         return updated;
       },
     );
-
-    this.emitItemEvent(INVENTORY_EVENTS.ITEM_UPDATED, id);
     return item;
   }
 
@@ -197,9 +196,8 @@ export class InventoryItemService {
         actionType: 'INVENTORY_ITEM_DELETED',
         details: { inventoryItemId: id },
       });
+      await this.enqueueItemEvent(tx, INVENTORY_EVENTS.ITEM_DELETED, id);
     });
-
-    this.emitItemEvent(INVENTORY_EVENTS.ITEM_DELETED, id);
     return {
       success: true,
       message: `Inventory item #${id} has been deleted successfully`,
@@ -227,24 +225,25 @@ export class InventoryItemService {
     return item.name;
   }
 
-  private emitItemEvent(
+  private enqueueItemEvent(
+    tx: ExtendedPrismaTransactionClient,
     eventName:
       | typeof INVENTORY_EVENTS.ITEM_CREATED
       | typeof INVENTORY_EVENTS.ITEM_UPDATED
       | typeof INVENTORY_EVENTS.ITEM_DELETED,
     inventoryItemId: string,
   ) {
-    this.inventoryEventsPublisher.emit(eventName, {
-      ...this.createEventBase([inventoryItemId]),
-      inventoryItemId,
+    return this.outbox.enqueue(tx, {
+      topic: 'inventory',
+      eventName,
+      aggregateType: 'InventoryItem',
+      aggregateId: inventoryItemId,
+      payload: {
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+        inventoryItemIds: [inventoryItemId],
+        inventoryItemId,
+      },
     });
-  }
-
-  private createEventBase(inventoryItemIds: string[]): InventoryEventBase {
-    return {
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-      inventoryItemIds,
-    };
   }
 }

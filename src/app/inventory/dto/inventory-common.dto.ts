@@ -35,17 +35,21 @@ export const IdempotencyKeySchema = z
   .max(120, 'Idempotency key must not exceed 120 characters')
   .optional();
 
-export const InventoryMovementSchema = z.object({
+const InventoryMovementBaseSchema = z.object({
   quantity: PositiveInventoryDecimalInputSchema,
   unitPrice: InventoryDecimalInputSchema.optional(),
   transactionDate: OptionalDateSchema,
   note: z.string().trim().max(500).optional(),
+});
+
+export const InventoryMovementSchema = InventoryMovementBaseSchema.extend({
   idempotencyKey: IdempotencyKeySchema,
 });
 
-export const BulkInventoryMovementItemSchema = InventoryMovementSchema.extend({
-  inventoryItemId: z.uuid('Invalid UUID for inventory item'),
-});
+export const BulkInventoryMovementItemSchema =
+  InventoryMovementBaseSchema.extend({
+    inventoryItemId: z.uuid('Invalid UUID for inventory item'),
+  });
 
 export const InventoryTransactionsQuerySchema =
   InventoryPaginationSchema.extend({

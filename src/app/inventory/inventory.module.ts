@@ -3,7 +3,6 @@ import { InventoryService } from './inventory.service';
 import { InventoryController } from './inventory.controller';
 import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 import { QueryUtilModule } from '../../common/utils/query-util/query-util.module';
-import { InventoryEventsPublisher } from './events/inventory-events.publisher';
 import { InventoryPolicyService } from './policies/inventory-policy.service';
 import { InventoryRepository } from './repositories/inventory.repository';
 import { InventoryAuditService } from './services/inventory-audit.service';
@@ -30,13 +29,11 @@ import { InventoryConsumptionService } from './services/inventory-consumption.se
     InventoryMovementService,
     InventoryConsumptionService,
     InventoryQueryService,
-    InventoryEventsPublisher,
   ],
   exports: [
     InventoryService,
     InventoryMovementService,
     InventoryQueryService,
-    InventoryEventsPublisher,
     InventoryConsumptionService,
   ],
 })

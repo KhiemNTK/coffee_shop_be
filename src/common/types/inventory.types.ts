@@ -48,7 +48,3 @@ export interface InventoryEventPayloadMap {
   'inventory.stock.imported': InventoryStockMovedPayload;
   'inventory.stock.exported': InventoryStockMovedPayload;
 }
-
-export type InventoryEventListener<TEventName extends InventoryEventName> = (
-  payload: InventoryEventPayloadMap[TEventName],
-) => void | Promise<void>;

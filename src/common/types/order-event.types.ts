@@ -91,7 +91,3 @@ export interface OrderEventPayloadMap {
   'order.invoice.paid': OrderInvoicePayload;
   'order.invoice.voided': OrderInvoicePayload;
 }
-
-export type OrderEventListener<TEventName extends OrderEventName> = (
-  payload: OrderEventPayloadMap[TEventName],
-) => void | Promise<void>;

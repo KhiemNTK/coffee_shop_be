@@ -28,7 +28,6 @@ import {
   PRISMA_SERVICE_TOKEN,
 } from '../../common/prisma/prisma.service';
 import { ORDER_EVENTS } from './events/order.events';
-import { OrderEventsPublisher } from './events/order-events.publisher';
 import { OrderPolicyService } from './order-policy.service';
 import type {
   ExtendedPrismaTransactionClient,
@@ -43,6 +42,7 @@ import {
   RESERVATION_NO_SHOW_GRACE_MS,
 } from '../../common/consts/reservation';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
+import { OutboxService } from '../durable/outbox.service';
 
 @Injectable()
 export class OrdersService {
@@ -55,7 +55,7 @@ export class OrdersService {
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
-    private readonly orderEventsPublisher: OrderEventsPublisher,
+    private readonly outbox: OutboxService,
     private readonly orderPolicy: OrderPolicyService,
     private readonly inventoryConsumption: InventoryConsumptionService,
     private readonly cashierShiftLedger: CashierShiftLedgerService,
@@ -182,17 +182,13 @@ export class OrdersService {
   }
 
   async openSession({ tableId, employeeId, guestCount }: OpenSessionInput) {
-    const session = await this.runSerializableTransaction((tx) =>
+    return this.runSerializableTransaction((tx) =>
       this.createOrderSession(tx, {
         tableId,
         employeeId,
         guestCount,
       }),
     );
-
-    this.emitSessionOpened(session);
-
-    return session;
   }
 
   async checkInReservation(reservationId: number, employeeId: string) {
@@ -272,7 +268,6 @@ export class OrdersService {
       };
     });
 
-    this.emitSessionOpened(result.orderSession);
     return result;
   }
 
@@ -311,7 +306,7 @@ export class OrdersService {
       }
     }
 
-    return tx.orderSession.create({
+    const session = await tx.orderSession.create({
       data: {
         tableId: tableId ?? null,
         employeeId,
@@ -320,21 +315,20 @@ export class OrdersService {
       },
       include: this.orderSessionInclude,
     });
-  }
-
-  private emitSessionOpened(session: {
-    id: string;
-    tableId: string | null;
-    employeeId: string;
-    shiftId: string | null;
-  }) {
-    this.orderEventsPublisher.emit(ORDER_EVENTS.SESSION_OPENED, {
-      ...this.createEventBase([session.tableId]),
-      sessionId: session.id,
-      tableId: session.tableId,
-      employeeId: session.employeeId,
-      shiftId: session.shiftId,
-    });
+    await this.enqueueOrderEvent(
+      tx,
+      ORDER_EVENTS.SESSION_OPENED,
+      'OrderSession',
+      session.id,
+      {
+        ...this.createEventBase([session.tableId]),
+        sessionId: session.id,
+        tableId: session.tableId,
+        employeeId: session.employeeId,
+        shiftId: session.shiftId,
+      },
+    );
+    return session;
   }
 
   async getActiveSessions() {
@@ -430,20 +424,26 @@ export class OrdersService {
         include: this.orderSessionInclude,
       });
 
+      if (updatedSession) {
+        await this.enqueueOrderEvent(
+          tx,
+          ORDER_EVENTS.ITEMS_ADDED,
+          'OrderSession',
+          updatedSession.id,
+          {
+            ...this.createEventBase([updatedSession.tableId]),
+            sessionId: updatedSession.id,
+            tableId: updatedSession.tableId,
+            orderItemIds: createdItems.map((item) => item.id),
+          },
+        );
+      }
+
       return {
         session: updatedSession,
         orderItemIds: createdItems.map((item) => item.id),
       };
     });
-
-    if (result.session) {
-      this.orderEventsPublisher.emit(ORDER_EVENTS.ITEMS_ADDED, {
-        ...this.createEventBase([result.session.tableId]),
-        sessionId: result.session.id,
-        tableId: result.session.tableId,
-        orderItemIds: result.orderItemIds,
-      });
-    }
 
     return result.session;
   }
@@ -542,21 +542,24 @@ export class OrdersService {
         throw new NotFoundException(`Order item with ID ${id} not found.`);
       }
 
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.ITEM_STATUS_UPDATED,
+        'OrderItem',
+        updatedItem.id,
+        {
+          ...this.createEventBase([item.orderSession.tableId]),
+          orderItemId: updatedItem.id,
+          orderSessionId: item.orderSessionId,
+          tableId: item.orderSession.tableId,
+          previousStatus: item.serveStatus,
+          currentStatus: updatedItem.serveStatus,
+          isServed: updatedItem.serveStatus === ServeStatus.SERVED,
+        },
+      );
+
       return { item, updatedItem, inventoryMovements, changed: true };
     });
-
-    if (result.changed) {
-      this.inventoryConsumption.emitConsumption(result.inventoryMovements);
-      this.orderEventsPublisher.emit(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
-        ...this.createEventBase([result.item.orderSession.tableId]),
-        orderItemId: result.updatedItem.id,
-        orderSessionId: result.item.orderSessionId,
-        tableId: result.item.orderSession.tableId,
-        previousStatus: result.item.serveStatus,
-        currentStatus: result.updatedItem.serveStatus,
-        isServed: result.updatedItem.serveStatus === ServeStatus.SERVED,
-      });
-    }
 
     return result.updatedItem;
   }
@@ -666,17 +669,23 @@ export class OrdersService {
         throw new NotFoundException(`Order item with ID ${id} not found.`);
       }
 
-      return { item, updatedItem };
-    });
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.ITEM_STATUS_UPDATED,
+        'OrderItem',
+        updatedItem.id,
+        {
+          ...this.createEventBase([item.orderSession.tableId]),
+          orderItemId: updatedItem.id,
+          orderSessionId: item.orderSessionId,
+          tableId: item.orderSession.tableId,
+          previousStatus: item.serveStatus,
+          currentStatus: updatedItem.serveStatus,
+          isServed: false,
+        },
+      );
 
-    this.orderEventsPublisher.emit(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
-      ...this.createEventBase([result.item.orderSession.tableId]),
-      orderItemId: result.updatedItem.id,
-      orderSessionId: result.item.orderSessionId,
-      tableId: result.item.orderSession.tableId,
-      previousStatus: result.item.serveStatus,
-      currentStatus: result.updatedItem.serveStatus,
-      isServed: false,
+      return { item, updatedItem };
     });
 
     return result.updatedItem;
@@ -749,13 +758,19 @@ export class OrdersService {
         throw new NotFoundException(`Order session with ID ${id} not found.`);
       }
 
-      return updatedSession;
-    });
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.SESSION_CANCELLED,
+        'OrderSession',
+        updatedSession.id,
+        {
+          ...this.createEventBase([updatedSession.tableId]),
+          sessionId: updatedSession.id,
+          tableId: updatedSession.tableId,
+        },
+      );
 
-    this.orderEventsPublisher.emit(ORDER_EVENTS.SESSION_CANCELLED, {
-      ...this.createEventBase([updatedSession.tableId]),
-      sessionId: updatedSession.id,
-      tableId: updatedSession.tableId,
+      return updatedSession;
     });
 
     return updatedSession;
@@ -849,6 +864,19 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.SESSION_TABLE_TRANSFERRED,
+        'OrderSession',
+        activeSession.id,
+        {
+          ...this.createEventBase([fromTableId, toTableId]),
+          sessionId: activeSession.id,
+          fromTableId,
+          toTableId,
+        },
+      );
+
       return {
         response: this.success('Table transferred successfully.'),
         sessionId: activeSession.id,
@@ -858,13 +886,6 @@ export class OrdersService {
     this.logger.log(
       `Session ${result.sessionId} transferred from ${fromTableId} to ${toTableId}`,
     );
-
-    this.orderEventsPublisher.emit(ORDER_EVENTS.SESSION_TABLE_TRANSFERRED, {
-      ...this.createEventBase([fromTableId, toTableId]),
-      sessionId: result.sessionId,
-      fromTableId,
-      toTableId,
-    });
 
     return result.response;
   }
@@ -957,6 +978,23 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.SESSIONS_MERGED,
+        'OrderSession',
+        targetSession.id,
+        {
+          ...this.createEventBase([
+            ...uniqueSourceTableIds,
+            destinationTableId,
+          ]),
+          targetSessionId: targetSession.id,
+          destinationTableId,
+          sourceSessionIds,
+          sourceTableIds: uniqueSourceTableIds,
+        },
+      );
+
       return {
         response: this.success('Tables merged successfully.'),
         targetSessionId: targetSession.id,
@@ -967,14 +1005,6 @@ export class OrdersService {
     this.logger.log(
       `Merged sessions [${result.sourceSessionIds.join(', ')}] into ${result.targetSessionId}`,
     );
-
-    this.orderEventsPublisher.emit(ORDER_EVENTS.SESSIONS_MERGED, {
-      ...this.createEventBase([...uniqueSourceTableIds, destinationTableId]),
-      targetSessionId: result.targetSessionId,
-      destinationTableId,
-      sourceSessionIds: result.sourceSessionIds,
-      sourceTableIds: uniqueSourceTableIds,
-    });
 
     return result.response;
   }
@@ -1169,6 +1199,20 @@ export class OrdersService {
         }
       }
 
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.SESSION_SPLIT,
+        'OrderSession',
+        sourceSession.id,
+        {
+          ...this.createEventBase([sourceSession.tableId, destinationTableId]),
+          sourceSessionId: sourceSession.id,
+          newSessionId: newDestSession.id,
+          sourceTableId: sourceSession.tableId,
+          destinationTableId,
+        },
+      );
+
       return {
         response: this.success('Table split successfully.'),
         sourceSessionId: sourceSession.id,
@@ -1180,14 +1224,6 @@ export class OrdersService {
     this.logger.log(
       `Split items from session ${result.sourceSessionId} to new session ${result.newSessionId}`,
     );
-
-    this.orderEventsPublisher.emit(ORDER_EVENTS.SESSION_SPLIT, {
-      ...this.createEventBase([result.sourceTableId, destinationTableId]),
-      sourceSessionId: result.sourceSessionId,
-      newSessionId: result.newSessionId,
-      sourceTableId: result.sourceTableId,
-      destinationTableId,
-    });
 
     return result.response;
   }
@@ -1248,18 +1284,40 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.TABLE_CLEARED,
+        'DiningTable',
+        tableId,
+        {
+          ...this.createEventBase([tableId]),
+          tableId,
+          cancelledSessionId: activeSession?.id ?? null,
+        },
+      );
+
       return {
         response: this.success('Table cleared and session cancelled.'),
         cancelledSessionId: activeSession?.id ?? null,
       };
     });
 
-    this.orderEventsPublisher.emit(ORDER_EVENTS.TABLE_CLEARED, {
-      ...this.createEventBase([tableId]),
-      tableId,
-      cancelledSessionId: result.cancelledSessionId,
-    });
-
     return result.response;
+  }
+
+  private enqueueOrderEvent(
+    tx: ExtendedPrismaTransactionClient,
+    eventName: string,
+    aggregateType: string,
+    aggregateId: string,
+    payload: unknown,
+  ) {
+    return this.outbox.enqueue(tx, {
+      topic: 'order',
+      eventName,
+      aggregateType,
+      aggregateId,
+      payload,
+    });
   }
 }

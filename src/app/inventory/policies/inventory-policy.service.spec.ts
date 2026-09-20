@@ -19,12 +19,6 @@ describe('InventoryPolicyService', () => {
     );
   });
 
-  it('rejects unsafe idempotency without a persisted store', () => {
-    expect(() => service.assertNoIdempotencyKey('request-123')).toThrow(
-      BadRequestException,
-    );
-  });
-
   it('rejects duplicate item IDs in bulk movements', () => {
     expect(() =>
       service.assertNoDuplicateInventoryItems(['item-1', 'item-1']),

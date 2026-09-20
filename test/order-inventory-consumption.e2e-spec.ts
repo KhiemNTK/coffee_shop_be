@@ -5,13 +5,14 @@ import {
   ServeStatus,
   SessionStatus,
 } from '@prisma/client';
+import { OutboxService } from '../src/app/durable/outbox.service';
 import { InventoryConsumptionService } from '../src/app/inventory/services/inventory-consumption.service';
 
 describe('Order inventory consumption (e2e)', () => {
   const prisma = new PrismaClient();
-  const consumptionService = new InventoryConsumptionService({
-    emit: jest.fn(),
-  } as never);
+  const consumptionService = new InventoryConsumptionService(
+    new OutboxService(),
+  );
   const suffix = randomUUID();
 
   let positionId: string;
@@ -134,6 +135,13 @@ describe('Order inventory consumption (e2e)', () => {
 
   afterAll(async () => {
     try {
+      await prisma.outboxEvent.deleteMany({
+        where: {
+          aggregateId: {
+            in: [insufficientOrderItemId, concurrentOrderItemId],
+          },
+        },
+      });
       await prisma.inventoryWaste.deleteMany({
         where: {
           orderItemId: { in: [insufficientOrderItemId, concurrentOrderItemId] },
