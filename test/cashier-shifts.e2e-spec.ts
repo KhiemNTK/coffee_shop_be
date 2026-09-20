@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 import { CashierShiftLedgerService } from '../src/app/cashier-shifts/cashier-shift-ledger.service';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
+import { IdempotencyService } from '../src/app/durable/idempotency.service';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import {
@@ -26,6 +27,7 @@ describe('Cashier shift ledger (e2e)', () => {
     prisma as unknown as ExtendedPrismaClient,
     new PaginationUtilService(),
     ledger,
+    new IdempotencyService(prisma as unknown as ExtendedPrismaClient),
   );
   const suffix = randomUUID();
 
@@ -141,8 +143,13 @@ describe('Cashier shift ledger (e2e)', () => {
       await prisma.orderSession.deleteMany({
         where: { employeeId: { in: employeeIds } },
       });
-      await prisma.actionLog.deleteMany({
-        where: { employeeId: { in: employeeIds } },
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          "SET LOCAL app.allow_audit_log_mutation = 'on'",
+        );
+        await tx.actionLog.deleteMany({
+          where: { employeeId: { in: employeeIds } },
+        });
       });
       await prisma.cashierShift.deleteMany({
         where: { employeeId: { in: employeeIds } },

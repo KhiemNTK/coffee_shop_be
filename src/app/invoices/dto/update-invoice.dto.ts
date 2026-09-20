@@ -4,8 +4,8 @@ import { z } from 'zod';
 import { DecimalInputSchema } from './create-invoice.dto';
 
 export const UpdateInvoicePaymentInputSchema = z.object({
-  paymentStatus: z.enum([PaymentStatus.PAID, PaymentStatus.FAILED]),
-  paymentMethod: z.enum(PaymentMethod).optional(),
+  paymentStatus: z.literal(PaymentStatus.PAID),
+  paymentMethod: z.enum([PaymentMethod.CASH, PaymentMethod.CARD]).optional(),
   amountTendered: DecimalInputSchema.optional(),
   closeSessionAfterPayment: z.boolean().optional().default(true),
 });

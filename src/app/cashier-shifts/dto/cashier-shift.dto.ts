@@ -31,6 +31,8 @@ const OptionalDateSchema = z
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 
+const IdempotencyKeySchema = z.string().trim().min(8).max(120).optional();
+
 export class CreateFundDto extends createZodDto(
   z.object({
     name: z.string().trim().min(1).max(120),
@@ -63,6 +65,7 @@ export class OpenCashierShiftDto extends createZodDto(
   z.object({
     fundId: z.uuid('Invalid fund ID'),
     startingCash: CashAmountSchema,
+    idempotencyKey: IdempotencyKeySchema,
   }),
 ) {}
 
@@ -70,6 +73,7 @@ export class CloseCashierShiftDto extends createZodDto(
   z.object({
     reportedEndingCash: CashAmountSchema,
     closingNote: z.string().trim().min(1).max(500).nullish(),
+    idempotencyKey: IdempotencyKeySchema,
   }),
 ) {}
 
@@ -78,6 +82,7 @@ export class CreateCashMovementDto extends createZodDto(
     type: z.enum(CashFlowType),
     amount: PositiveCashAmountSchema,
     description: z.string().trim().min(1).max(300),
+    idempotencyKey: IdempotencyKeySchema,
   }),
 ) {}
 

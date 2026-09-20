@@ -4,6 +4,7 @@ import {
   BankStatementMatchStatus,
   CashExpenseRequestStatus,
   FundType,
+  PaymentAttemptStatus,
   PaymentMethod,
   PaymentStatus,
   Prisma,
@@ -56,6 +57,15 @@ describe('Reports queries (e2e)', () => {
   let unmatchedStatementBaselineAmount = new Prisma.Decimal(0);
   let mismatchedStatementBaselineCount = 0;
   let mismatchedStatementBaselineAmount = new Prisma.Decimal(0);
+  let currentPendingAttemptBaselineCount = 0;
+  let currentPendingAttemptBaselineAmount = new Prisma.Decimal(0);
+  let stalePendingAttemptBaselineCount = 0;
+  let stalePendingAttemptBaselineAmount = new Prisma.Decimal(0);
+  let successfulAttemptBaselineCount = 0;
+  let successfulAttemptBaselineAmount = new Prisma.Decimal(0);
+  let failedAttemptBaselineCount = 0;
+  let failedAttemptBaselineAmount = new Prisma.Decimal(0);
+  let webhookExceptionBaselineCount = 0;
 
   beforeAll(async () => {
     const [
@@ -66,6 +76,11 @@ describe('Reports queries (e2e)', () => {
       settledDepositBaseline,
       unmatchedStatementBaseline,
       mismatchedStatementBaseline,
+      currentPendingAttemptBaseline,
+      stalePendingAttemptBaseline,
+      successfulAttemptBaseline,
+      failedAttemptBaseline,
+      webhookExceptionBaseline,
     ] = await Promise.all([
       prisma.cashHandover.aggregate({
         where: { status: 'PENDING' },
@@ -123,6 +138,55 @@ describe('Reports queries (e2e)', () => {
         _count: true,
         _sum: { amount: true },
       }),
+      prisma.paymentAttempt.aggregate({
+        where: {
+          status: PaymentAttemptStatus.PENDING,
+          expiresAt: { gt: new Date() },
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentAttempt.aggregate({
+        where: {
+          status: PaymentAttemptStatus.PENDING,
+          expiresAt: { lte: new Date() },
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentAttempt.aggregate({
+        where: {
+          status: PaymentAttemptStatus.SUCCEEDED,
+          completedAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
+          },
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentAttempt.aggregate({
+        where: {
+          status: PaymentAttemptStatus.FAILED,
+          completedAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
+          },
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentWebhookEvent.count({
+        where: {
+          receivedAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
+          },
+          processingCode: {
+            in: ['01', '04', '99', '02_PAYMENT_STATE_CONFLICT'],
+          },
+        },
+      }),
     ]);
     pendingHandoverBaselineCount = pendingHandoverBaseline._count;
     pendingHandoverBaselineAmount =
@@ -145,6 +209,19 @@ describe('Reports queries (e2e)', () => {
     mismatchedStatementBaselineCount = mismatchedStatementBaseline._count;
     mismatchedStatementBaselineAmount =
       mismatchedStatementBaseline._sum.amount ?? new Prisma.Decimal(0);
+    currentPendingAttemptBaselineCount = currentPendingAttemptBaseline._count;
+    currentPendingAttemptBaselineAmount =
+      currentPendingAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    stalePendingAttemptBaselineCount = stalePendingAttemptBaseline._count;
+    stalePendingAttemptBaselineAmount =
+      stalePendingAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    successfulAttemptBaselineCount = successfulAttemptBaseline._count;
+    successfulAttemptBaselineAmount =
+      successfulAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    failedAttemptBaselineCount = failedAttemptBaseline._count;
+    failedAttemptBaselineAmount =
+      failedAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    webhookExceptionBaselineCount = webhookExceptionBaseline;
 
     const position = await prisma.position.create({
       data: { name: `Report Position ${suffix}`, salary: 0 },
@@ -560,6 +637,27 @@ describe('Reports queries (e2e)', () => {
       totalOverageAmount: '0.00',
       openingShortageAmount: '10.00',
       openingOverageAmount: '0.00',
+    });
+    const completedAttemptCount =
+      successfulAttemptBaselineCount + failedAttemptBaselineCount;
+    expect(report.paymentOperations).toEqual({
+      currentPendingAttemptCount: currentPendingAttemptBaselineCount,
+      currentPendingAttemptAmount:
+        currentPendingAttemptBaselineAmount.toFixed(2),
+      stalePendingAttemptCount: stalePendingAttemptBaselineCount,
+      stalePendingAttemptAmount: stalePendingAttemptBaselineAmount.toFixed(2),
+      successfulAttemptCount: successfulAttemptBaselineCount,
+      successfulAttemptAmount: successfulAttemptBaselineAmount.toFixed(2),
+      failedAttemptCount: failedAttemptBaselineCount,
+      failedAttemptAmount: failedAttemptBaselineAmount.toFixed(2),
+      successRatePercent:
+        completedAttemptCount === 0
+          ? '0.00'
+          : (
+              (successfulAttemptBaselineCount / completedAttemptCount) *
+              100
+            ).toFixed(2),
+      webhookExceptionCount: webhookExceptionBaselineCount,
     });
   });
 

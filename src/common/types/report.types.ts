@@ -109,3 +109,15 @@ export interface ReportCashVarianceTrendRow {
   cashShortageAmount: Decimal;
   cashOverageAmount: Decimal;
 }
+
+export interface ReportPaymentOperationsRow {
+  currentPendingAttemptCount: bigint;
+  currentPendingAttemptAmount: Decimal;
+  stalePendingAttemptCount: bigint;
+  stalePendingAttemptAmount: Decimal;
+  successfulAttemptCount: bigint;
+  successfulAttemptAmount: Decimal;
+  failedAttemptCount: bigint;
+  failedAttemptAmount: Decimal;
+  webhookExceptionCount: bigint;
+}

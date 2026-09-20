@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
   PaymentMethod,
@@ -10,7 +11,8 @@ import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
-import { OrderEventsPublisher } from '../orders/events/order-events.publisher';
+import { IdempotencyService } from '../durable/idempotency.service';
+import { OutboxService } from '../durable/outbox.service';
 import { PromotionCalculatorService } from '../promotions/services/promotion-calculator.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
@@ -61,6 +63,7 @@ describe('InvoicesService', () => {
         }),
         findUnique: jest.fn().mockResolvedValue(finalInvoice),
       },
+      outboxEvent: { create: jest.fn().mockResolvedValue({ id: 'event-id' }) },
     };
     const prisma = {
       $transaction: jest.fn((callback: (client: any) => unknown) =>
@@ -73,7 +76,7 @@ describe('InvoicesService', () => {
         .mockResolvedValue({ id: 'shift-id', fundId: 'fund-id' }),
       recordCashInvoice: jest.fn(),
     };
-    const events = { emit: jest.fn() };
+    const outbox = { enqueue: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -86,7 +89,8 @@ describe('InvoicesService', () => {
           provide: InvoiceNumberService,
           useValue: { generate: jest.fn().mockResolvedValue('INV-001') },
         },
-        { provide: OrderEventsPublisher, useValue: events },
+        { provide: IdempotencyService, useValue: {} },
+        { provide: OutboxService, useValue: outbox },
         { provide: PromotionCalculatorService, useValue: {} },
         { provide: CashierShiftLedgerService, useValue: ledger },
       ],
@@ -129,5 +133,17 @@ describe('InvoicesService', () => {
         data: expect.objectContaining({ shiftId: null }),
       }),
     );
+  });
+
+  it('does not allow checkout to bypass provider confirmation for transfers', async () => {
+    await expect(
+      service.checkoutInvoice('employee-id', {
+        orderSessionId: 'session-id',
+        paymentMethod: PaymentMethod.TRANSFER,
+        closeSessionAfterPayment: true,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
   });
 });

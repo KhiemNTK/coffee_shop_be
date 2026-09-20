@@ -15,6 +15,7 @@ import {
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
+import { IdempotencyService } from '../durable/idempotency.service';
 import { CashierShiftsService } from './cashier-shifts.service';
 
 describe('CashierShiftsService', () => {
@@ -52,6 +53,9 @@ describe('CashierShiftsService', () => {
       cashHandover: {
         findFirst: jest.fn().mockResolvedValue(null),
       },
+      paymentAttempt: {
+        count: jest.fn().mockResolvedValue(0),
+      },
       systemSetting: {
         findFirst: jest.fn().mockResolvedValue({ value: 500000 }),
       },
@@ -70,6 +74,7 @@ describe('CashierShiftsService', () => {
         PaginationUtilService,
         { provide: PRISMA_SERVICE_TOKEN, useValue: prisma },
         { provide: CashierShiftLedgerService, useValue: ledger },
+        { provide: IdempotencyService, useValue: {} },
       ],
     }).compile();
 
@@ -281,6 +286,18 @@ describe('CashierShiftsService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.orderSession.count).not.toHaveBeenCalled();
+  });
+
+  it('does not close a shift with pending online payments', async () => {
+    tx.cashierShift.findFirst.mockResolvedValue({ id: 'shift-id' });
+    tx.paymentAttempt.count.mockResolvedValue(1);
+
+    await expect(
+      service.close('employee-id', { reportedEndingCash: '0' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(tx.orderSession.count).not.toHaveBeenCalled();
+    expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
   });
 
   it('requires an explanation for a material closing discrepancy', async () => {

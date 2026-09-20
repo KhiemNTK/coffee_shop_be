@@ -65,6 +65,9 @@ export const PermissionKeys = {
   INVOICES_UPDATE: '/invoices_update',
   INVOICES_DELETE: '/invoices_delete',
 
+  PAYMENT_ATTEMPTS_CREATE: '/payment-attempts_create',
+  PAYMENT_ATTEMPTS_READ: '/payment-attempts_read',
+
   RESERVATIONS_READ: '/reservations_read',
   RESERVATIONS_CREATE: '/reservations_create',
   RESERVATIONS_UPDATE: '/reservations_update',

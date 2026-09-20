@@ -24,9 +24,9 @@ export class InvoicePolicyService {
     }
   }
 
-  assertInvoiceIsPending(invoice: { paymentStatus: PaymentStatus }) {
-    if (invoice.paymentStatus !== PaymentStatus.PENDING) {
-      throw new BadRequestException('Only pending invoices can be changed.');
+  assertInvoiceIsUnpaid(invoice: { paymentStatus: PaymentStatus }) {
+    if (invoice.paymentStatus !== PaymentStatus.UNPAID) {
+      throw new BadRequestException('Only unpaid invoices can be changed.');
     }
   }
 

@@ -144,6 +144,19 @@ describe('ReportsService', () => {
           openingShortageAmount: new Prisma.Decimal('10000'),
           openingOverageAmount: new Prisma.Decimal('0'),
         },
+      ])
+      .mockResolvedValueOnce([
+        {
+          currentPendingAttemptCount: 2n,
+          currentPendingAttemptAmount: new Prisma.Decimal('250000'),
+          stalePendingAttemptCount: 1n,
+          stalePendingAttemptAmount: new Prisma.Decimal('50000'),
+          successfulAttemptCount: 8n,
+          successfulAttemptAmount: new Prisma.Decimal('1200000'),
+          failedAttemptCount: 2n,
+          failedAttemptAmount: new Prisma.Decimal('200000'),
+          webhookExceptionCount: 1n,
+        },
       ]);
     tx.inventoryItem.findMany.mockResolvedValue([
       {
@@ -236,6 +249,18 @@ describe('ReportsService', () => {
       totalOverageAmount: '0.00',
       openingShortageAmount: '10000.00',
       openingOverageAmount: '0.00',
+    });
+    expect(result.paymentOperations).toEqual({
+      currentPendingAttemptCount: 2,
+      currentPendingAttemptAmount: '250000.00',
+      stalePendingAttemptCount: 1,
+      stalePendingAttemptAmount: '50000.00',
+      successfulAttemptCount: 8,
+      successfulAttemptAmount: '1200000.00',
+      failedAttemptCount: 2,
+      failedAttemptAmount: '200000.00',
+      successRatePercent: '80.00',
+      webhookExceptionCount: 1,
     });
   });
 

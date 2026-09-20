@@ -16,6 +16,7 @@ import { InventoryController } from '../inventory/inventory.controller';
 import { InvoicesController } from '../invoices/invoices.controller';
 import { MenuController } from '../menu/menu.controller';
 import { OrdersController } from '../orders/orders.controller';
+import { PaymentsController } from '../payments/payments.controller';
 import { PermissionsController } from '../permissions/permissions.controller';
 import { PositionsController } from '../positions/positions.controller';
 import { PromotionsController } from '../promotions/promotions.controller';
@@ -40,6 +41,7 @@ const controllers = [
   InvoicesController,
   MenuController,
   OrdersController,
+  PaymentsController,
   PermissionsController,
   PositionsController,
   PromotionsController,

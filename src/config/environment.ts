@@ -55,6 +55,18 @@ const EnvironmentSchema = z
     MAIL_USER: z.string().optional(),
     MAIL_PASS: z.string().optional(),
     MAIL_FROM: z.string().optional(),
+    VNPAY_TMN_CODE: z.string().trim().min(1).max(32).optional(),
+    VNPAY_HASH_SECRET: z.string().min(8).optional(),
+    VNPAY_PAYMENT_URL: z
+      .url()
+      .default('https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
+    VNPAY_RETURN_URL: z.url().optional(),
+    VNPAY_ATTEMPT_TTL_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(60)
+      .default(15),
   })
   .passthrough();
 
@@ -86,6 +98,10 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     'MAIL_USER',
     'MAIL_PASS',
     'MAIL_FROM',
+    'VNPAY_TMN_CODE',
+    'VNPAY_HASH_SECRET',
+    'VNPAY_PAYMENT_URL',
+    'VNPAY_RETURN_URL',
   ] as const;
   const missing = required.filter((key) => !raw[key]);
   if (missing.length > 0) {
@@ -128,6 +144,31 @@ export function validateEnvironment(raw: Record<string, unknown>) {
   }
   if (!environment.PASSWORD_RESET_URL.startsWith('https://')) {
     throw new Error('PASSWORD_RESET_URL must use HTTPS in production');
+  }
+  if (!environment.VNPAY_RETURN_URL?.startsWith('https://')) {
+    throw new Error('VNPAY_RETURN_URL must use HTTPS in production');
+  }
+  if (!environment.VNPAY_PAYMENT_URL.startsWith('https://')) {
+    throw new Error('VNPAY_PAYMENT_URL must use HTTPS in production');
+  }
+  if (
+    ['your_', 'replace-', 'changeme'].some((marker) =>
+      environment.VNPAY_TMN_CODE?.toLowerCase().includes(marker),
+    )
+  ) {
+    throw new Error('VNPAY_TMN_CODE must not use a placeholder value');
+  }
+  if ((environment.VNPAY_HASH_SECRET?.length ?? 0) < 32) {
+    throw new Error(
+      'VNPAY_HASH_SECRET must be a strong secret of at least 32 characters',
+    );
+  }
+  if (
+    ['replace-', 'development', ...WEAK_SECRET_MARKERS].some((marker) =>
+      environment.VNPAY_HASH_SECRET?.toLowerCase().includes(marker),
+    )
+  ) {
+    throw new Error('VNPAY_HASH_SECRET must not use a placeholder value');
   }
 
   return environment;

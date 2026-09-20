@@ -12,6 +12,7 @@ import type {
   ReportInventoryWasteRow,
   ReportMenuItemRow,
   ReportPaymentMethodRow,
+  ReportPaymentOperationsRow,
   ReportPromotionRow,
   ReportQueryPeriod,
   ReportReservationRow,
@@ -63,6 +64,7 @@ export class ReportsService {
           query.topLimit,
         );
         const cashRisk = await this.getCashRisk(tx, period, query.topLimit);
+        const paymentOperations = await this.getPaymentOperations(tx, period);
 
         return {
           summary,
@@ -79,6 +81,7 @@ export class ReportsService {
           })),
           inventoryWaste,
           cashRisk,
+          paymentOperations,
         };
       },
       {
@@ -115,6 +118,7 @@ export class ReportsService {
         { sheetName: 'Cash Risk Summary', data: [report.cashRisk.overview] },
         { sheetName: 'Cash Variance', data: report.cashRisk.varianceTrend },
         { sheetName: 'Employee Cash Risk', data: report.cashRisk.employees },
+        { sheetName: 'Payment Operations', data: [report.paymentOperations] },
       ],
     });
   }
@@ -617,6 +621,88 @@ export class ReportsService {
       cashShortageAmount: this.money(row.cashShortageAmount),
       cashOverageAmount: this.money(row.cashOverageAmount),
     }));
+  }
+
+  private async getPaymentOperations(
+    tx: ExtendedPrismaTransactionClient,
+    period: ReportQueryPeriod,
+  ) {
+    const [row] = await tx.$queryRaw<ReportPaymentOperationsRow[]>(Prisma.sql`
+      SELECT
+        attempt_metrics.*,
+        webhook_metrics.*
+      FROM (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE pa."status" = 'PENDING'
+              AND pa."expiresAt" > CURRENT_TIMESTAMP
+          )::bigint AS "currentPendingAttemptCount",
+          COALESCE(SUM(pa."amount") FILTER (
+            WHERE pa."status" = 'PENDING'
+              AND pa."expiresAt" > CURRENT_TIMESTAMP
+          ), 0)::numeric AS "currentPendingAttemptAmount",
+          COUNT(*) FILTER (
+            WHERE pa."status" = 'PENDING'
+              AND pa."expiresAt" <= CURRENT_TIMESTAMP
+          )::bigint AS "stalePendingAttemptCount",
+          COALESCE(SUM(pa."amount") FILTER (
+            WHERE pa."status" = 'PENDING'
+              AND pa."expiresAt" <= CURRENT_TIMESTAMP
+          ), 0)::numeric AS "stalePendingAttemptAmount",
+          COUNT(*) FILTER (
+            WHERE pa."status" = 'SUCCEEDED'
+              AND pa."completedAt" >= ${period.from}
+              AND pa."completedAt" < ${period.to}
+          )::bigint AS "successfulAttemptCount",
+          COALESCE(SUM(pa."amount") FILTER (
+            WHERE pa."status" = 'SUCCEEDED'
+              AND pa."completedAt" >= ${period.from}
+              AND pa."completedAt" < ${period.to}
+          ), 0)::numeric AS "successfulAttemptAmount",
+          COUNT(*) FILTER (
+            WHERE pa."status" = 'FAILED'
+              AND pa."completedAt" >= ${period.from}
+              AND pa."completedAt" < ${period.to}
+          )::bigint AS "failedAttemptCount",
+          COALESCE(SUM(pa."amount") FILTER (
+            WHERE pa."status" = 'FAILED'
+              AND pa."completedAt" >= ${period.from}
+              AND pa."completedAt" < ${period.to}
+          ), 0)::numeric AS "failedAttemptAmount"
+        FROM "PaymentAttempt" pa
+      ) attempt_metrics
+      CROSS JOIN (
+        SELECT COUNT(*)::bigint AS "webhookExceptionCount"
+        FROM "PaymentWebhookEvent" pwe
+        WHERE pwe."receivedAt" >= ${period.from}
+          AND pwe."receivedAt" < ${period.to}
+          AND pwe."processingCode" IN (
+            '01',
+            '04',
+            '99',
+            '02_PAYMENT_STATE_CONFLICT'
+          )
+      ) webhook_metrics
+    `);
+
+    const successfulAttemptCount = Number(row?.successfulAttemptCount ?? 0);
+    const failedAttemptCount = Number(row?.failedAttemptCount ?? 0);
+    const completedAttemptCount = successfulAttemptCount + failedAttemptCount;
+    return {
+      currentPendingAttemptCount: Number(row?.currentPendingAttemptCount ?? 0),
+      currentPendingAttemptAmount: this.money(row?.currentPendingAttemptAmount),
+      stalePendingAttemptCount: Number(row?.stalePendingAttemptCount ?? 0),
+      stalePendingAttemptAmount: this.money(row?.stalePendingAttemptAmount),
+      successfulAttemptCount,
+      successfulAttemptAmount: this.money(row?.successfulAttemptAmount),
+      failedAttemptCount,
+      failedAttemptAmount: this.money(row?.failedAttemptAmount),
+      successRatePercent:
+        completedAttemptCount === 0
+          ? '0.00'
+          : ((successfulAttemptCount / completedAttemptCount) * 100).toFixed(2),
+      webhookExceptionCount: Number(row?.webhookExceptionCount ?? 0),
+    };
   }
 
   private async getEmployeeCashRisk(

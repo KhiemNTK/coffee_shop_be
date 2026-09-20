@@ -14,6 +14,7 @@ import {
   CashHandoverStatus,
   FundType,
   PaymentMethod,
+  PaymentAttemptStatus,
   PaymentStatus,
   Prisma,
   SettingValueType,
@@ -27,6 +28,7 @@ import {
 } from '../../common/prisma/prisma.service';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
+import { IdempotencyService } from '../durable/idempotency.service';
 import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
 import {
   ApproveCashExpenseRequestDto,
@@ -47,55 +49,65 @@ export class CashierShiftsService {
     private readonly prisma: ExtendedPrismaClient,
     private readonly paginationUtil: PaginationUtilService,
     private readonly ledger: CashierShiftLedgerService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   async open(employeeId: string, dto: OpenCashierShiftDto) {
+    const { idempotencyKey, ...request } = dto;
     try {
-      return await this.runSerializable(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
-        const fund = await tx.fund.findFirst({
-          where: { id: dto.fundId, deletedAt: null },
-          select: { id: true, type: true, balance: true },
-        });
-        if (!fund) {
-          throw new NotFoundException(`Fund with ID ${dto.fundId} not found.`);
-        }
-        if (fund.type !== FundType.CASH) {
-          throw new ConflictException('Cashier shifts require a CASH fund.');
-        }
-        const pendingHandover = await tx.cashHandover.findFirst({
-          where: {
-            sourceFundId: fund.id,
-            status: CashHandoverStatus.PENDING,
-          },
-          select: { id: true },
-        });
-        if (pendingHandover) {
-          throw new ConflictException(
-            'The fund has a pending cash handover and cannot open a new shift.',
-          );
-        }
+      return await this.executeMutation(
+        employeeId,
+        'cashier-shift.open',
+        idempotencyKey,
+        request,
+        async (tx) => {
+          await this.assertActiveEmployee(tx, employeeId);
+          const fund = await tx.fund.findFirst({
+            where: { id: dto.fundId, deletedAt: null },
+            select: { id: true, type: true, balance: true },
+          });
+          if (!fund) {
+            throw new NotFoundException(
+              `Fund with ID ${dto.fundId} not found.`,
+            );
+          }
+          if (fund.type !== FundType.CASH) {
+            throw new ConflictException('Cashier shifts require a CASH fund.');
+          }
+          const pendingHandover = await tx.cashHandover.findFirst({
+            where: {
+              sourceFundId: fund.id,
+              status: CashHandoverStatus.PENDING,
+            },
+            select: { id: true },
+          });
+          if (pendingHandover) {
+            throw new ConflictException(
+              'The fund has a pending cash handover and cannot open a new shift.',
+            );
+          }
 
-        const startingCash = new Prisma.Decimal(dto.startingCash);
-        const shift = await tx.cashierShift.create({
-          data: {
-            employeeId,
+          const startingCash = new Prisma.Decimal(dto.startingCash);
+          const shift = await tx.cashierShift.create({
+            data: {
+              employeeId,
+              fundId: fund.id,
+              startingCash,
+              expectedStartingCash: fund.balance,
+              openingDifference: startingCash.minus(fund.balance),
+            },
+            include: this.shiftInclude,
+          });
+          await this.log(tx, employeeId, 'CASHIER_SHIFT_OPENED', {
+            shiftId: shift.id,
             fundId: fund.id,
-            startingCash,
-            expectedStartingCash: fund.balance,
-            openingDifference: startingCash.minus(fund.balance),
-          },
-          include: this.shiftInclude,
-        });
-        await this.log(tx, employeeId, 'CASHIER_SHIFT_OPENED', {
-          shiftId: shift.id,
-          fundId: fund.id,
-          startingCash: shift.startingCash.toString(),
-          expectedStartingCash: shift.expectedStartingCash.toString(),
-          openingDifference: shift.openingDifference.toString(),
-        });
-        return shift;
-      });
+            startingCash: shift.startingCash.toString(),
+            expectedStartingCash: shift.expectedStartingCash.toString(),
+            openingDifference: shift.openingDifference.toString(),
+          });
+          return shift;
+        },
+      );
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -193,58 +205,65 @@ export class CashierShiftsService {
   }
 
   async addMovement(employeeId: string, dto: CreateCashMovementDto) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
-      const shift = await this.ledger.requireOpenShift(tx, employeeId);
-      const amount = new Prisma.Decimal(dto.amount);
-      if (dto.type === CashFlowType.EXPENSE) {
-        const threshold = await this.getCashControlThreshold(
-          tx,
-          CashControlSettingKeys.EXPENSE_APPROVAL_THRESHOLD,
-        );
-        if (amount.gte(threshold)) {
-          const expenseRequest = await tx.cashExpenseRequest.create({
-            data: {
-              amount,
-              description: dto.description,
-              requestedById: employeeId,
+    const { idempotencyKey, ...request } = dto;
+    return this.executeMutation(
+      employeeId,
+      'cashier-shift.movement.create',
+      idempotencyKey,
+      request,
+      async (tx) => {
+        await this.assertActiveEmployee(tx, employeeId);
+        const shift = await this.ledger.requireOpenShift(tx, employeeId);
+        const amount = new Prisma.Decimal(dto.amount);
+        if (dto.type === CashFlowType.EXPENSE) {
+          const threshold = await this.getCashControlThreshold(
+            tx,
+            CashControlSettingKeys.EXPENSE_APPROVAL_THRESHOLD,
+          );
+          if (amount.gte(threshold)) {
+            const expenseRequest = await tx.cashExpenseRequest.create({
+              data: {
+                amount,
+                description: dto.description,
+                requestedById: employeeId,
+                shiftId: shift.id,
+                fundId: shift.fundId,
+              },
+              include: this.expenseRequestInclude,
+            });
+            const fund = await tx.fund.findUniqueOrThrow({
+              where: { id: shift.fundId },
+              select: { balance: true },
+            });
+            await this.log(tx, employeeId, 'CASH_EXPENSE_REQUESTED', {
+              requestId: expenseRequest.id,
               shiftId: shift.id,
-              fundId: shift.fundId,
-            },
-            include: this.expenseRequestInclude,
-          });
-          const fund = await tx.fund.findUniqueOrThrow({
-            where: { id: shift.fundId },
-            select: { balance: true },
-          });
-          await this.log(tx, employeeId, 'CASH_EXPENSE_REQUESTED', {
-            requestId: expenseRequest.id,
-            shiftId: shift.id,
-            amount: amount.toString(),
-          });
-          return {
-            movement: null,
-            fundBalance: fund.balance,
-            expenseRequest,
-          };
+              amount: amount.toString(),
+            });
+            return {
+              movement: null,
+              fundBalance: fund.balance,
+              expenseRequest,
+            };
+          }
         }
-      }
 
-      const result = await this.postMovement(tx, {
-        shift,
-        employeeId,
-        type: dto.type,
-        amount,
-        description: dto.description,
-      });
-      await this.log(tx, employeeId, 'CASH_MOVEMENT_CREATED', {
-        shiftId: shift.id,
-        transactionId: result.movement.id,
-        type: dto.type,
-        amount: amount.toString(),
-      });
-      return { ...result, expenseRequest: null };
-    });
+        const result = await this.postMovement(tx, {
+          shift,
+          employeeId,
+          type: dto.type,
+          amount,
+          description: dto.description,
+        });
+        await this.log(tx, employeeId, 'CASH_MOVEMENT_CREATED', {
+          shiftId: shift.id,
+          transactionId: result.movement.id,
+          type: dto.type,
+          amount: amount.toString(),
+        });
+        return { ...result, expenseRequest: null };
+      },
+    );
   }
 
   async approveExpenseRequest(
@@ -335,86 +354,119 @@ export class CashierShiftsService {
   }
 
   async close(employeeId: string, dto: CloseCashierShiftDto) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
-      const shift = await tx.cashierShift.findFirst({
-        where: { employeeId, status: ShiftStatus.OPEN },
-        include: this.shiftInclude,
-      });
-      if (!shift) {
-        throw new ConflictException('An open cashier shift is required.');
-      }
-      const pendingExpenseRequests = await tx.cashExpenseRequest.count({
-        where: {
-          shiftId: shift.id,
-          status: CashExpenseRequestStatus.PENDING,
-        },
-      });
-      if (pendingExpenseRequests > 0) {
-        throw new ConflictException(
-          'Cannot close a shift with pending expense requests.',
-        );
-      }
-      const activeSessions = await tx.orderSession.count({
-        where: { shiftId: shift.id, sessionStatus: SessionStatus.ACTIVE },
-      });
-      if (activeSessions > 0) {
-        throw new ConflictException(
-          'Cannot close a shift with active order sessions.',
-        );
-      }
-
-      const reconciliation = await this.calculateReconciliation(tx, shift);
-      const reportedEndingCash = new Prisma.Decimal(dto.reportedEndingCash);
-      const difference = reportedEndingCash.minus(
-        reconciliation.actualEndingCash,
-      );
-      const noteThreshold = await this.getCashControlThreshold(
-        tx,
-        CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
-      );
-      if (
-        !difference.isZero() &&
-        difference.abs().gte(noteThreshold) &&
-        !dto.closingNote
-      ) {
-        throw new BadRequestException(
-          'A closing note is required for this cash discrepancy.',
-        );
-      }
-      const closedAt = new Date();
-      const closed = await tx.cashierShift.updateMany({
-        where: { id: shift.id, status: ShiftStatus.OPEN },
-        data: {
-          status: ShiftStatus.CLOSED,
-          closedAt,
-          reportedEndingCash,
-          actualEndingCash: reconciliation.actualEndingCash,
-          closingNote: dto.closingNote,
-        },
-      });
-      if (closed.count !== 1) {
-        throw new ConflictException('Cashier shift has already been closed.');
-      }
-
-      await this.log(tx, employeeId, 'CASHIER_SHIFT_CLOSED', {
-        shiftId: shift.id,
-        reportedEndingCash: reportedEndingCash.toString(),
-        actualEndingCash: reconciliation.actualEndingCash.toString(),
-        difference: difference.toString(),
-      });
-      return {
-        ...(await tx.cashierShift.findUniqueOrThrow({
-          where: { id: shift.id },
+    const { idempotencyKey, ...request } = dto;
+    return this.executeMutation(
+      employeeId,
+      'cashier-shift.close',
+      idempotencyKey,
+      request,
+      async (tx) => {
+        await this.assertActiveEmployee(tx, employeeId);
+        const shift = await tx.cashierShift.findFirst({
+          where: { employeeId, status: ShiftStatus.OPEN },
           include: this.shiftInclude,
-        })),
-        reconciliation: {
-          ...reconciliation,
-          reportedEndingCash,
-          difference,
-        },
-      };
-    });
+        });
+        if (!shift) {
+          throw new ConflictException('An open cashier shift is required.');
+        }
+        const pendingExpenseRequests = await tx.cashExpenseRequest.count({
+          where: {
+            shiftId: shift.id,
+            status: CashExpenseRequestStatus.PENDING,
+          },
+        });
+        if (pendingExpenseRequests > 0) {
+          throw new ConflictException(
+            'Cannot close a shift with pending expense requests.',
+          );
+        }
+        const pendingPaymentAttempts = await tx.paymentAttempt.count({
+          where: {
+            shiftId: shift.id,
+            status: PaymentAttemptStatus.PENDING,
+          },
+        });
+        if (pendingPaymentAttempts > 0) {
+          throw new ConflictException(
+            'Cannot close a shift with pending online payments.',
+          );
+        }
+        const activeSessions = await tx.orderSession.count({
+          where: { shiftId: shift.id, sessionStatus: SessionStatus.ACTIVE },
+        });
+        if (activeSessions > 0) {
+          throw new ConflictException(
+            'Cannot close a shift with active order sessions.',
+          );
+        }
+
+        const reconciliation = await this.calculateReconciliation(tx, shift);
+        const reportedEndingCash = new Prisma.Decimal(dto.reportedEndingCash);
+        const difference = reportedEndingCash.minus(
+          reconciliation.actualEndingCash,
+        );
+        const noteThreshold = await this.getCashControlThreshold(
+          tx,
+          CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
+        );
+        if (
+          !difference.isZero() &&
+          difference.abs().gte(noteThreshold) &&
+          !dto.closingNote
+        ) {
+          throw new BadRequestException(
+            'A closing note is required for this cash discrepancy.',
+          );
+        }
+        const closedAt = new Date();
+        const closed = await tx.cashierShift.updateMany({
+          where: { id: shift.id, status: ShiftStatus.OPEN },
+          data: {
+            status: ShiftStatus.CLOSED,
+            closedAt,
+            reportedEndingCash,
+            actualEndingCash: reconciliation.actualEndingCash,
+            closingNote: dto.closingNote,
+          },
+        });
+        if (closed.count !== 1) {
+          throw new ConflictException('Cashier shift has already been closed.');
+        }
+
+        await this.log(tx, employeeId, 'CASHIER_SHIFT_CLOSED', {
+          shiftId: shift.id,
+          reportedEndingCash: reportedEndingCash.toString(),
+          actualEndingCash: reconciliation.actualEndingCash.toString(),
+          difference: difference.toString(),
+        });
+        return {
+          ...(await tx.cashierShift.findUniqueOrThrow({
+            where: { id: shift.id },
+            include: this.shiftInclude,
+          })),
+          reconciliation: {
+            ...reconciliation,
+            reportedEndingCash,
+            difference,
+          },
+        };
+      },
+    );
+  }
+
+  private executeMutation<T>(
+    employeeId: string,
+    operation: string,
+    idempotencyKey: string | undefined,
+    request: unknown,
+    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
+  ) {
+    return idempotencyKey
+      ? this.idempotency.execute(
+          { employeeId, operation, key: idempotencyKey, request },
+          callback,
+        )
+      : this.runSerializable(callback);
   }
 
   private readonly shiftInclude = {

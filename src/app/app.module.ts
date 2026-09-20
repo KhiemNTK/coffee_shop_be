@@ -37,6 +37,8 @@ import { HealthModule } from './health/health.module';
 import { validateEnvironment } from '../config/environment';
 import { ReportsModule } from './reports/reports.module';
 import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
+import { PaymentsModule } from './payments/payments.module';
+import { DurableModule } from './durable/durable.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -47,6 +49,7 @@ import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
     AuthModule,
     AuthorizationModule,
     PrismaModule,
+    DurableModule,
     EmployeesModule,
     RolesModule,
     PermissionsModule,
@@ -67,6 +70,7 @@ import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
     HealthModule,
     ReportsModule,
     CashierShiftsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [

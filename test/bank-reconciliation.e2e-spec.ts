@@ -119,8 +119,13 @@ describe('Bank statement reconciliation (e2e)', () => {
       await prisma.cashTransaction.deleteMany({
         where: { employeeId: { in: employeeIds } },
       });
-      await prisma.actionLog.deleteMany({
-        where: { employeeId: { in: employeeIds } },
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          "SET LOCAL app.allow_audit_log_mutation = 'on'",
+        );
+        await tx.actionLog.deleteMany({
+          where: { employeeId: { in: employeeIds } },
+        });
       });
       await prisma.cashierShift.deleteMany({
         where: { id: { in: shiftIds } },

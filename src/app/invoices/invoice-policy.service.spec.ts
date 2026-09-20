@@ -38,7 +38,7 @@ describe('InvoicePolicyService', () => {
 
   it('rejects invalid payment transitions and cash underpayment', () => {
     expect(() =>
-      service.assertInvoiceIsPending({ paymentStatus: PaymentStatus.PAID }),
+      service.assertInvoiceIsUnpaid({ paymentStatus: PaymentStatus.PAID }),
     ).toThrow(BadRequestException);
 
     expect(() =>

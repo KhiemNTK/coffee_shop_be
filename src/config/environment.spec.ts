@@ -1,5 +1,27 @@
 import { validateEnvironment } from './environment';
 
+const productionEnvironment = {
+  NODE_ENV: 'production',
+  DATABASE_URL: 'postgresql://localhost/test',
+  REDIS_URL: 'redis://localhost:6379',
+  FE_URL: 'https://coffee.example.com',
+  JWT_SECRET: 'strong-access-secret-with-more-than-32-characters',
+  JWT_REFRESH_SECRET: 'strong-refresh-secret-with-more-than-32-characters',
+  PASSWORD_RESET_URL: 'https://coffee.example.com/reset-password',
+  AUTH_SIGNUP_ENABLED: 'false',
+  CSRF_ENABLED: 'true',
+  COOKIE_SECURE: 'true',
+  MAIL_HOST: 'smtp.example.com',
+  MAIL_PORT: '587',
+  MAIL_USER: 'mailer',
+  MAIL_PASS: 'password',
+  MAIL_FROM: 'noreply@example.com',
+  VNPAY_TMN_CODE: 'COFFEE01',
+  VNPAY_HASH_SECRET: 'strong-vnpay-secret-with-more-than-32-characters',
+  VNPAY_PAYMENT_URL: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
+  VNPAY_RETURN_URL: 'https://coffee.example.com/payment/vnpay/return',
+} as const;
+
 describe('validateEnvironment', () => {
   it('provides safe development defaults', () => {
     const environment = validateEnvironment({
@@ -36,23 +58,18 @@ describe('validateEnvironment', () => {
   it('rejects public sign-up in production', () => {
     expect(() =>
       validateEnvironment({
-        NODE_ENV: 'production',
-        DATABASE_URL: 'postgresql://localhost/test',
-        REDIS_URL: 'redis://localhost:6379',
-        FE_URL: 'https://coffee.example.com',
-        JWT_SECRET: 'strong-access-secret-with-more-than-32-characters',
-        JWT_REFRESH_SECRET:
-          'strong-refresh-secret-with-more-than-32-characters',
-        PASSWORD_RESET_URL: 'https://coffee.example.com/reset-password',
+        ...productionEnvironment,
         AUTH_SIGNUP_ENABLED: 'true',
-        CSRF_ENABLED: 'true',
-        COOKIE_SECURE: 'true',
-        MAIL_HOST: 'smtp.example.com',
-        MAIL_PORT: '587',
-        MAIL_USER: 'mailer',
-        MAIL_PASS: 'password',
-        MAIL_FROM: 'noreply@example.com',
       }),
     ).toThrow('AUTH_SIGNUP_ENABLED cannot be enabled in production');
+  });
+
+  it('rejects insecure VNPay endpoints in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        VNPAY_PAYMENT_URL: 'http://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
+      }),
+    ).toThrow('VNPAY_PAYMENT_URL must use HTTPS in production');
   });
 });
