@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { AUTH_ERRORS } from '../../common/consts/message';
+import { setRequestEmployee } from '../../common/request-context';
 import { TokenKeys } from './consts/jwt.const';
 import { IS_SKIP_AUTH } from './auth.decorator';
 import { AuthService } from './auth.service';
@@ -36,6 +37,7 @@ export class AuthGuard implements CanActivate {
       payload.sub,
       payload.sid,
     );
+    setRequestEmployee(payload.sub);
     return true;
   }
 

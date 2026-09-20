@@ -57,9 +57,34 @@ enum PaymentMethod {
 }
 
 enum PaymentStatus {
-  PENDING
+  UNPAID
   PAID
+  VOIDED
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  VNPAY
+}
+
+enum PaymentAttemptStatus {
+  PENDING
+  SUCCEEDED
   FAILED
+  EXPIRED
+}
+
+enum IdempotencyRequestStatus {
+  PROCESSING
+  COMPLETED
+}
+
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  DEAD_LETTER
 }
 
 enum InventoryTxType {
@@ -418,6 +443,8 @@ model Employee {
   resolvedCashHandovers  CashHandover[]            @relation("CashHandoverResolvedBy")
   settledCashHandovers   CashHandover[]            @relation("CashHandoverSettledBy")
   importedBankStatements BankStatementImport[]
+  paymentAttempts        PaymentAttempt[]          @relation("PaymentAttemptCreatedBy")
+  idempotencyRequests    IdempotencyRequest[]
 }
 
 model AuthSession {
@@ -553,6 +580,7 @@ model CashierShift {
   cashTransactions CashTransaction[] // Lưu các khoản thu/chi phát sinh trong ca
   expenseRequests  CashExpenseRequest[]
   cashHandovers    CashHandover[]
+  paymentAttempts  PaymentAttempt[]
 
   @@index([employeeId, status, openedAt])
   @@index([fundId, status])
@@ -756,7 +784,7 @@ model Invoice {
   amountTendered Decimal?      @db.Decimal(18, 2) // Tiền khách đưa
   changeAmount   Decimal?      @db.Decimal(18, 2) // Tiền thối lại
   paymentMethod  PaymentMethod @default(CASH)
-  paymentStatus  PaymentStatus @default(PENDING)
+  paymentStatus  PaymentStatus @default(UNPAID)
   taxAmount      Decimal       @default(0) @db.Decimal(18, 2) // Số tiền thuế
   taxRate        Decimal       @default(0) @db.Decimal(5, 2) // % Thuế (VD: 8, 10)
 
@@ -777,12 +805,109 @@ model Invoice {
 
   orderItems      OrderItem[]
   cashTransaction CashTransaction?
+  paymentAttempts PaymentAttempt[]
 
   @@index([orderSessionId])
   @@index([employeeId])
   @@index([shiftId])
   @@index([paymentStatus, createdAt])
   @@index([createdAt])
+}
+
+model PaymentAttempt {
+  id                       String               @id @default(uuid())
+  provider                 PaymentProvider      @default(VNPAY)
+  status                   PaymentAttemptStatus @default(PENDING)
+  amount                   Decimal              @db.Decimal(18, 2)
+  currency                 String               @default("VND")
+  merchantReference        String               @unique
+  idempotencyKey           String
+  requestHash              String
+  providerTransactionNo    String?              @unique
+  failureCode              String?
+  closeSessionAfterPayment Boolean              @default(true)
+  expiresAt                DateTime
+  completedAt              DateTime?
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  createdById String
+  createdBy   Employee @relation("PaymentAttemptCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  shiftId String
+  shift   CashierShift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  webhookEvents PaymentWebhookEvent[]
+
+  @@unique([createdById, idempotencyKey])
+  @@index([invoiceId, status, createdAt])
+  @@index([status, expiresAt])
+  @@index([createdById, createdAt])
+  @@index([shiftId, createdAt])
+}
+
+model PaymentWebhookEvent {
+  id                    String          @id @default(uuid())
+  provider              PaymentProvider
+  payloadHash           String          @unique
+  merchantReference     String?
+  providerTransactionNo String?
+  responseCode          String?
+  transactionStatus     String?
+  payload               Json
+  processingCode        String?
+  receivedAt            DateTime        @default(now())
+  processedAt           DateTime?
+
+  paymentAttemptId String?
+  paymentAttempt   PaymentAttempt? @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  @@index([provider, receivedAt])
+  @@index([merchantReference, receivedAt])
+  @@index([paymentAttemptId, receivedAt])
+}
+
+model IdempotencyRequest {
+  id          String                   @id @default(uuid())
+  operation   String
+  key         String
+  requestHash String
+  status      IdempotencyRequestStatus @default(PROCESSING)
+  response    Json?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  completedAt DateTime?
+  expiresAt   DateTime
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, operation, key])
+  @@index([expiresAt])
+}
+
+model OutboxEvent {
+  id            String            @id @default(uuid())
+  topic         String
+  eventName     String
+  aggregateType String
+  aggregateId   String
+  payload       Json
+  status        OutboxEventStatus @default(PENDING)
+  attempts      Int               @default(0)
+  availableAt   DateTime          @default(now())
+  lockedAt      DateTime?
+  lockedBy      String?
+  lastError     String?
+  occurredAt    DateTime          @default(now())
+  publishedAt   DateTime?
+
+  @@index([status, availableAt, occurredAt])
+  @@index([aggregateType, aggregateId, occurredAt])
+  @@index([topic, eventName, occurredAt])
 }
 
 // Quản lý Ngân sách / Thu Chi (NGANSACH.THU, CHI, NGAY, SOTIEN)
@@ -981,7 +1106,11 @@ model ActionLog {
   details    Json // Dữ liệu chi tiết sự thay đổi
 
   createdAt DateTime @default(now())
+  requestId String?
 
   employeeId String
   employee   Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([requestId])
+  @@index([employeeId, createdAt])
 }

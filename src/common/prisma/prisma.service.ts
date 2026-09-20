@@ -5,6 +5,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { getRequestContext } from '../request-context';
 
 @Injectable()
 export class PrismaService
@@ -40,6 +41,14 @@ export class PrismaService
       query: {
         $allModels: {
           async $allOperations({ model, operation, args, query }) {
+            if (model === 'ActionLog' && operation === 'create') {
+              const safeArgs = (args ? { ...args } : {}) as Record<string, any>;
+              const data = { ...(safeArgs.data as Record<string, unknown>) };
+              data.requestId ??= getRequestContext()?.requestId;
+              safeArgs.data = data;
+              return query(safeArgs as typeof args);
+            }
+
             const isSoftDeleteModel = modelsWithSoftDelete.includes(model);
             if (!isSoftDeleteModel) return query(args);
 
