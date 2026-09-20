@@ -104,4 +104,9 @@ export const PermissionKeys = {
   CASH_HANDOVERS_CREATE: '/cash-handovers_create',
   CASH_HANDOVERS_READ: '/cash-handovers_read',
   CASH_HANDOVERS_REVIEW: '/cash-handovers_review',
+  CASH_HANDOVERS_SETTLE: '/cash-handovers_settle',
+
+  BANK_RECONCILIATION_READ: '/bank-reconciliation_read',
+  BANK_RECONCILIATION_IMPORT: '/bank-reconciliation_import',
+  BANK_RECONCILIATION_MANAGE: '/bank-reconciliation_manage',
 } as const;

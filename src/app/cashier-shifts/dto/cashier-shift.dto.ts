@@ -1,6 +1,7 @@
 import {
   CashExpenseRequestStatus,
   CashFlowType,
+  CashHandoverSettlementStatus,
   CashHandoverStatus,
   FundType,
   ShiftStatus,
@@ -128,6 +129,7 @@ export class GetCashHandoversDto extends createZodDto(
     itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
     page: z.coerce.number().int().min(1).default(1),
     status: z.enum(CashHandoverStatus).optional(),
+    settlementStatus: z.enum(CashHandoverSettlementStatus).optional(),
     shiftId: z.uuid('Invalid cashier shift ID').optional(),
     requestedById: z.uuid('Invalid employee ID').optional(),
     sourceFundId: z.uuid('Invalid source fund ID').optional(),
@@ -146,5 +148,27 @@ export class ApproveCashHandoverDto extends createZodDto(
 export class RejectCashHandoverDto extends createZodDto(
   z.object({
     reason: z.string().trim().min(1).max(500),
+  }),
+) {}
+
+export class SettleCashHandoverDto extends createZodDto(
+  z.object({
+    bankReference: z
+      .string()
+      .trim()
+      .min(3)
+      .max(100)
+      .regex(
+        /^[A-Za-z0-9][A-Za-z0-9._/-]*$/,
+        'Bank reference contains unsupported characters',
+      ),
+    evidenceReference: z.string().trim().min(1).max(500),
+  }),
+) {}
+
+export class GetOverdueCashHandoversDto extends createZodDto(
+  z.object({
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    page: z.coerce.number().int().min(1).default(1),
   }),
 ) {}

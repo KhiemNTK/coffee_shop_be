@@ -20,6 +20,7 @@ describe('FundsService', () => {
       },
       cashierShift: { findFirst: jest.fn() },
       cashHandover: { findFirst: jest.fn().mockResolvedValue(null) },
+      bankStatementImport: { findFirst: jest.fn().mockResolvedValue(null) },
       actionLog: { create: jest.fn() },
     };
     const prisma = {
@@ -74,6 +75,18 @@ describe('FundsService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.cashierShift.findFirst).not.toHaveBeenCalled();
+    expect(tx.fund.update).not.toHaveBeenCalled();
+  });
+
+  it('does not change the type of a fund with statement history', async () => {
+    tx.fund.findFirst.mockResolvedValue({ id: 'fund-id', type: FundType.BANK });
+    tx.bankStatementImport.findFirst.mockResolvedValue({ id: 'import-id' });
+
+    await expect(
+      service.update('fund-id', 'employee-id', { type: FundType.CASH }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(tx.cashHandover.findFirst).not.toHaveBeenCalled();
     expect(tx.fund.update).not.toHaveBeenCalled();
   });
 });

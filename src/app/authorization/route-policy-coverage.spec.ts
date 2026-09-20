@@ -4,6 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { AppController } from '../app.controller';
 import { AuthController } from '../auth/auth.controller';
 import { IS_SKIP_AUTH } from '../auth/auth.decorator';
+import { BankReconciliationController } from '../cashier-shifts/bank-reconciliation.controller';
 import { CashHandoversController } from '../cashier-shifts/cash-handovers.controller';
 import { CashierShiftsController } from '../cashier-shifts/cashier-shifts.controller';
 import { FundsController } from '../cashier-shifts/funds.controller';
@@ -27,6 +28,7 @@ import { REQUIRED_PERMISSIONS_KEY } from './authorization.decorator';
 const controllers = [
   AppController,
   AuthController,
+  BankReconciliationController,
   CashHandoversController,
   CashierShiftsController,
   DiningTablesController,

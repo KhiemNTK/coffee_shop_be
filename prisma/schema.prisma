@@ -123,6 +123,24 @@ enum CashHandoverStatus {
   CANCELLED
 }
 
+enum CashHandoverSettlementStatus {
+  NOT_REQUIRED
+  PENDING
+  SETTLED
+}
+
+enum BankStatementEntryDirection {
+  CREDIT
+  DEBIT
+}
+
+enum BankStatementMatchStatus {
+  UNMATCHED
+  MATCHED
+  MISMATCH
+  IGNORED
+}
+
 // =============================================
 // 0. AUTH & AUTHORIZATION (Phân quyền hệ thống)
 // =============================================
@@ -227,8 +245,10 @@ model Fund {
   cashTransactions  CashTransaction[]
   shifts            CashierShift[]
   expenseRequests   CashExpenseRequest[]
-  outgoingHandovers CashHandover[]       @relation("CashHandoverSourceFund")
-  incomingHandovers CashHandover[]       @relation("CashHandoverDestinationFund")
+  outgoingHandovers CashHandover[]        @relation("CashHandoverSourceFund")
+  incomingHandovers CashHandover[]        @relation("CashHandoverDestinationFund")
+  statementImports  BankStatementImport[]
+  statementEntries  BankStatementEntry[]
 
   @@index([deletedAt, type])
 }
@@ -396,6 +416,8 @@ model Employee {
   resolvedCashExpenses   CashExpenseRequest[]      @relation("CashExpenseResolvedBy")
   requestedCashHandovers CashHandover[]            @relation("CashHandoverRequestedBy")
   resolvedCashHandovers  CashHandover[]            @relation("CashHandoverResolvedBy")
+  settledCashHandovers   CashHandover[]            @relation("CashHandoverSettledBy")
+  importedBankStatements BankStatementImport[]
 }
 
 model AuthSession {
@@ -830,24 +852,32 @@ model CashExpenseRequest {
 }
 
 model CashHandover {
-  id             String             @id @default(uuid())
-  expectedCash   Decimal            @db.Decimal(18, 2)
-  countedCash    Decimal            @db.Decimal(18, 2)
-  varianceAmount Decimal            @db.Decimal(18, 2)
-  retainedCash   Decimal            @db.Decimal(18, 2)
-  transferAmount Decimal            @db.Decimal(18, 2)
-  note           String?
-  status         CashHandoverStatus @default(PENDING)
-  resolutionNote String?
-  resolvedAt     DateTime?
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  id                String                       @id @default(uuid())
+  expectedCash      Decimal                      @db.Decimal(18, 2)
+  countedCash       Decimal                      @db.Decimal(18, 2)
+  varianceAmount    Decimal                      @db.Decimal(18, 2)
+  retainedCash      Decimal                      @db.Decimal(18, 2)
+  transferAmount    Decimal                      @db.Decimal(18, 2)
+  note              String?
+  status            CashHandoverStatus           @default(PENDING)
+  settlementStatus  CashHandoverSettlementStatus @default(NOT_REQUIRED)
+  resolutionNote    String?
+  resolvedAt        DateTime?
+  settlementDueAt   DateTime?
+  settledAt         DateTime?
+  bankReference     String?
+  evidenceReference String?
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
 
   requestedById String
   requestedBy   Employee @relation("CashHandoverRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
 
   resolvedById String?
   resolvedBy   Employee? @relation("CashHandoverResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  settledById String?
+  settledBy   Employee? @relation("CashHandoverSettledBy", fields: [settledById], references: [id], onDelete: Restrict)
 
   shiftId String
   shift   CashierShift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
@@ -867,11 +897,67 @@ model CashHandover {
   varianceTransactionId String?          @unique
   varianceTransaction   CashTransaction? @relation("CashHandoverVarianceTransaction", fields: [varianceTransactionId], references: [id], onDelete: Restrict)
 
+  bankStatementEntry BankStatementEntry?
+
+  @@unique([destinationFundId, bankReference])
   @@index([status, createdAt])
   @@index([shiftId, status])
   @@index([sourceFundId, createdAt])
   @@index([destinationFundId, createdAt])
   @@index([requestedById, status])
+  @@index([settlementStatus, settlementDueAt])
+}
+
+model BankStatementImport {
+  id             String   @id @default(uuid())
+  sourceFileName String
+  statementFrom  DateTime
+  statementTo    DateTime
+  checksum       String
+  createdAt      DateTime @default(now())
+
+  fundId String
+  fund   Fund   @relation(fields: [fundId], references: [id], onDelete: Restrict)
+
+  importedById String
+  importedBy   Employee @relation(fields: [importedById], references: [id], onDelete: Restrict)
+
+  entries BankStatementEntry[]
+
+  @@unique([fundId, checksum])
+  @@index([fundId, createdAt])
+  @@index([statementFrom, statementTo])
+}
+
+model BankStatementEntry {
+  id              String                      @id @default(uuid())
+  externalId      String
+  direction       BankStatementEntryDirection
+  amount          Decimal                     @db.Decimal(18, 2)
+  transactionDate DateTime
+  bankReference   String?
+  description     String?
+  matchStatus     BankStatementMatchStatus    @default(UNMATCHED)
+  mismatchReason  String?
+  matchedAt       DateTime?
+  ignoredAt       DateTime?
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+
+  importId String
+  import   BankStatementImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  fundId String
+  fund   Fund   @relation(fields: [fundId], references: [id], onDelete: Restrict)
+
+  matchedHandoverId String?       @unique
+  matchedHandover   CashHandover? @relation(fields: [matchedHandoverId], references: [id], onDelete: Restrict)
+
+  @@unique([fundId, externalId])
+  @@index([importId, transactionDate])
+  @@index([fundId, matchStatus, transactionDate])
+  @@index([matchStatus, transactionDate])
+  @@index([fundId, bankReference])
 }
 
 // Cài đặt in ấn máy POS

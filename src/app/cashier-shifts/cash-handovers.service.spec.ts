@@ -1,6 +1,7 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import {
   CashFlowType,
+  CashHandoverSettlementStatus,
   CashHandoverStatus,
   FundType,
   Prisma,
@@ -21,6 +22,7 @@ describe('CashHandoversService', () => {
       update: jest.fn(),
     },
     cashTransaction: { create: jest.fn() },
+    systemSetting: { findFirst: jest.fn() },
     actionLog: { create: jest.fn() },
   };
   const executeTransaction = (
@@ -38,6 +40,7 @@ describe('CashHandoversService', () => {
     jest.clearAllMocks();
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
     tx.cashierShift.findFirst.mockResolvedValue(null);
+    tx.systemSetting.findFirst.mockResolvedValue({ value: 24 });
   });
 
   it('snapshots a closed shift instead of accepting a transfer amount', async () => {
@@ -105,7 +108,11 @@ describe('CashHandoversService', () => {
         type: FundType.CASH,
         deletedAt: null,
       },
-      destinationFund: { id: 'destination-fund-id', deletedAt: null },
+      destinationFund: {
+        id: 'destination-fund-id',
+        type: FundType.CASH,
+        deletedAt: null,
+      },
     });
     tx.fund.updateMany
       .mockResolvedValueOnce({ count: 1 })
@@ -132,7 +139,11 @@ describe('CashHandoversService', () => {
       data: { balance: new Prisma.Decimal('20') },
     });
     expect(tx.fund.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: 'destination-fund-id', deletedAt: null },
+      where: {
+        id: 'destination-fund-id',
+        type: FundType.CASH,
+        deletedAt: null,
+      },
       data: { balance: { increment: new Prisma.Decimal('70') } },
     });
     const entries = tx.cashTransaction.create.mock.calls.map(
@@ -165,7 +176,7 @@ describe('CashHandoversService', () => {
         type: FundType.CASH,
         deletedAt: null,
       },
-      destinationFund: { deletedAt: null },
+      destinationFund: { type: FundType.CASH, deletedAt: null },
     });
     tx.fund.updateMany.mockResolvedValue({ count: 0 });
 
@@ -174,5 +185,131 @@ describe('CashHandoversService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.cashTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps a bank transfer pending until settlement confirmation', async () => {
+    tx.cashHandover.findUnique.mockResolvedValue({
+      id: 'handover-id',
+      status: CashHandoverStatus.PENDING,
+      requestedById: 'requester-id',
+      shiftId: 'shift-id',
+      sourceFundId: 'source-fund-id',
+      destinationFundId: 'bank-fund-id',
+      expectedCash: new Prisma.Decimal('100'),
+      varianceAmount: new Prisma.Decimal(0),
+      retainedCash: new Prisma.Decimal('20'),
+      transferAmount: new Prisma.Decimal('80'),
+      sourceFund: { type: FundType.CASH, deletedAt: null },
+      destinationFund: { type: FundType.BANK, deletedAt: null },
+    });
+    tx.fund.updateMany.mockResolvedValue({ count: 1 });
+    tx.cashTransaction.create.mockResolvedValue({ id: 'source-entry-id' });
+    tx.cashHandover.update.mockImplementation(({ data }: any) => ({
+      id: 'handover-id',
+      ...data,
+    }));
+    tx.systemSetting.findFirst.mockResolvedValue({ value: 12 });
+
+    const approved = await service.approve('handover-id', 'reviewer-id', {});
+
+    expect(approved.settlementStatus).toBe(
+      CashHandoverSettlementStatus.PENDING,
+    );
+    expect(approved.settlementDueAt).not.toBeNull();
+    expect(approved.settlementDueAt!.getTime()).toBeGreaterThan(Date.now());
+    expect(tx.fund.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.cashTransaction.create).toHaveBeenCalledTimes(1);
+    expect(approved.destinationTransactionId).toBeUndefined();
+  });
+
+  it('credits the bank fund only when settlement is confirmed', async () => {
+    tx.cashHandover.findUnique.mockResolvedValue({
+      id: 'handover-id',
+      status: CashHandoverStatus.APPROVED,
+      settlementStatus: CashHandoverSettlementStatus.PENDING,
+      requestedById: 'requester-id',
+      destinationFundId: 'bank-fund-id',
+      transferAmount: new Prisma.Decimal('80'),
+      destinationFund: { type: FundType.BANK, deletedAt: null },
+      sourceFund: { type: FundType.CASH, deletedAt: null },
+    });
+    tx.fund.updateMany.mockResolvedValue({ count: 1 });
+    tx.cashTransaction.create.mockResolvedValue({ id: 'bank-entry-id' });
+    tx.cashHandover.update.mockImplementation(({ data }: any) => ({
+      id: 'handover-id',
+      ...data,
+    }));
+
+    const settled = await service.settle('handover-id', 'reviewer-id', {
+      bankReference: 'bank-ref-001',
+      evidenceReference: 'receipts/2026/bank-ref-001.pdf',
+    });
+
+    expect(settled.settlementStatus).toBe(CashHandoverSettlementStatus.SETTLED);
+    expect(settled.bankReference).toBe('BANK-REF-001');
+    expect(tx.fund.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'bank-fund-id',
+        type: FundType.BANK,
+        deletedAt: null,
+      },
+      data: { balance: { increment: new Prisma.Decimal('80') } },
+    });
+  });
+
+  it('registers deposit evidence without crediting the bank fund', async () => {
+    tx.cashHandover.findUnique.mockResolvedValue({
+      id: 'handover-id',
+      status: CashHandoverStatus.APPROVED,
+      settlementStatus: CashHandoverSettlementStatus.PENDING,
+      requestedById: 'employee-id',
+      destinationFundId: 'bank-fund-id',
+      transferAmount: new Prisma.Decimal('80'),
+      bankReference: null,
+      evidenceReference: null,
+      destinationFund: { type: FundType.BANK, deletedAt: null },
+      sourceFund: { type: FundType.CASH, deletedAt: null },
+    });
+    tx.cashHandover.update.mockImplementation(({ data }: any) => ({
+      id: 'handover-id',
+      ...data,
+    }));
+
+    const registered = await service.registerDeposit(
+      'handover-id',
+      'employee-id',
+      {
+        bankReference: 'bank-ref-001',
+        evidenceReference: 'receipts/2026/bank-ref-001.pdf',
+      },
+    );
+
+    expect(registered.bankReference).toBe('BANK-REF-001');
+    expect(tx.fund.updateMany).not.toHaveBeenCalled();
+    expect(tx.cashTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects settlement details that differ from registered evidence', async () => {
+    tx.cashHandover.findUnique.mockResolvedValue({
+      id: 'handover-id',
+      status: CashHandoverStatus.APPROVED,
+      settlementStatus: CashHandoverSettlementStatus.PENDING,
+      requestedById: 'requester-id',
+      destinationFundId: 'bank-fund-id',
+      transferAmount: new Prisma.Decimal('80'),
+      bankReference: 'BANK-REF-001',
+      evidenceReference: 'receipts/original.pdf',
+      destinationFund: { type: FundType.BANK, deletedAt: null },
+      sourceFund: { type: FundType.CASH, deletedAt: null },
+    });
+
+    await expect(
+      service.settle('handover-id', 'reviewer-id', {
+        bankReference: 'BANK-REF-002',
+        evidenceReference: 'receipts/original.pdf',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(tx.fund.updateMany).not.toHaveBeenCalled();
   });
 });

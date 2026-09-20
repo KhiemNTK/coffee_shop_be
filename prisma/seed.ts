@@ -106,6 +106,10 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.CASH_HANDOVERS_CREATE,
       PermissionKeys.CASH_HANDOVERS_READ,
       PermissionKeys.CASH_HANDOVERS_REVIEW,
+      PermissionKeys.CASH_HANDOVERS_SETTLE,
+      PermissionKeys.BANK_RECONCILIATION_READ,
+      PermissionKeys.BANK_RECONCILIATION_IMPORT,
+      PermissionKeys.BANK_RECONCILIATION_MANAGE,
     ],
   },
   {
@@ -245,6 +249,11 @@ async function seedCashControlSettings() {
       key: CashControlSettingKeys.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
       value: CashControlSettingDefaults.SHIFT_DISCREPANCY_NOTE_THRESHOLD,
       description: 'Cash discrepancy amount that requires a closing note',
+    },
+    {
+      key: CashControlSettingKeys.HANDOVER_SETTLEMENT_SLA_HOURS,
+      value: CashControlSettingDefaults.HANDOVER_SETTLEMENT_SLA_HOURS,
+      description: 'Hours allowed to confirm a bank handover settlement',
     },
   ];
 

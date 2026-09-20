@@ -5,7 +5,12 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { CashHandoverStatus, Prisma, ShiftStatus } from '@prisma/client';
+import {
+  CashHandoverSettlementStatus,
+  CashHandoverStatus,
+  Prisma,
+  ShiftStatus,
+} from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -95,10 +100,28 @@ export class FundsService {
           throw new NotFoundException(`Fund with ID ${id} not found.`);
         }
         if (dto.type && dto.type !== existing.type) {
+          const statementImport = await tx.bankStatementImport.findFirst({
+            where: { fundId: id },
+            select: { id: true },
+          });
+          if (statementImport) {
+            throw new ConflictException(
+              'Cannot change the type of a fund with bank statement history.',
+            );
+          }
           const pendingHandover = await tx.cashHandover.findFirst({
             where: {
-              status: CashHandoverStatus.PENDING,
-              OR: [{ sourceFundId: id }, { destinationFundId: id }],
+              AND: [
+                {
+                  OR: [
+                    { status: CashHandoverStatus.PENDING },
+                    {
+                      settlementStatus: CashHandoverSettlementStatus.PENDING,
+                    },
+                  ],
+                },
+                { OR: [{ sourceFundId: id }, { destinationFundId: id }] },
+              ],
             },
             select: { id: true },
           });
@@ -155,8 +178,17 @@ export class FundsService {
       }
       const pendingHandover = await tx.cashHandover.findFirst({
         where: {
-          status: CashHandoverStatus.PENDING,
-          OR: [{ sourceFundId: id }, { destinationFundId: id }],
+          AND: [
+            {
+              OR: [
+                { status: CashHandoverStatus.PENDING },
+                {
+                  settlementStatus: CashHandoverSettlementStatus.PENDING,
+                },
+              ],
+            },
+            { OR: [{ sourceFundId: id }, { destinationFundId: id }] },
+          ],
         },
         select: { id: true },
       });

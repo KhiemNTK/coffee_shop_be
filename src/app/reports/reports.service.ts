@@ -384,7 +384,8 @@ export class ReportsService {
       SELECT
         shift_risk.*,
         expense_risk.*,
-        handover_risk.*
+        handover_risk.*,
+        statement_risk.*
       FROM (
         SELECT
           COUNT(*) FILTER (
@@ -457,15 +458,67 @@ export class ReportsService {
             WHERE ch."status" = 'APPROVED'
               AND ch."resolvedAt" >= ${period.from}
               AND ch."resolvedAt" < ${period.to}
-          ), 0)::numeric AS "approvedHandoverAmount"
+          ), 0)::numeric AS "approvedHandoverAmount",
+          COUNT(*) FILTER (
+            WHERE ch."settlementStatus" = 'PENDING'
+          )::bigint AS "currentPendingBankSettlementCount",
+          COALESCE(SUM(ch."transferAmount") FILTER (
+            WHERE ch."settlementStatus" = 'PENDING'
+          ), 0)::numeric AS "currentPendingBankSettlementAmount",
+          COUNT(*) FILTER (
+            WHERE ch."settlementStatus" = 'PENDING'
+              AND ch."settlementDueAt" < CURRENT_TIMESTAMP
+          )::bigint AS "overdueBankSettlementCount",
+          COALESCE(SUM(ch."transferAmount") FILTER (
+            WHERE ch."settlementStatus" = 'PENDING'
+              AND ch."settlementDueAt" < CURRENT_TIMESTAMP
+          ), 0)::numeric AS "overdueBankSettlementAmount",
+          COUNT(*) FILTER (
+            WHERE ch."settlementStatus" = 'SETTLED'
+              AND ch."settledAt" >= ${period.from}
+              AND ch."settledAt" < ${period.to}
+          )::bigint AS "settledBankDepositCount",
+          COALESCE(SUM(ch."transferAmount") FILTER (
+            WHERE ch."settlementStatus" = 'SETTLED'
+              AND ch."settledAt" >= ${period.from}
+              AND ch."settledAt" < ${period.to}
+          ), 0)::numeric AS "settledBankDepositAmount"
         FROM "CashHandover" ch
         WHERE ch."status" = 'PENDING'
+          OR ch."settlementStatus" = 'PENDING'
           OR (
             ch."status" = 'APPROVED'
             AND ch."resolvedAt" >= ${period.from}
             AND ch."resolvedAt" < ${period.to}
           )
+          OR (
+            ch."settlementStatus" = 'SETTLED'
+            AND ch."settledAt" >= ${period.from}
+            AND ch."settledAt" < ${period.to}
+          )
       ) handover_risk
+      CROSS JOIN (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE bse."direction" = 'CREDIT'
+              AND bse."matchStatus" = 'UNMATCHED'
+          )::bigint AS "currentUnmatchedBankStatementEntryCount",
+          COALESCE(SUM(bse."amount") FILTER (
+            WHERE bse."direction" = 'CREDIT'
+              AND bse."matchStatus" = 'UNMATCHED'
+          ), 0)::numeric AS "currentUnmatchedBankStatementEntryAmount",
+          COUNT(*) FILTER (
+            WHERE bse."direction" = 'CREDIT'
+              AND bse."matchStatus" = 'MISMATCH'
+          )::bigint AS "currentMismatchedBankStatementEntryCount",
+          COALESCE(SUM(bse."amount") FILTER (
+            WHERE bse."direction" = 'CREDIT'
+              AND bse."matchStatus" = 'MISMATCH'
+          ), 0)::numeric AS "currentMismatchedBankStatementEntryAmount"
+        FROM "BankStatementEntry" bse
+        WHERE bse."direction" = 'CREDIT'
+          AND bse."matchStatus" IN ('UNMATCHED', 'MISMATCH')
+      ) statement_risk
     `);
 
     return {
@@ -497,6 +550,28 @@ export class ReportsService {
       ),
       approvedHandoverCount: Number(row?.approvedHandoverCount ?? 0),
       approvedHandoverAmount: this.money(row?.approvedHandoverAmount),
+      currentPendingBankSettlementCount: Number(
+        row?.currentPendingBankSettlementCount ?? 0,
+      ),
+      currentPendingBankSettlementAmount: this.money(
+        row?.currentPendingBankSettlementAmount,
+      ),
+      overdueBankSettlementCount: Number(row?.overdueBankSettlementCount ?? 0),
+      overdueBankSettlementAmount: this.money(row?.overdueBankSettlementAmount),
+      settledBankDepositCount: Number(row?.settledBankDepositCount ?? 0),
+      settledBankDepositAmount: this.money(row?.settledBankDepositAmount),
+      currentUnmatchedBankStatementEntryCount: Number(
+        row?.currentUnmatchedBankStatementEntryCount ?? 0,
+      ),
+      currentUnmatchedBankStatementEntryAmount: this.money(
+        row?.currentUnmatchedBankStatementEntryAmount,
+      ),
+      currentMismatchedBankStatementEntryCount: Number(
+        row?.currentMismatchedBankStatementEntryCount ?? 0,
+      ),
+      currentMismatchedBankStatementEntryAmount: this.money(
+        row?.currentMismatchedBankStatementEntryAmount,
+      ),
     };
   }
 

@@ -78,6 +78,16 @@ export interface ReportCashRiskOverviewRow {
   currentPendingHandoverAmount: Decimal;
   approvedHandoverCount: bigint;
   approvedHandoverAmount: Decimal;
+  currentPendingBankSettlementCount: bigint;
+  currentPendingBankSettlementAmount: Decimal;
+  overdueBankSettlementCount: bigint;
+  overdueBankSettlementAmount: Decimal;
+  settledBankDepositCount: bigint;
+  settledBankDepositAmount: Decimal;
+  currentUnmatchedBankStatementEntryCount: bigint;
+  currentUnmatchedBankStatementEntryAmount: Decimal;
+  currentMismatchedBankStatementEntryCount: bigint;
+  currentMismatchedBankStatementEntryAmount: Decimal;
 }
 
 export interface ReportEmployeeCashRiskRow {

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { ConflictException } from '@nestjs/common';
 import {
   CashFlowType,
+  CashHandoverSettlementStatus,
   CashHandoverStatus,
   FundType,
   Prisma,
@@ -28,23 +30,28 @@ describe('Cash handover ledger (e2e)', () => {
   const createClosedShift = async (input: {
     sourceBalance: string;
     countedCash: string;
+    destinationType?: FundType;
+    destinationFundId?: string;
   }) => {
-    const [sourceFund, destinationFund] = await Promise.all([
-      prisma.fund.create({
-        data: {
-          name: `Handover Source ${randomUUID()} ${suffix}`,
-          type: FundType.CASH,
-          balance: new Prisma.Decimal(input.sourceBalance),
-        },
-      }),
-      prisma.fund.create({
-        data: {
-          name: `Handover Destination ${randomUUID()} ${suffix}`,
-          type: FundType.BANK,
-        },
-      }),
-    ]);
-    fundIds.push(sourceFund.id, destinationFund.id);
+    const sourceFund = await prisma.fund.create({
+      data: {
+        name: `Handover Source ${randomUUID()} ${suffix}`,
+        type: FundType.CASH,
+        balance: new Prisma.Decimal(input.sourceBalance),
+      },
+    });
+    fundIds.push(sourceFund.id);
+    const destinationFund = input.destinationFundId
+      ? await prisma.fund.findUniqueOrThrow({
+          where: { id: input.destinationFundId },
+        })
+      : await prisma.fund.create({
+          data: {
+            name: `Handover Destination ${randomUUID()} ${suffix}`,
+            type: input.destinationType ?? FundType.CASH,
+          },
+        });
+    if (!input.destinationFundId) fundIds.push(destinationFund.id);
     const closedAt = new Date();
     const shift = await prisma.cashierShift.create({
       data: {
@@ -221,5 +228,85 @@ describe('Cash handover ledger (e2e)', () => {
 
     expect(corrected.status).toBe(CashHandoverStatus.PENDING);
     expect(corrected.transferAmount.toString()).toBe('150');
+  });
+
+  it('settles a bank deposit once and rejects a duplicate bank reference', async () => {
+    const { shift, sourceFund, destinationFund } = await createClosedShift({
+      sourceBalance: '500',
+      countedCash: '500',
+      destinationType: FundType.BANK,
+    });
+    const pending = await service.create(requesterId, {
+      shiftId: shift.id,
+      destinationFundId: destinationFund.id,
+      retainedCash: '100',
+    });
+    const approved = await service.approve(pending.id, reviewerId, {});
+
+    expect(approved.settlementStatus).toBe(
+      CashHandoverSettlementStatus.PENDING,
+    );
+    expect(approved.destinationTransactionId).toBeNull();
+    const [sourceAfterApproval, destinationAfterApproval] = await Promise.all([
+      prisma.fund.findUniqueOrThrow({ where: { id: sourceFund.id } }),
+      prisma.fund.findUniqueOrThrow({ where: { id: destinationFund.id } }),
+    ]);
+    expect(sourceAfterApproval.balance.toString()).toBe('100');
+    expect(destinationAfterApproval.balance.toString()).toBe('0');
+
+    const settlementResults = await Promise.allSettled([
+      service.settle(approved.id, reviewerId, {
+        bankReference: 'bank-settlement-001',
+        evidenceReference: 'receipts/bank-settlement-001.pdf',
+      }),
+      service.settle(approved.id, reviewerId, {
+        bankReference: 'bank-settlement-001',
+        evidenceReference: 'receipts/bank-settlement-001.pdf',
+      }),
+    ]);
+    expect(
+      settlementResults.filter(({ status }) => status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      settlementResults.filter(({ status }) => status === 'rejected'),
+    ).toHaveLength(1);
+    const destinationAfterSettlement = await prisma.fund.findUniqueOrThrow({
+      where: { id: destinationFund.id },
+    });
+    expect(destinationAfterSettlement.balance.toString()).toBe('400');
+
+    const second = await createClosedShift({
+      sourceBalance: '600',
+      countedCash: '600',
+      destinationFundId: destinationFund.id,
+    });
+    const secondPending = await service.create(requesterId, {
+      shiftId: second.shift.id,
+      destinationFundId: destinationFund.id,
+      retainedCash: '100',
+    });
+    const secondApproved = await service.approve(
+      secondPending.id,
+      reviewerId,
+      {},
+    );
+
+    await expect(
+      service.settle(secondApproved.id, reviewerId, {
+        bankReference: 'BANK-SETTLEMENT-001',
+        evidenceReference: 'receipts/duplicate.pdf',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    const destinationAfterDuplicate = await prisma.fund.findUniqueOrThrow({
+      where: { id: destinationFund.id },
+    });
+    expect(destinationAfterDuplicate.balance.toString()).toBe('400');
+
+    await prisma.cashHandover.update({
+      where: { id: secondApproved.id },
+      data: { settlementDueAt: new Date(Date.now() - 60_000) },
+    });
+    const overdue = await service.findOverdue({ itemPerPage: 20, page: 1 });
+    expect(overdue.list.map(({ id }) => id)).toContain(secondApproved.id);
   });
 });

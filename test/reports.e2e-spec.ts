@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
+  BankStatementEntryDirection,
+  BankStatementMatchStatus,
   CashExpenseRequestStatus,
   FundType,
   PaymentMethod,
@@ -44,33 +46,105 @@ describe('Reports queries (e2e)', () => {
   let pendingHandoverBaselineAmount = new Prisma.Decimal(0);
   let approvedHandoverBaselineCount = 0;
   let approvedHandoverBaselineAmount = new Prisma.Decimal(0);
+  let pendingSettlementBaselineCount = 0;
+  let pendingSettlementBaselineAmount = new Prisma.Decimal(0);
+  let overdueSettlementBaselineCount = 0;
+  let overdueSettlementBaselineAmount = new Prisma.Decimal(0);
+  let settledDepositBaselineCount = 0;
+  let settledDepositBaselineAmount = new Prisma.Decimal(0);
+  let unmatchedStatementBaselineCount = 0;
+  let unmatchedStatementBaselineAmount = new Prisma.Decimal(0);
+  let mismatchedStatementBaselineCount = 0;
+  let mismatchedStatementBaselineAmount = new Prisma.Decimal(0);
 
   beforeAll(async () => {
-    const [pendingHandoverBaseline, approvedHandoverBaseline] =
-      await Promise.all([
-        prisma.cashHandover.aggregate({
-          where: { status: 'PENDING' },
-          _count: true,
-          _sum: { transferAmount: true },
-        }),
-        prisma.cashHandover.aggregate({
-          where: {
-            status: 'APPROVED',
-            resolvedAt: {
-              gte: new Date('2026-06-01T00:00:00.000Z'),
-              lt: new Date('2026-06-03T00:00:00.000Z'),
-            },
+    const [
+      pendingHandoverBaseline,
+      approvedHandoverBaseline,
+      pendingSettlementBaseline,
+      overdueSettlementBaseline,
+      settledDepositBaseline,
+      unmatchedStatementBaseline,
+      mismatchedStatementBaseline,
+    ] = await Promise.all([
+      prisma.cashHandover.aggregate({
+        where: { status: 'PENDING' },
+        _count: true,
+        _sum: { transferAmount: true },
+      }),
+      prisma.cashHandover.aggregate({
+        where: {
+          status: 'APPROVED',
+          resolvedAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
           },
-          _count: true,
-          _sum: { transferAmount: true },
-        }),
-      ]);
+        },
+        _count: true,
+        _sum: { transferAmount: true },
+      }),
+      prisma.cashHandover.aggregate({
+        where: { settlementStatus: 'PENDING' },
+        _count: true,
+        _sum: { transferAmount: true },
+      }),
+      prisma.cashHandover.aggregate({
+        where: {
+          settlementStatus: 'PENDING',
+          settlementDueAt: { lt: new Date() },
+        },
+        _count: true,
+        _sum: { transferAmount: true },
+      }),
+      prisma.cashHandover.aggregate({
+        where: {
+          settlementStatus: 'SETTLED',
+          settledAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
+          },
+        },
+        _count: true,
+        _sum: { transferAmount: true },
+      }),
+      prisma.bankStatementEntry.aggregate({
+        where: {
+          direction: BankStatementEntryDirection.CREDIT,
+          matchStatus: BankStatementMatchStatus.UNMATCHED,
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.bankStatementEntry.aggregate({
+        where: {
+          direction: BankStatementEntryDirection.CREDIT,
+          matchStatus: BankStatementMatchStatus.MISMATCH,
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+    ]);
     pendingHandoverBaselineCount = pendingHandoverBaseline._count;
     pendingHandoverBaselineAmount =
       pendingHandoverBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
     approvedHandoverBaselineCount = approvedHandoverBaseline._count;
     approvedHandoverBaselineAmount =
       approvedHandoverBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+    pendingSettlementBaselineCount = pendingSettlementBaseline._count;
+    pendingSettlementBaselineAmount =
+      pendingSettlementBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+    overdueSettlementBaselineCount = overdueSettlementBaseline._count;
+    overdueSettlementBaselineAmount =
+      overdueSettlementBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+    settledDepositBaselineCount = settledDepositBaseline._count;
+    settledDepositBaselineAmount =
+      settledDepositBaseline._sum.transferAmount ?? new Prisma.Decimal(0);
+    unmatchedStatementBaselineCount = unmatchedStatementBaseline._count;
+    unmatchedStatementBaselineAmount =
+      unmatchedStatementBaseline._sum.amount ?? new Prisma.Decimal(0);
+    mismatchedStatementBaselineCount = mismatchedStatementBaseline._count;
+    mismatchedStatementBaselineAmount =
+      mismatchedStatementBaseline._sum.amount ?? new Prisma.Decimal(0);
 
     const position = await prisma.position.create({
       data: { name: `Report Position ${suffix}`, salary: 0 },
@@ -451,6 +525,20 @@ describe('Reports queries (e2e)', () => {
       currentPendingHandoverAmount: pendingHandoverBaselineAmount.toFixed(2),
       approvedHandoverCount: approvedHandoverBaselineCount,
       approvedHandoverAmount: approvedHandoverBaselineAmount.toFixed(2),
+      currentPendingBankSettlementCount: pendingSettlementBaselineCount,
+      currentPendingBankSettlementAmount:
+        pendingSettlementBaselineAmount.toFixed(2),
+      overdueBankSettlementCount: overdueSettlementBaselineCount,
+      overdueBankSettlementAmount: overdueSettlementBaselineAmount.toFixed(2),
+      settledBankDepositCount: settledDepositBaselineCount,
+      settledBankDepositAmount: settledDepositBaselineAmount.toFixed(2),
+      currentUnmatchedBankStatementEntryCount: unmatchedStatementBaselineCount,
+      currentUnmatchedBankStatementEntryAmount:
+        unmatchedStatementBaselineAmount.toFixed(2),
+      currentMismatchedBankStatementEntryCount:
+        mismatchedStatementBaselineCount,
+      currentMismatchedBankStatementEntryAmount:
+        mismatchedStatementBaselineAmount.toFixed(2),
     });
     expect(report.cashRisk.varianceTrend).toEqual([
       {

@@ -107,6 +107,20 @@ describe('ReportsService', () => {
           currentPendingHandoverAmount: new Prisma.Decimal('700000'),
           approvedHandoverCount: 3n,
           approvedHandoverAmount: new Prisma.Decimal('2100000'),
+          currentPendingBankSettlementCount: 2n,
+          currentPendingBankSettlementAmount: new Prisma.Decimal('1400000'),
+          overdueBankSettlementCount: 1n,
+          overdueBankSettlementAmount: new Prisma.Decimal('700000'),
+          settledBankDepositCount: 4n,
+          settledBankDepositAmount: new Prisma.Decimal('2800000'),
+          currentUnmatchedBankStatementEntryCount: 3n,
+          currentUnmatchedBankStatementEntryAmount: new Prisma.Decimal(
+            '900000',
+          ),
+          currentMismatchedBankStatementEntryCount: 1n,
+          currentMismatchedBankStatementEntryAmount: new Prisma.Decimal(
+            '250000',
+          ),
         },
       ])
       .mockResolvedValueOnce([
@@ -193,6 +207,16 @@ describe('ReportsService', () => {
       currentPendingHandoverAmount: '700000.00',
       approvedHandoverCount: 3,
       approvedHandoverAmount: '2100000.00',
+      currentPendingBankSettlementCount: 2,
+      currentPendingBankSettlementAmount: '1400000.00',
+      overdueBankSettlementCount: 1,
+      overdueBankSettlementAmount: '700000.00',
+      settledBankDepositCount: 4,
+      settledBankDepositAmount: '2800000.00',
+      currentUnmatchedBankStatementEntryCount: 3,
+      currentUnmatchedBankStatementEntryAmount: '900000.00',
+      currentMismatchedBankStatementEntryCount: 1,
+      currentMismatchedBankStatementEntryAmount: '250000.00',
     });
     expect(result.cashRisk.varianceTrend[0]).toEqual({
       bucket: '2026-01-01',

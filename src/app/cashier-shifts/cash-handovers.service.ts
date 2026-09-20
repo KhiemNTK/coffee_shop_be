@@ -9,11 +9,17 @@ import {
 } from '@nestjs/common';
 import {
   CashFlowType,
+  CashHandoverSettlementStatus,
   CashHandoverStatus,
   FundType,
   Prisma,
+  SettingValueType,
   ShiftStatus,
 } from '@prisma/client';
+import {
+  CashControlSettingDefaults,
+  CashControlSettingKeys,
+} from '../../common/consts/cash-control-settings';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -24,7 +30,10 @@ import {
   ApproveCashHandoverDto,
   CreateCashHandoverDto,
   GetCashHandoversDto,
+  GetOverdueCashHandoversDto,
+  RegisterBankDepositDto,
   RejectCashHandoverDto,
+  SettleCashHandoverDto,
 } from './dto';
 
 @Injectable()
@@ -171,6 +180,9 @@ export class CashHandoversService {
   async findAll(query: GetCashHandoversDto, requestedById?: string) {
     const where: Prisma.CashHandoverWhereInput = {
       ...(query.status ? { status: query.status } : {}),
+      ...(query.settlementStatus
+        ? { settlementStatus: query.settlementStatus }
+        : {}),
       ...(query.shiftId ? { shiftId: query.shiftId } : {}),
       ...(query.sourceFundId ? { sourceFundId: query.sourceFundId } : {}),
       ...(query.destinationFundId
@@ -190,16 +202,18 @@ export class CashHandoversService {
           }
         : {}),
     };
-    const totalItems = await this.prisma.cashHandover.count({ where });
-    const paging = this.paginationUtil.paging({ ...query, totalItems });
-    const handovers = await this.prisma.cashHandover.findMany({
-      where,
-      skip: paging.skip,
-      take: paging.itemPerPage,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      include: this.handoverInclude,
-    });
-    return paging.format(handovers);
+    return this.paginate(where, query);
+  }
+
+  findOverdue(query: GetOverdueCashHandoversDto) {
+    return this.paginate(
+      {
+        status: CashHandoverStatus.APPROVED,
+        settlementStatus: CashHandoverSettlementStatus.PENDING,
+        settlementDueAt: { lt: new Date() },
+      },
+      query,
+    );
   }
 
   async findOne(id: string) {
@@ -259,15 +273,16 @@ export class CashHandoversService {
           'The source fund balance changed after the handover was requested.',
         );
       }
-      const destinationUpdate = await tx.fund.updateMany({
-        where: { id: handover.destinationFundId, deletedAt: null },
-        data: { balance: { increment: handover.transferAmount } },
-      });
-      if (destinationUpdate.count !== 1) {
-        throw new ConflictException('The destination fund is unavailable.');
-      }
 
       const resolvedAt = new Date();
+      const requiresSettlement =
+        handover.destinationFund.type === FundType.BANK;
+      const settlementDueAt = requiresSettlement
+        ? new Date(
+            resolvedAt.getTime() +
+              (await this.getSettlementSlaHours(tx)) * 60 * 60 * 1000,
+          )
+        : null;
       const varianceTransaction = handover.varianceAmount.isZero()
         ? null
         : await tx.cashTransaction.create({
@@ -292,16 +307,15 @@ export class CashHandoversService {
           employeeId,
         },
       });
-      const destinationTransaction = await tx.cashTransaction.create({
-        data: {
-          type: CashFlowType.INCOME,
-          amount: handover.transferAmount,
-          description: `Incoming cash handover ${handover.id}`,
-          transactionDate: resolvedAt,
-          fundId: handover.destinationFundId,
-          employeeId,
-        },
-      });
+      const destinationTransaction = requiresSettlement
+        ? null
+        : await this.postDestinationEntry(
+            tx,
+            handover,
+            employeeId,
+            resolvedAt,
+            handover.destinationFund.type,
+          );
 
       const approved = await tx.cashHandover.update({
         where: { id: handover.id },
@@ -310,8 +324,12 @@ export class CashHandoversService {
           resolvedAt,
           resolvedById: employeeId,
           resolutionNote: dto.note,
+          settlementStatus: requiresSettlement
+            ? CashHandoverSettlementStatus.PENDING
+            : CashHandoverSettlementStatus.NOT_REQUIRED,
+          settlementDueAt,
           sourceTransactionId: sourceTransaction.id,
-          destinationTransactionId: destinationTransaction.id,
+          destinationTransactionId: destinationTransaction?.id,
           varianceTransactionId: varianceTransaction?.id,
         },
         include: this.handoverInclude,
@@ -320,12 +338,173 @@ export class CashHandoversService {
         handoverId: handover.id,
         shiftId: handover.shiftId,
         sourceTransactionId: sourceTransaction.id,
-        destinationTransactionId: destinationTransaction.id,
+        destinationTransactionId: destinationTransaction?.id ?? null,
         varianceTransactionId: varianceTransaction?.id ?? null,
+        settlementStatus: approved.settlementStatus,
+        settlementDueAt: approved.settlementDueAt?.toISOString() ?? null,
         transferAmount: handover.transferAmount.toString(),
       });
       return approved;
     });
+  }
+
+  async settle(id: string, employeeId: string, dto: SettleCashHandoverDto) {
+    try {
+      return await this.runSerializable(async (tx) => {
+        await this.assertActiveEmployee(tx, employeeId);
+        const handover = await this.findOrThrow(tx, id);
+        if (
+          handover.status !== CashHandoverStatus.APPROVED ||
+          handover.settlementStatus !== CashHandoverSettlementStatus.PENDING
+        ) {
+          throw new ConflictException(
+            'The cash handover is not awaiting bank settlement.',
+          );
+        }
+        if (handover.requestedById === employeeId) {
+          throw new ForbiddenException(
+            'Employees cannot settle their own cash handovers.',
+          );
+        }
+        if (
+          handover.destinationFund.deletedAt ||
+          handover.destinationFund.type !== FundType.BANK
+        ) {
+          throw new ConflictException(
+            'Settlement requires an active BANK destination fund.',
+          );
+        }
+
+        const bankReference = dto.bankReference.toUpperCase();
+        if (
+          (handover.bankReference &&
+            handover.bankReference !== bankReference) ||
+          (handover.evidenceReference &&
+            handover.evidenceReference !== dto.evidenceReference)
+        ) {
+          throw new ConflictException(
+            'Settlement details do not match the registered bank deposit.',
+          );
+        }
+
+        const settledAt = new Date();
+        const destinationTransaction = await this.postDestinationEntry(
+          tx,
+          handover,
+          employeeId,
+          settledAt,
+          FundType.BANK,
+        );
+        const settled = await tx.cashHandover.update({
+          where: { id: handover.id },
+          data: {
+            settlementStatus: CashHandoverSettlementStatus.SETTLED,
+            settledAt,
+            settledById: employeeId,
+            bankReference,
+            evidenceReference: dto.evidenceReference,
+            destinationTransactionId: destinationTransaction.id,
+          },
+          include: this.handoverInclude,
+        });
+        await this.log(tx, employeeId, 'CASH_HANDOVER_SETTLED', {
+          handoverId: handover.id,
+          destinationFundId: handover.destinationFundId,
+          destinationTransactionId: destinationTransaction.id,
+          bankReference: settled.bankReference,
+          evidenceReference: settled.evidenceReference,
+          transferAmount: handover.transferAmount.toString(),
+        });
+        return settled;
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'This bank reference has already been reconciled for the destination fund.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  async registerDeposit(
+    id: string,
+    employeeId: string,
+    dto: RegisterBankDepositDto,
+  ) {
+    try {
+      return await this.runSerializable(async (tx) => {
+        await this.assertActiveEmployee(tx, employeeId);
+        const handover = await this.findOrThrow(tx, id);
+        if (
+          handover.status !== CashHandoverStatus.APPROVED ||
+          handover.settlementStatus !== CashHandoverSettlementStatus.PENDING
+        ) {
+          throw new ConflictException(
+            'Only an approved handover awaiting bank settlement can register a deposit.',
+          );
+        }
+        if (handover.requestedById !== employeeId) {
+          throw new ForbiddenException(
+            'Only the handover requester can register the bank deposit evidence.',
+          );
+        }
+        if (
+          handover.destinationFund.deletedAt ||
+          handover.destinationFund.type !== FundType.BANK
+        ) {
+          throw new ConflictException(
+            'Deposit registration requires an active BANK destination fund.',
+          );
+        }
+
+        const bankReference = dto.bankReference.toUpperCase();
+        if (handover.bankReference || handover.evidenceReference) {
+          if (
+            handover.bankReference === bankReference &&
+            handover.evidenceReference === dto.evidenceReference
+          ) {
+            return tx.cashHandover.findUniqueOrThrow({
+              where: { id: handover.id },
+              include: this.handoverInclude,
+            });
+          }
+          throw new ConflictException(
+            'Bank deposit evidence has already been registered.',
+          );
+        }
+
+        const registered = await tx.cashHandover.update({
+          where: { id: handover.id },
+          data: {
+            bankReference,
+            evidenceReference: dto.evidenceReference,
+          },
+          include: this.handoverInclude,
+        });
+        await this.log(tx, employeeId, 'CASH_HANDOVER_DEPOSIT_REGISTERED', {
+          handoverId: handover.id,
+          destinationFundId: handover.destinationFundId,
+          bankReference,
+          evidenceReference: dto.evidenceReference,
+          transferAmount: handover.transferAmount.toString(),
+        });
+        return registered;
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'This bank reference is already registered for the destination fund.',
+        );
+      }
+      throw error;
+    }
   }
 
   async reject(id: string, employeeId: string, dto: RejectCashHandoverDto) {
@@ -388,6 +567,7 @@ export class CashHandoversService {
   private readonly handoverInclude = {
     requestedBy: { select: { id: true, fullName: true } },
     resolvedBy: { select: { id: true, fullName: true } },
+    settledBy: { select: { id: true, fullName: true } },
     shift: {
       select: {
         id: true,
@@ -418,7 +598,7 @@ export class CashHandoversService {
           select: { id: true, type: true, balance: true, deletedAt: true },
         },
         destinationFund: {
-          select: { id: true, deletedAt: true },
+          select: { id: true, type: true, deletedAt: true },
         },
       },
     });
@@ -426,6 +606,74 @@ export class CashHandoversService {
       throw new NotFoundException(`Cash handover with ID ${id} not found.`);
     }
     return handover;
+  }
+
+  private async paginate(
+    where: Prisma.CashHandoverWhereInput,
+    query: { itemPerPage: number; page: number },
+  ) {
+    const totalItems = await this.prisma.cashHandover.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const handovers = await this.prisma.cashHandover.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: this.handoverInclude,
+    });
+    return paging.format(handovers);
+  }
+
+  private async postDestinationEntry(
+    tx: ExtendedPrismaTransactionClient,
+    handover: {
+      id: string;
+      destinationFundId: string;
+      transferAmount: Prisma.Decimal;
+    },
+    employeeId: string,
+    transactionDate: Date,
+    expectedFundType: FundType,
+  ) {
+    const destinationUpdate = await tx.fund.updateMany({
+      where: {
+        id: handover.destinationFundId,
+        type: expectedFundType,
+        deletedAt: null,
+      },
+      data: { balance: { increment: handover.transferAmount } },
+    });
+    if (destinationUpdate.count !== 1) {
+      throw new ConflictException('The destination fund is unavailable.');
+    }
+    return tx.cashTransaction.create({
+      data: {
+        type: CashFlowType.INCOME,
+        amount: handover.transferAmount,
+        description: `Incoming cash handover ${handover.id}`,
+        transactionDate,
+        fundId: handover.destinationFundId,
+        employeeId,
+      },
+    });
+  }
+
+  private async getSettlementSlaHours(tx: ExtendedPrismaTransactionClient) {
+    const setting = await tx.systemSetting.findFirst({
+      where: {
+        key: CashControlSettingKeys.HANDOVER_SETTLEMENT_SLA_HOURS,
+        valueType: SettingValueType.NUMBER,
+        deletedAt: null,
+      },
+      select: { value: true },
+    });
+    const value = setting?.value;
+    return typeof value === 'number' &&
+      Number.isInteger(value) &&
+      value > 0 &&
+      value <= 720
+      ? value
+      : CashControlSettingDefaults.HANDOVER_SETTLEMENT_SLA_HOURS;
   }
 
   private assertPending(status: CashHandoverStatus) {

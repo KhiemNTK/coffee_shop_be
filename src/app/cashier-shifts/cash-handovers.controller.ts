@@ -9,7 +9,10 @@ import {
   ApproveCashHandoverDto,
   CreateCashHandoverDto,
   GetCashHandoversDto,
+  GetOverdueCashHandoversDto,
+  RegisterBankDepositDto,
   RejectCashHandoverDto,
+  SettleCashHandoverDto,
 } from './dto';
 
 @ApiTags('cash-handovers')
@@ -41,6 +44,12 @@ export class CashHandoversController {
     return this.cashHandoversService.findAll(query);
   }
 
+  @Get('overdue')
+  @RequirePermissions(PermissionKeys.CASH_HANDOVERS_READ)
+  findOverdue(@Query() query: GetOverdueCashHandoversDto) {
+    return this.cashHandoversService.findOverdue(query);
+  }
+
   @Get(':id')
   @RequirePermissions(PermissionKeys.CASH_HANDOVERS_READ)
   findOne(@Param() { id }: IDDto) {
@@ -65,6 +74,26 @@ export class CashHandoversController {
     @Body() dto: RejectCashHandoverDto,
   ) {
     return this.cashHandoversService.reject(id, employeeId, dto);
+  }
+
+  @Post(':id/settle')
+  @RequirePermissions(PermissionKeys.CASH_HANDOVERS_SETTLE)
+  settle(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: SettleCashHandoverDto,
+  ) {
+    return this.cashHandoversService.settle(id, employeeId, dto);
+  }
+
+  @Post(':id/register-deposit')
+  @RequirePermissions(PermissionKeys.CASH_HANDOVERS_CREATE)
+  registerDeposit(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: RegisterBankDepositDto,
+  ) {
+    return this.cashHandoversService.registerDeposit(id, employeeId, dto);
   }
 
   @Post(':id/cancel')
