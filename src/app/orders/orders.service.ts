@@ -43,14 +43,11 @@ import {
 } from '../../common/consts/reservation';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { OutboxService } from '../durable/outbox.service';
+import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
-  private readonly maxSerializableTransactionRetries = 3;
-  private readonly serializableTransaction = {
-    isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-  } as const;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -129,43 +126,12 @@ export class OrdersService {
     };
   }
 
-  private async runSerializableTransaction<T>(
+  private runSerializableTransaction<T>(
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ): Promise<T> {
-    for (
-      let attempt = 1;
-      attempt <= this.maxSerializableTransactionRetries;
-      attempt++
-    ) {
-      try {
-        return await this.prisma.$transaction(
-          callback,
-          this.serializableTransaction,
-        );
-      } catch (error) {
-        if (
-          this.isSerializableTransactionConflict(error) &&
-          attempt < this.maxSerializableTransactionRetries
-        ) {
-          this.logger.warn(
-            `Serializable transaction conflict. Retrying attempt ${attempt + 1}/${this.maxSerializableTransactionRetries}`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    throw new ConflictException('Transaction failed. Please try again.');
-  }
-
-  private isSerializableTransactionConflict(error: unknown) {
-    return (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2034'
-    );
+    return executeSerializableTransaction(this.prisma, callback, {
+      loggerContext: 'Orders transaction',
+    });
   }
 
   private async assertActiveEmployee(

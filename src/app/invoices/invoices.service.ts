@@ -43,14 +43,11 @@ import {
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
+import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 
 @Injectable()
 export class InvoicesService {
   private readonly logger = new Logger(InvoicesService.name);
-  private readonly maxSerializableTransactionRetries = 3;
-  private readonly serializableTransaction = {
-    isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-  } as const;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -832,42 +829,12 @@ export class InvoicesService {
     };
   }
 
-  private async runSerializableTransaction<T>(
+  private runSerializableTransaction<T>(
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ): Promise<T> {
-    for (
-      let attempt = 1;
-      attempt <= this.maxSerializableTransactionRetries;
-      attempt++
-    ) {
-      try {
-        return await this.prisma.$transaction(
-          callback,
-          this.serializableTransaction,
-        );
-      } catch (error) {
-        if (
-          this.isRetryableTransactionError(error) &&
-          attempt < this.maxSerializableTransactionRetries
-        ) {
-          this.logger.warn(
-            `Invoice transaction conflict. Retrying attempt ${attempt + 1}/${this.maxSerializableTransactionRetries}`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    throw new ConflictException('Transaction failed. Please try again.');
-  }
-
-  private isRetryableTransactionError(error: unknown) {
-    return (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      (error.code === 'P2034' || error.code === 'P2002')
-    );
+    return executeSerializableTransaction(this.prisma, callback, {
+      loggerContext: 'Invoice transaction',
+      retryUniqueViolations: true,
+    });
   }
 }
