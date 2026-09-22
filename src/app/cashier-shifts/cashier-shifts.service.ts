@@ -15,6 +15,7 @@ import {
   FundType,
   PaymentMethod,
   PaymentAttemptStatus,
+  PaymentRefundStatus,
   PaymentStatus,
   Prisma,
   SettingValueType,
@@ -383,12 +384,18 @@ export class CashierShiftsService {
         const pendingPaymentAttempts = await tx.paymentAttempt.count({
           where: {
             shiftId: shift.id,
-            status: PaymentAttemptStatus.PENDING,
+            status: {
+              in: [
+                PaymentAttemptStatus.PENDING,
+                PaymentAttemptStatus.EXPIRED,
+                PaymentAttemptStatus.REQUIRES_REVIEW,
+              ],
+            },
           },
         });
         if (pendingPaymentAttempts > 0) {
           throw new ConflictException(
-            'Cannot close a shift with pending online payments.',
+            'Cannot close a shift with unresolved online payments.',
           );
         }
         const activeSessions = await tx.orderSession.count({
@@ -510,9 +517,25 @@ export class CashierShiftsService {
   ) {
     const invoiceGroups = await tx.invoice.groupBy({
       by: ['paymentMethod'],
-      where: { shiftId: shift.id, paymentStatus: PaymentStatus.PAID },
+      where: {
+        shiftId: shift.id,
+        paymentStatus: {
+          in: [
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIALLY_REFUNDED,
+            PaymentStatus.REFUNDED,
+          ],
+        },
+      },
       _count: { _all: true },
       _sum: { totalAmount: true },
+    });
+    const refunds = await tx.paymentRefund.aggregate({
+      where: {
+        status: PaymentRefundStatus.SUCCEEDED,
+        paymentAttempt: { shiftId: shift.id },
+      },
+      _sum: { amount: true },
     });
     const movementGroups = await tx.cashTransaction.groupBy({
       by: ['type'],
@@ -538,6 +561,10 @@ export class CashierShiftsService {
         invoiceTotals.nonCashSales = invoiceTotals.nonCashSales.plus(amount);
       }
     }
+    const refundedAmount = refunds._sum.amount ?? new Prisma.Decimal(0);
+    invoiceTotals.nonCashSales =
+      invoiceTotals.nonCashSales.minus(refundedAmount);
+    invoiceTotals.totalSales = invoiceTotals.totalSales.minus(refundedAmount);
 
     const manualTotals = {
       manualIncome: new Prisma.Decimal(0),

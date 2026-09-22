@@ -120,4 +120,11 @@ export interface ReportPaymentOperationsRow {
   failedAttemptCount: bigint;
   failedAttemptAmount: Decimal;
   webhookExceptionCount: bigint;
+  requiresReviewAttemptCount: bigint;
+  requiresReviewAttemptAmount: Decimal;
+  successfulRefundCount: bigint;
+  successfulRefundAmount: Decimal;
+  reviewRefundCount: bigint;
+  reviewRefundAmount: Decimal;
+  openReconciliationIncidentCount: bigint;
 }

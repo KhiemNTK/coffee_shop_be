@@ -137,7 +137,9 @@ export class ReportsService {
           COALESCE(SUM(i."subTotal"), 0)::numeric AS "grossSales",
           COALESCE(SUM(i."discountAmount"), 0)::numeric AS "discountAmount",
           COALESCE(SUM(i."taxAmount"), 0)::numeric AS "taxAmount",
-          COALESCE(SUM(i."totalAmount"), 0)::numeric AS "netRevenue",
+          COALESCE(SUM(
+            i."totalAmount" - COALESCE(refunds."amount", 0)
+          ), 0)::numeric AS "netRevenue",
           COALESCE(AVG(i."totalAmount"), 0)::numeric AS "averageTicket",
           (
             SELECT COUNT(*)::bigint
@@ -153,7 +155,14 @@ export class ReportsService {
               AND iw."createdAt" < ${period.to}
           ) AS "wasteEntryCount"
         FROM "Invoice" i
-        WHERE i."paymentStatus" = 'PAID'
+        LEFT JOIN (
+          SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
+          FROM "PaymentRefund" pr
+          JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+          WHERE pr."status" = 'SUCCEEDED'
+          GROUP BY pa."invoiceId"
+        ) refunds ON refunds."invoiceId" = i."id"
+        WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
           AND i."createdAt" >= ${period.from}
           AND i."createdAt" < ${period.to}
       ) invoice_summary
@@ -210,9 +219,18 @@ export class ReportsService {
           ${format}
         ) AS "bucket",
         COUNT(*)::bigint AS "paidInvoiceCount",
-        COALESCE(SUM(i."totalAmount"), 0)::numeric AS "netRevenue"
+        COALESCE(SUM(
+          i."totalAmount" - COALESCE(refunds."amount", 0)
+        ), 0)::numeric AS "netRevenue"
       FROM "Invoice" i
-      WHERE i."paymentStatus" = 'PAID'
+      LEFT JOIN (
+        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
+        FROM "PaymentRefund" pr
+        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        WHERE pr."status" = 'SUCCEEDED'
+        GROUP BY pa."invoiceId"
+      ) refunds ON refunds."invoiceId" = i."id"
+      WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
         AND i."createdAt" < ${period.to}
       GROUP BY 1
@@ -234,9 +252,18 @@ export class ReportsService {
       SELECT
         i."paymentMethod",
         COUNT(*)::bigint AS "paidInvoiceCount",
-        COALESCE(SUM(i."totalAmount"), 0)::numeric AS "netRevenue"
+        COALESCE(SUM(
+          i."totalAmount" - COALESCE(refunds."amount", 0)
+        ), 0)::numeric AS "netRevenue"
       FROM "Invoice" i
-      WHERE i."paymentStatus" = 'PAID'
+      LEFT JOIN (
+        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
+        FROM "PaymentRefund" pr
+        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        WHERE pr."status" = 'SUCCEEDED'
+        GROUP BY pa."invoiceId"
+      ) refunds ON refunds."invoiceId" = i."id"
+      WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
         AND i."createdAt" < ${period.to}
       GROUP BY i."paymentMethod"
@@ -270,7 +297,7 @@ export class ReportsService {
       JOIN "Invoice" i ON i."id" = oi."invoiceId"
       JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
       JOIN "MenuCategory" mc ON mc."id" = mi."categoryId"
-      WHERE i."paymentStatus" = 'PAID'
+      WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
         AND i."createdAt" < ${period.to}
       GROUP BY mi."id", mi."name", mc."name"
@@ -298,10 +325,19 @@ export class ReportsService {
         p."name",
         COUNT(i."id")::bigint AS "usageCount",
         COALESCE(SUM(i."discountAmount"), 0)::numeric AS "discountAmount",
-        COALESCE(SUM(i."totalAmount"), 0)::numeric AS "netRevenue"
+        COALESCE(SUM(
+          i."totalAmount" - COALESCE(refunds."amount", 0)
+        ), 0)::numeric AS "netRevenue"
       FROM "Invoice" i
       JOIN "Promotion" p ON p."id" = i."promotionId"
-      WHERE i."paymentStatus" = 'PAID'
+      LEFT JOIN (
+        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
+        FROM "PaymentRefund" pr
+        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        WHERE pr."status" = 'SUCCEEDED'
+        GROUP BY pa."invoiceId"
+      ) refunds ON refunds."invoiceId" = i."id"
+      WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
         AND i."createdAt" < ${period.to}
       GROUP BY p."id", p."name"
@@ -630,7 +666,9 @@ export class ReportsService {
     const [row] = await tx.$queryRaw<ReportPaymentOperationsRow[]>(Prisma.sql`
       SELECT
         attempt_metrics.*,
-        webhook_metrics.*
+        webhook_metrics.*,
+        refund_metrics.*,
+        incident_metrics.*
       FROM (
         SELECT
           COUNT(*) FILTER (
@@ -668,7 +706,13 @@ export class ReportsService {
             WHERE pa."status" = 'FAILED'
               AND pa."completedAt" >= ${period.from}
               AND pa."completedAt" < ${period.to}
-          ), 0)::numeric AS "failedAttemptAmount"
+          ), 0)::numeric AS "failedAttemptAmount",
+          COUNT(*) FILTER (
+            WHERE pa."status" = 'REQUIRES_REVIEW'
+          )::bigint AS "requiresReviewAttemptCount",
+          COALESCE(SUM(pa."amount") FILTER (
+            WHERE pa."status" = 'REQUIRES_REVIEW'
+          ), 0)::numeric AS "requiresReviewAttemptAmount"
         FROM "PaymentAttempt" pa
       ) attempt_metrics
       CROSS JOIN (
@@ -683,6 +727,31 @@ export class ReportsService {
             '02_PAYMENT_STATE_CONFLICT'
           )
       ) webhook_metrics
+      CROSS JOIN (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE pr."status" = 'SUCCEEDED'
+              AND pr."completedAt" >= ${period.from}
+              AND pr."completedAt" < ${period.to}
+          )::bigint AS "successfulRefundCount",
+          COALESCE(SUM(pr."amount") FILTER (
+            WHERE pr."status" = 'SUCCEEDED'
+              AND pr."completedAt" >= ${period.from}
+              AND pr."completedAt" < ${period.to}
+          ), 0)::numeric AS "successfulRefundAmount",
+          COUNT(*) FILTER (
+            WHERE pr."status" = 'REQUIRES_REVIEW'
+          )::bigint AS "reviewRefundCount",
+          COALESCE(SUM(pr."amount") FILTER (
+            WHERE pr."status" = 'REQUIRES_REVIEW'
+          ), 0)::numeric AS "reviewRefundAmount"
+        FROM "PaymentRefund" pr
+      ) refund_metrics
+      CROSS JOIN (
+        SELECT COUNT(*)::bigint AS "openReconciliationIncidentCount"
+        FROM "PaymentReconciliationIncident" pri
+        WHERE pri."status" = 'OPEN'
+      ) incident_metrics
     `);
 
     const successfulAttemptCount = Number(row?.successfulAttemptCount ?? 0);
@@ -697,6 +766,15 @@ export class ReportsService {
       successfulAttemptAmount: this.money(row?.successfulAttemptAmount),
       failedAttemptCount,
       failedAttemptAmount: this.money(row?.failedAttemptAmount),
+      requiresReviewAttemptCount: Number(row?.requiresReviewAttemptCount ?? 0),
+      requiresReviewAttemptAmount: this.money(row?.requiresReviewAttemptAmount),
+      successfulRefundCount: Number(row?.successfulRefundCount ?? 0),
+      successfulRefundAmount: this.money(row?.successfulRefundAmount),
+      reviewRefundCount: Number(row?.reviewRefundCount ?? 0),
+      reviewRefundAmount: this.money(row?.reviewRefundAmount),
+      openReconciliationIncidentCount: Number(
+        row?.openReconciliationIncidentCount ?? 0,
+      ),
       successRatePercent:
         completedAttemptCount === 0
           ? '0.00'
