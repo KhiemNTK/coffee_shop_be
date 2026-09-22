@@ -1,6 +1,9 @@
 import { Employee as EmployeePrisma } from '@prisma/client';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Exclude } from 'class-transformer';
+import {
+  ApiHideProperty,
+  ApiProperty,
+  ApiPropertyOptional,
+} from '@nestjs/swagger';
 import { Decimal } from '@prisma/client/runtime/library';
 
 export class EmployeeEntity implements EmployeePrisma {
@@ -28,7 +31,7 @@ export class EmployeeEntity implements EmployeePrisma {
   @ApiProperty()
   username!: string;
 
-  @Exclude()
+  @ApiHideProperty()
   password!: string;
 
   @ApiPropertyOptional()

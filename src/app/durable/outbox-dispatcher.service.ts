@@ -44,9 +44,15 @@ export class OutboxDispatcherService
     const redisUrl = this.config.get<string>('REDIS_URL');
     if (redisUrl) this.startBullMq(redisUrl);
 
-    this.timer = setInterval(() => void this.drainOnce(), POLL_INTERVAL_MS);
-    this.timer.unref();
-    await this.drainOnce();
+    const pollInterval = this.config.get<number>(
+      'OUTBOX_POLL_INTERVAL_MS',
+      POLL_INTERVAL_MS,
+    );
+    if (pollInterval > 0) {
+      this.timer = setInterval(() => void this.drainOnce(), pollInterval);
+      this.timer.unref();
+      await this.drainOnce();
+    }
   }
 
   async onModuleDestroy() {

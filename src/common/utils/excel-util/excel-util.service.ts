@@ -1,9 +1,15 @@
 import { SYSTEM_ERRORS } from './../../consts/message';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { type CellValue, Workbook, type Worksheet } from 'exceljs';
-import { startCase } from 'lodash';
 import { File, GenerateExcelParams } from './dto/excel-util.interface';
 import { camelCase } from 'es-toolkit';
+
+const toStartCase = (str: string) =>
+  str
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
 
 @Injectable()
 export class ExcelUtilService {
@@ -59,7 +65,7 @@ export class ExcelUtilService {
         .map((field) => {
           const mappedHeaderName = fieldsMapping?.[field] ?? field;
           return {
-            header: startCase(mappedHeaderName),
+            header: toStartCase(mappedHeaderName),
             key: field,
             width: 25,
           };
