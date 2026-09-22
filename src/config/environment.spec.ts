@@ -19,6 +19,8 @@ const productionEnvironment = {
   VNPAY_TMN_CODE: 'COFFEE01',
   VNPAY_HASH_SECRET: 'strong-vnpay-secret-with-more-than-32-characters',
   VNPAY_PAYMENT_URL: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
+  VNPAY_API_URL: 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
+  VNPAY_SERVER_IP: '203.0.113.10',
   VNPAY_RETURN_URL: 'https://coffee.example.com/payment/vnpay/return',
 } as const;
 
@@ -71,5 +73,13 @@ describe('validateEnvironment', () => {
         VNPAY_PAYMENT_URL: 'http://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
       }),
     ).toThrow('VNPAY_PAYMENT_URL must use HTTPS in production');
+
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        VNPAY_API_URL:
+          'http://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
+      }),
+    ).toThrow('VNPAY_API_URL must use HTTPS in production');
   });
 });

@@ -4,7 +4,7 @@ import {
   Inject,
   NotFoundException,
 } from '@nestjs/common';
-import { Employee, Prisma } from '@prisma/client';
+import { Employee, Prisma, type PrismaClient } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
   type ExtendedPrismaClient,
@@ -91,7 +91,9 @@ export class EmployeesService {
       itemPerPage,
       totalItems,
     });
-    const list = await this.prisma.employee.findMany({
+    const employee = this.prisma
+      .employee as unknown as PrismaClient['employee'];
+    const list = await employee.findMany({
       select: fieldsSelect,
       skip: paging.skip,
       take: paging.itemPerPage,

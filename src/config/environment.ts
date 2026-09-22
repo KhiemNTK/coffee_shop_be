@@ -60,6 +60,16 @@ const EnvironmentSchema = z
     VNPAY_PAYMENT_URL: z
       .url()
       .default('https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
+    VNPAY_API_URL: z
+      .url()
+      .default('https://sandbox.vnpayment.vn/merchant_webapi/api/transaction'),
+    VNPAY_SERVER_IP: z.string().trim().min(7).max(45).default('127.0.0.1'),
+    VNPAY_API_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(15_000)
+      .default(5_000),
     VNPAY_RETURN_URL: z.url().optional(),
     VNPAY_ATTEMPT_TTL_MINUTES: z.coerce
       .number()
@@ -101,6 +111,8 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     'VNPAY_TMN_CODE',
     'VNPAY_HASH_SECRET',
     'VNPAY_PAYMENT_URL',
+    'VNPAY_API_URL',
+    'VNPAY_SERVER_IP',
     'VNPAY_RETURN_URL',
   ] as const;
   const missing = required.filter((key) => !raw[key]);
@@ -150,6 +162,9 @@ export function validateEnvironment(raw: Record<string, unknown>) {
   }
   if (!environment.VNPAY_PAYMENT_URL.startsWith('https://')) {
     throw new Error('VNPAY_PAYMENT_URL must use HTTPS in production');
+  }
+  if (!environment.VNPAY_API_URL.startsWith('https://')) {
+    throw new Error('VNPAY_API_URL must use HTTPS in production');
   }
   if (
     ['your_', 'replace-', 'changeme'].some((marker) =>

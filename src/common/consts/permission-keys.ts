@@ -67,6 +67,10 @@ export const PermissionKeys = {
 
   PAYMENT_ATTEMPTS_CREATE: '/payment-attempts_create',
   PAYMENT_ATTEMPTS_READ: '/payment-attempts_read',
+  PAYMENT_REFUNDS_CREATE: '/payment-refunds_create',
+  PAYMENT_REFUNDS_READ: '/payment-refunds_read',
+  PAYMENT_RECONCILIATION_READ: '/payment-reconciliation_read',
+  PAYMENT_RECONCILIATION_MANAGE: '/payment-reconciliation_manage',
 
   RESERVATIONS_READ: '/reservations_read',
   RESERVATIONS_CREATE: '/reservations_create',

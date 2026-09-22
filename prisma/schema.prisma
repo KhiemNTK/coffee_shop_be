@@ -73,6 +73,46 @@ enum PaymentAttemptStatus {
   SUCCEEDED
   FAILED
   EXPIRED
+  REQUIRES_REVIEW
+}
+
+enum PaymentRefundType {
+  FULL
+  PARTIAL
+}
+
+enum PaymentRefundStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REJECTED
+  REQUIRES_REVIEW
+}
+
+enum PaymentProviderRequestType {
+  QUERY
+  REFUND
+}
+
+enum PaymentProviderRequestStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum PaymentReconciliationIncidentType {
+  STALE_ATTEMPT
+  PAYMENT_STATE_CONFLICT
+  PROVIDER_PAYMENT_MISMATCH
+  REFUND_STATE_MISMATCH
+  PROVIDER_UNAVAILABLE
+}
+
+enum PaymentReconciliationIncidentStatus {
+  OPEN
+  RESOLVED
+  IGNORED
 }
 
 enum IdempotencyRequestStatus {
@@ -422,29 +462,31 @@ model Employee {
   positionId String // MaChucVu
   position   Position @relation(fields: [positionId], references: [id])
 
-  employeeRoles          EmployeeRole[]
-  orderSessions          OrderSession[]
-  invoices               Invoice[]
-  actionLogs             ActionLog[]
-  cashTransactions       CashTransaction[]
-  reservations           Reservation[]
-  equipment              Equipment[]
-  equipmentEvents        EquipmentLifecycleEvent[]
-  printSetting           PrintSetting?
-  shifts                 CashierShift[]
-  authSessions           AuthSession[]
-  passwordResetTokens    PasswordResetToken[]
-  inventoryWastes        InventoryWaste[]
-  updatedSettings        SystemSetting[]           @relation("SystemSettingUpdatedBy")
-  settingRevisions       SystemSettingRevision[]   @relation("SystemSettingRevisionEmployee")
-  requestedCashExpenses  CashExpenseRequest[]      @relation("CashExpenseRequestedBy")
-  resolvedCashExpenses   CashExpenseRequest[]      @relation("CashExpenseResolvedBy")
-  requestedCashHandovers CashHandover[]            @relation("CashHandoverRequestedBy")
-  resolvedCashHandovers  CashHandover[]            @relation("CashHandoverResolvedBy")
-  settledCashHandovers   CashHandover[]            @relation("CashHandoverSettledBy")
-  importedBankStatements BankStatementImport[]
-  paymentAttempts        PaymentAttempt[]          @relation("PaymentAttemptCreatedBy")
-  idempotencyRequests    IdempotencyRequest[]
+  employeeRoles            EmployeeRole[]
+  orderSessions            OrderSession[]
+  invoices                 Invoice[]
+  actionLogs               ActionLog[]
+  cashTransactions         CashTransaction[]
+  reservations             Reservation[]
+  equipment                Equipment[]
+  equipmentEvents          EquipmentLifecycleEvent[]
+  printSetting             PrintSetting?
+  shifts                   CashierShift[]
+  authSessions             AuthSession[]
+  passwordResetTokens      PasswordResetToken[]
+  inventoryWastes          InventoryWaste[]
+  updatedSettings          SystemSetting[]                 @relation("SystemSettingUpdatedBy")
+  settingRevisions         SystemSettingRevision[]         @relation("SystemSettingRevisionEmployee")
+  requestedCashExpenses    CashExpenseRequest[]            @relation("CashExpenseRequestedBy")
+  resolvedCashExpenses     CashExpenseRequest[]            @relation("CashExpenseResolvedBy")
+  requestedCashHandovers   CashHandover[]                  @relation("CashHandoverRequestedBy")
+  resolvedCashHandovers    CashHandover[]                  @relation("CashHandoverResolvedBy")
+  settledCashHandovers     CashHandover[]                  @relation("CashHandoverSettledBy")
+  importedBankStatements   BankStatementImport[]
+  paymentAttempts          PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
+  requestedPaymentRefunds  PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
+  resolvedPaymentIncidents PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
+  idempotencyRequests      IdempotencyRequest[]
 }
 
 model AuthSession {
@@ -826,8 +868,13 @@ model PaymentAttempt {
   providerTransactionNo    String?              @unique
   failureCode              String?
   closeSessionAfterPayment Boolean              @default(true)
+  providerCreatedAt        DateTime             @default(now())
   expiresAt                DateTime
   completedAt              DateTime?
+  lastReconciledAt         DateTime?
+  nextReconcileAt          DateTime?
+  reconciliationAttempts   Int                  @default(0)
+  reconciliationLockedAt   DateTime?
   createdAt                DateTime             @default(now())
   updatedAt                DateTime             @updatedAt
 
@@ -840,11 +887,15 @@ model PaymentAttempt {
   shiftId String
   shift   CashierShift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
 
-  webhookEvents PaymentWebhookEvent[]
+  webhookEvents           PaymentWebhookEvent[]
+  refunds                 PaymentRefund[]
+  providerRequests        PaymentProviderRequest[]
+  reconciliationIncidents PaymentReconciliationIncident[]
 
   @@unique([createdById, idempotencyKey])
   @@index([invoiceId, status, createdAt])
   @@index([status, expiresAt])
+  @@index([status, nextReconcileAt])
   @@index([createdById, createdAt])
   @@index([shiftId, createdAt])
 }
@@ -868,6 +919,91 @@ model PaymentWebhookEvent {
   @@index([provider, receivedAt])
   @@index([merchantReference, receivedAt])
   @@index([paymentAttemptId, receivedAt])
+}
+
+model PaymentRefund {
+  id                        String              @id @default(uuid())
+  type                      PaymentRefundType
+  status                    PaymentRefundStatus @default(PENDING)
+  amount                    Decimal             @db.Decimal(18, 2)
+  reason                    String
+  idempotencyKey            String
+  requestHash               String
+  providerRequestId         String              @unique
+  providerTransactionNo     String?
+  providerResponseCode      String?
+  providerTransactionStatus String?
+  providerMessage           String?
+  lastError                 String?
+  requestedAt               DateTime            @default(now())
+  completedAt               DateTime?
+  reconciliationLockedAt    DateTime?
+  updatedAt                 DateTime            @updatedAt
+
+  paymentAttemptId String
+  paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  requestedById String
+  requestedBy   Employee @relation("PaymentRefundRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  providerRequests        PaymentProviderRequest[]
+  reconciliationIncidents PaymentReconciliationIncident[]
+
+  @@unique([requestedById, idempotencyKey])
+  @@index([paymentAttemptId, status, requestedAt])
+  @@index([status, requestedAt])
+  @@index([requestedById, requestedAt])
+  @@index([providerTransactionNo])
+}
+
+model PaymentProviderRequest {
+  id                String                       @id @default(uuid())
+  requestId         String                       @unique
+  type              PaymentProviderRequestType
+  status            PaymentProviderRequestStatus @default(PENDING)
+  requestPayload    Json
+  responsePayload   Json?
+  responseCode      String?
+  transactionStatus String?
+  errorMessage      String?
+  startedAt         DateTime                     @default(now())
+  completedAt       DateTime?
+
+  paymentAttemptId String
+  paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  paymentRefundId String?
+  paymentRefund   PaymentRefund? @relation(fields: [paymentRefundId], references: [id], onDelete: Restrict)
+
+  @@index([paymentAttemptId, type, startedAt])
+  @@index([paymentRefundId, startedAt])
+  @@index([status, startedAt])
+}
+
+model PaymentReconciliationIncident {
+  id               String                              @id @default(uuid())
+  type             PaymentReconciliationIncidentType
+  status           PaymentReconciliationIncidentStatus @default(OPEN)
+  deduplicationKey String                              @unique
+  title            String
+  details          Json
+  detectedAt       DateTime                            @default(now())
+  resolvedAt       DateTime?
+  resolutionNote   String?
+  updatedAt        DateTime                            @updatedAt
+
+  paymentAttemptId String
+  paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  paymentRefundId String?
+  paymentRefund   PaymentRefund? @relation(fields: [paymentRefundId], references: [id], onDelete: Restrict)
+
+  resolvedById String?
+  resolvedBy   Employee? @relation("PaymentIncidentResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  @@index([status, detectedAt])
+  @@index([paymentAttemptId, status])
+  @@index([paymentRefundId, status])
 }
 
 model IdempotencyRequest {
