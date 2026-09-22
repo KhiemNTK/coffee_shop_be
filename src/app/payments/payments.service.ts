@@ -11,6 +11,8 @@ import { ConfigService } from '@nestjs/config';
 import {
   PaymentAttemptStatus,
   PaymentProvider,
+  PaymentReconciliationIncidentStatus,
+  PaymentReconciliationIncidentType,
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
@@ -18,12 +20,14 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type {
   ExtendedPrismaTransactionClient,
   PaymentCallbackQuery,
 } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
+import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { CreatePaymentAttemptDto, GetPaymentAttemptsDto } from './dto';
 import { VnpayService } from './vnpay.service';
@@ -65,6 +69,7 @@ export class PaymentsService {
     private readonly paginationUtil: PaginationUtilService,
     private readonly cashierShiftLedger: CashierShiftLedgerService,
     private readonly invoicesService: InvoicesService,
+    private readonly outbox: OutboxService,
     private readonly vnpay: VnpayService,
   ) {}
 
@@ -97,103 +102,108 @@ export class PaymentsService {
     }
 
     try {
-      const attempt = await this.runSerializable(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
-        const replay = await tx.paymentAttempt.findUnique({
-          where: {
-            createdById_idempotencyKey: {
-              createdById: employeeId,
-              idempotencyKey: dto.idempotencyKey,
+      const attempt = await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+          await this.assertActiveEmployee(tx, employeeId);
+          const replay = await tx.paymentAttempt.findUnique({
+            where: {
+              createdById_idempotencyKey: {
+                createdById: employeeId,
+                idempotencyKey: dto.idempotencyKey,
+              },
             },
-          },
-          include: PAYMENT_ATTEMPT_INCLUDE,
-        });
-        if (replay) {
-          this.assertIdempotentReplay(
-            replay,
-            invoiceId,
+            include: PAYMENT_ATTEMPT_INCLUDE,
+          });
+          if (replay) {
+            this.assertIdempotentReplay(
+              replay,
+              invoiceId,
+              employeeId,
+              requestHash,
+            );
+            return replay;
+          }
+
+          const invoice = await tx.invoice.findUnique({
+            where: { id: invoiceId },
+            select: {
+              id: true,
+              invoiceNumber: true,
+              totalAmount: true,
+              paymentStatus: true,
+            },
+          });
+          if (!invoice) {
+            throw new NotFoundException(
+              `Invoice with ID ${invoiceId} not found.`,
+            );
+          }
+          if (invoice.paymentStatus !== PaymentStatus.UNPAID) {
+            throw new ConflictException(
+              'Only unpaid invoices can create payment attempts.',
+            );
+          }
+
+          const now = new Date();
+          await tx.paymentAttempt.updateMany({
+            where: {
+              invoiceId,
+              status: PaymentAttemptStatus.PENDING,
+              expiresAt: { lte: now },
+            },
+            data: {
+              status: PaymentAttemptStatus.EXPIRED,
+              completedAt: now,
+            },
+          });
+          const pending = await tx.paymentAttempt.findFirst({
+            where: { invoiceId, status: PaymentAttemptStatus.PENDING },
+            select: { id: true },
+          });
+          if (pending) {
+            throw new ConflictException(
+              'This invoice already has a pending payment attempt.',
+            );
+          }
+
+          const shift = await this.cashierShiftLedger.requireOpenShift(
+            tx,
             employeeId,
-            requestHash,
           );
-          return replay;
-        }
-
-        const invoice = await tx.invoice.findUnique({
-          where: { id: invoiceId },
-          select: {
-            id: true,
-            invoiceNumber: true,
-            totalAmount: true,
-            paymentStatus: true,
-          },
-        });
-        if (!invoice) {
-          throw new NotFoundException(
-            `Invoice with ID ${invoiceId} not found.`,
+          const ttlMinutes = this.config.get<number>(
+            'VNPAY_ATTEMPT_TTL_MINUTES',
+            15,
           );
-        }
-        if (invoice.paymentStatus !== PaymentStatus.UNPAID) {
-          throw new ConflictException(
-            'Only unpaid invoices can create payment attempts.',
-          );
-        }
-
-        const now = new Date();
-        await tx.paymentAttempt.updateMany({
-          where: {
+          const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
+          const created = await tx.paymentAttempt.create({
+            data: {
+              provider: PaymentProvider.VNPAY,
+              amount: invoice.totalAmount,
+              merchantReference: this.createMerchantReference(),
+              idempotencyKey: dto.idempotencyKey,
+              requestHash,
+              closeSessionAfterPayment: dto.closeSessionAfterPayment,
+              providerCreatedAt: now,
+              expiresAt,
+              nextReconcileAt: expiresAt,
+              invoiceId,
+              createdById: employeeId,
+              shiftId: shift.id,
+            },
+            include: PAYMENT_ATTEMPT_INCLUDE,
+          });
+          await this.log(tx, employeeId, 'PAYMENT_ATTEMPT_CREATED', {
+            paymentAttemptId: created.id,
             invoiceId,
-            status: PaymentAttemptStatus.PENDING,
-            expiresAt: { lte: now },
-          },
-          data: {
-            status: PaymentAttemptStatus.EXPIRED,
-            completedAt: now,
-          },
-        });
-        const pending = await tx.paymentAttempt.findFirst({
-          where: { invoiceId, status: PaymentAttemptStatus.PENDING },
-          select: { id: true },
-        });
-        if (pending) {
-          throw new ConflictException(
-            'This invoice already has a pending payment attempt.',
-          );
-        }
-
-        const shift = await this.cashierShiftLedger.requireOpenShift(
-          tx,
-          employeeId,
-        );
-        const ttlMinutes = this.config.get<number>(
-          'VNPAY_ATTEMPT_TTL_MINUTES',
-          15,
-        );
-        const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
-        const created = await tx.paymentAttempt.create({
-          data: {
-            provider: PaymentProvider.VNPAY,
-            amount: invoice.totalAmount,
-            merchantReference: this.createMerchantReference(),
-            idempotencyKey: dto.idempotencyKey,
-            requestHash,
-            closeSessionAfterPayment: dto.closeSessionAfterPayment,
-            expiresAt,
-            invoiceId,
-            createdById: employeeId,
-            shiftId: shift.id,
-          },
-          include: PAYMENT_ATTEMPT_INCLUDE,
-        });
-        await this.log(tx, employeeId, 'PAYMENT_ATTEMPT_CREATED', {
-          paymentAttemptId: created.id,
-          invoiceId,
-          provider: created.provider,
-          merchantReference: created.merchantReference,
-          amount: created.amount.toString(),
-          expiresAt: created.expiresAt.toISOString(),
-        });
-        return created;
-      });
+            provider: created.provider,
+            merchantReference: created.merchantReference,
+            amount: created.amount.toString(),
+            expiresAt: created.expiresAt.toISOString(),
+          });
+          return created;
+        },
+      );
       return this.presentAttempt(attempt, ipAddress, dto);
     } catch (error) {
       if (this.isUniqueViolation(error)) {
@@ -269,125 +279,172 @@ export class PaymentsService {
     const amount = new Prisma.Decimal(rawAmount).div(100);
 
     try {
-      const result = await this.runSerializable(async (tx) => {
-        const attempt = await tx.paymentAttempt.findUnique({
-          where: { merchantReference },
-          include: { invoice: { select: { paymentStatus: true } } },
-        });
-        const event = await tx.paymentWebhookEvent.create({
-          data: {
-            provider: PaymentProvider.VNPAY,
-            payloadHash: verification.payloadHash,
-            merchantReference,
-            providerTransactionNo:
-              verification.params.vnp_TransactionNo || null,
-            responseCode: verification.params.vnp_ResponseCode || null,
-            transactionStatus:
-              verification.params.vnp_TransactionStatus || null,
-            payload: verification.params,
-            paymentAttemptId: attempt?.id,
-          },
-        });
-        if (!attempt) {
-          await this.completeWebhook(tx, event.id, '01');
-          return { response: VNPAY_RESPONSE.NOT_FOUND, invoice: null };
-        }
-        if (!attempt.amount.equals(amount)) {
-          await this.completeWebhook(tx, event.id, '04');
-          return { response: VNPAY_RESPONSE.INVALID_AMOUNT, invoice: null };
-        }
-        const succeeded =
-          verification.params.vnp_ResponseCode === '00' &&
-          verification.params.vnp_TransactionStatus === '00';
-        if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
-          await this.completeWebhook(tx, event.id, '02');
-          return {
-            response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
-            invoice: null,
-          };
-        }
-        if (attempt.invoice.paymentStatus !== PaymentStatus.UNPAID) {
-          await this.completeWebhook(
-            tx,
-            event.id,
-            succeeded ? '02_PAYMENT_STATE_CONFLICT' : '02',
-          );
-          return {
-            response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
-            invoice: null,
-          };
-        }
+      const result = await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+          const attempt = await tx.paymentAttempt.findUnique({
+            where: { merchantReference },
+            include: { invoice: { select: { paymentStatus: true } } },
+          });
+          const event = await tx.paymentWebhookEvent.create({
+            data: {
+              provider: PaymentProvider.VNPAY,
+              payloadHash: verification.payloadHash,
+              merchantReference,
+              providerTransactionNo:
+                verification.params.vnp_TransactionNo || null,
+              responseCode: verification.params.vnp_ResponseCode || null,
+              transactionStatus:
+                verification.params.vnp_TransactionStatus || null,
+              payload: verification.params,
+              paymentAttemptId: attempt?.id,
+            },
+          });
+          if (!attempt) {
+            await this.completeWebhook(tx, event.id, '01');
+            return { response: VNPAY_RESPONSE.NOT_FOUND, invoice: null };
+          }
+          const succeeded =
+            verification.params.vnp_ResponseCode === '00' &&
+            verification.params.vnp_TransactionStatus === '00';
+          const rawProviderTransactionNo =
+            verification.params.vnp_TransactionNo;
+          const providerTransactionNo =
+            rawProviderTransactionNo && rawProviderTransactionNo !== '0'
+              ? rawProviderTransactionNo
+              : null;
+          if (!attempt.amount.equals(amount)) {
+            if (succeeded) {
+              await this.markPaymentReview(tx, attempt, {
+                type: PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+                title: 'VNPay IPN amount does not match the payment attempt',
+                providerTransactionNo,
+                details: {
+                  expectedAmount: attempt.amount.toFixed(2),
+                  providerAmount: amount.toFixed(2),
+                },
+              });
+            }
+            await this.completeWebhook(tx, event.id, '04');
+            return { response: VNPAY_RESPONSE.INVALID_AMOUNT, invoice: null };
+          }
+          if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
+            await this.completeWebhook(tx, event.id, '02');
+            return {
+              response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
+              invoice: null,
+            };
+          }
+          if (attempt.invoice.paymentStatus !== PaymentStatus.UNPAID) {
+            if (succeeded) {
+              await this.markPaymentReview(tx, attempt, {
+                type: PaymentReconciliationIncidentType.PAYMENT_STATE_CONFLICT,
+                title: 'VNPay payment succeeded after invoice state changed',
+                providerTransactionNo,
+                details: {
+                  invoiceStatus: attempt.invoice.paymentStatus,
+                  responseCode: verification.params.vnp_ResponseCode ?? null,
+                  transactionStatus:
+                    verification.params.vnp_TransactionStatus ?? null,
+                },
+              });
+            }
+            await this.completeWebhook(
+              tx,
+              event.id,
+              succeeded ? '02_PAYMENT_STATE_CONFLICT' : '02',
+            );
+            return {
+              response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
+              invoice: null,
+            };
+          }
 
-        const rawProviderTransactionNo = verification.params.vnp_TransactionNo;
-        const providerTransactionNo =
-          rawProviderTransactionNo && rawProviderTransactionNo !== '0'
-            ? rawProviderTransactionNo
-            : null;
-        if (succeeded && !providerTransactionNo) {
-          await this.completeWebhook(tx, event.id, '99');
-          return { response: VNPAY_RESPONSE.UNKNOWN_ERROR, invoice: null };
-        }
+          if (succeeded && !providerTransactionNo) {
+            await this.markPaymentReview(tx, attempt, {
+              type: PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+              title: 'VNPay confirmed payment without a transaction number',
+              providerTransactionNo: null,
+              details: {
+                responseCode: verification.params.vnp_ResponseCode ?? null,
+                transactionStatus:
+                  verification.params.vnp_TransactionStatus ?? null,
+              },
+            });
+            await this.completeWebhook(tx, event.id, '99');
+            return { response: VNPAY_RESPONSE.UNKNOWN_ERROR, invoice: null };
+          }
 
-        if (!succeeded) {
+          if (!succeeded) {
+            const completedAt = new Date();
+            await tx.paymentAttempt.update({
+              where: { id: attempt.id },
+              data: {
+                status: PaymentAttemptStatus.FAILED,
+                providerTransactionNo,
+                failureCode:
+                  verification.params.vnp_ResponseCode || 'UNKNOWN_FAILURE',
+                completedAt,
+                lastReconciledAt: completedAt,
+                nextReconcileAt: null,
+                reconciliationLockedAt: null,
+              },
+            });
+            await this.completeWebhook(tx, event.id, '00');
+            await this.log(tx, attempt.createdById, 'VNPAY_PAYMENT_FAILED', {
+              paymentAttemptId: attempt.id,
+              invoiceId: attempt.invoiceId,
+              responseCode: verification.params.vnp_ResponseCode ?? null,
+              transactionStatus:
+                verification.params.vnp_TransactionStatus ?? null,
+            });
+            return { response: VNPAY_RESPONSE.SUCCESS, invoice: null };
+          }
+
+          const invoice = await this.invoicesService.completeOnlinePayment(tx, {
+            invoiceId: attempt.invoiceId,
+            employeeId: attempt.createdById,
+            shiftId: attempt.shiftId,
+            closeSessionAfterPayment: attempt.closeSessionAfterPayment,
+          });
           const completedAt = new Date();
           await tx.paymentAttempt.update({
             where: { id: attempt.id },
             data: {
-              status: PaymentAttemptStatus.FAILED,
+              status: PaymentAttemptStatus.SUCCEEDED,
               providerTransactionNo,
-              failureCode:
-                verification.params.vnp_ResponseCode || 'UNKNOWN_FAILURE',
+              failureCode: null,
               completedAt,
+              lastReconciledAt: completedAt,
+              nextReconcileAt: null,
+              reconciliationLockedAt: null,
+            },
+          });
+          await tx.paymentAttempt.updateMany({
+            where: {
+              invoiceId: attempt.invoiceId,
+              id: { not: attempt.id },
+              status: PaymentAttemptStatus.PENDING,
+            },
+            data: {
+              status: PaymentAttemptStatus.FAILED,
+              failureCode: 'SUPERSEDED',
+              completedAt,
+              lastReconciledAt: completedAt,
+              nextReconcileAt: null,
+              reconciliationLockedAt: null,
             },
           });
           await this.completeWebhook(tx, event.id, '00');
-          await this.log(tx, attempt.createdById, 'VNPAY_PAYMENT_FAILED', {
+          await this.log(tx, attempt.createdById, 'VNPAY_PAYMENT_SUCCEEDED', {
             paymentAttemptId: attempt.id,
             invoiceId: attempt.invoiceId,
-            responseCode: verification.params.vnp_ResponseCode ?? null,
-            transactionStatus:
-              verification.params.vnp_TransactionStatus ?? null,
-          });
-          return { response: VNPAY_RESPONSE.SUCCESS, invoice: null };
-        }
-
-        const invoice = await this.invoicesService.completeOnlinePayment(tx, {
-          invoiceId: attempt.invoiceId,
-          employeeId: attempt.createdById,
-          shiftId: attempt.shiftId,
-          closeSessionAfterPayment: attempt.closeSessionAfterPayment,
-        });
-        const completedAt = new Date();
-        await tx.paymentAttempt.update({
-          where: { id: attempt.id },
-          data: {
-            status: PaymentAttemptStatus.SUCCEEDED,
             providerTransactionNo,
-            failureCode: null,
-            completedAt,
-          },
-        });
-        await tx.paymentAttempt.updateMany({
-          where: {
-            invoiceId: attempt.invoiceId,
-            id: { not: attempt.id },
-            status: PaymentAttemptStatus.PENDING,
-          },
-          data: {
-            status: PaymentAttemptStatus.FAILED,
-            failureCode: 'SUPERSEDED',
-            completedAt,
-          },
-        });
-        await this.completeWebhook(tx, event.id, '00');
-        await this.log(tx, attempt.createdById, 'VNPAY_PAYMENT_SUCCEEDED', {
-          paymentAttemptId: attempt.id,
-          invoiceId: attempt.invoiceId,
-          providerTransactionNo,
-          amount: attempt.amount.toString(),
-        });
-        return { response: VNPAY_RESPONSE.SUCCESS, invoice };
-      });
+            amount: attempt.amount.toString(),
+          });
+          return { response: VNPAY_RESPONSE.SUCCESS, invoice };
+        },
+      );
       return result.response;
     } catch (error) {
       if (this.isPayloadReplay(error)) {
@@ -442,12 +499,17 @@ export class PaymentsService {
       const completedAt = new Date();
       await this.prisma.paymentAttempt.updateMany({
         where: { id: attempt.id, status: PaymentAttemptStatus.PENDING },
-        data: { status: PaymentAttemptStatus.EXPIRED, completedAt },
+        data: {
+          status: PaymentAttemptStatus.EXPIRED,
+          completedAt,
+          nextReconcileAt: completedAt,
+        },
       });
       return {
         ...attempt,
         status: PaymentAttemptStatus.EXPIRED,
         completedAt,
+        nextReconcileAt: completedAt,
         paymentUrl: null,
       };
     }
@@ -467,6 +529,7 @@ export class PaymentsService {
             merchantReference: attempt.merchantReference,
             ipAddress,
             expiresAt: attempt.expiresAt,
+            providerCreatedAt: attempt.providerCreatedAt,
             locale: dto.locale,
             bankCode: dto.bankCode,
           })
@@ -537,6 +600,69 @@ export class PaymentsService {
     }
   }
 
+  private async markPaymentReview(
+    tx: ExtendedPrismaTransactionClient,
+    attempt: {
+      id: string;
+      invoiceId: string;
+      createdById: string;
+    },
+    input: {
+      type: PaymentReconciliationIncidentType;
+      title: string;
+      providerTransactionNo: string | null;
+      details: Prisma.InputJsonObject;
+    },
+  ) {
+    await tx.paymentAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        status: PaymentAttemptStatus.REQUIRES_REVIEW,
+        providerTransactionNo: input.providerTransactionNo,
+        failureCode: input.type,
+        completedAt: null,
+        nextReconcileAt: null,
+        reconciliationLockedAt: null,
+      },
+    });
+    await tx.paymentReconciliationIncident.upsert({
+      where: { deduplicationKey: `${input.type}:${attempt.id}` },
+      create: {
+        type: input.type,
+        deduplicationKey: `${input.type}:${attempt.id}`,
+        title: input.title,
+        details: input.details,
+        paymentAttemptId: attempt.id,
+      },
+      update: {
+        status: PaymentReconciliationIncidentStatus.OPEN,
+        title: input.title,
+        details: input.details,
+        detectedAt: new Date(),
+        resolvedAt: null,
+        resolvedById: null,
+        resolutionNote: null,
+      },
+    });
+    await this.outbox.enqueue(tx, {
+      topic: 'payment',
+      eventName: 'PAYMENT_RECONCILIATION_REQUIRED',
+      aggregateType: 'PaymentAttempt',
+      aggregateId: attempt.id,
+      payload: {
+        paymentAttemptId: attempt.id,
+        invoiceId: attempt.invoiceId,
+        incidentType: input.type,
+        occurredAt: new Date().toISOString(),
+      },
+    });
+    await this.log(tx, attempt.createdById, 'PAYMENT_RECONCILIATION_REQUIRED', {
+      paymentAttemptId: attempt.id,
+      invoiceId: attempt.invoiceId,
+      incidentType: input.type,
+    });
+  }
+
   private async log(
     tx: ExtendedPrismaTransactionClient,
     employeeId: string,
@@ -560,27 +686,5 @@ export class PaymentsService {
       (Array.isArray(target) && target.includes('payloadHash')) ||
       target === 'PaymentWebhookEvent_payloadHash_key'
     );
-  }
-
-  private async runSerializable<T>(
-    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
-  ): Promise<T> {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        return await this.prisma.$transaction(callback, {
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        });
-      } catch (error) {
-        const retryable =
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2034';
-        if (!retryable || attempt === 3) throw error;
-        this.logger.warn(
-          `Payment transaction conflict. Retrying ${attempt + 1}/3`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-      }
-    }
-    throw new ConflictException('Transaction failed. Please try again.');
   }
 }

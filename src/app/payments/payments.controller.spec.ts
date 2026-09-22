@@ -4,6 +4,8 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { FormatResponseInterceptor } from '../../common/interceptors/format-response/format-response.interceptor';
 import { ApiUtilService } from '../../common/utils/api-util/api-util.service';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
+import { PaymentRefundsService } from './payment-refunds.service';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 
@@ -18,6 +20,8 @@ describe('PaymentsController', () => {
       controllers: [PaymentsController],
       providers: [
         { provide: PaymentsService, useValue: paymentsService },
+        { provide: PaymentRefundsService, useValue: {} },
+        { provide: PaymentReconciliationService, useValue: {} },
         ApiUtilService,
       ],
     }).compile();

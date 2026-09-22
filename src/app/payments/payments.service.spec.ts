@@ -11,6 +11,7 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import type { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import type { InvoicesService } from '../invoices/invoices.service';
+import type { OutboxService } from '../durable/outbox.service';
 import { PaymentsService } from './payments.service';
 import type { VnpayService } from './vnpay.service';
 
@@ -40,6 +41,7 @@ describe('PaymentsService', () => {
   const invoices = {
     completeOnlinePayment: jest.fn(),
   };
+  const outbox = { enqueue: jest.fn() };
   const vnpay = {
     assertConfigured: jest.fn(),
     createPaymentUrl: jest.fn(),
@@ -51,6 +53,7 @@ describe('PaymentsService', () => {
     new PaginationUtilService(),
     ledger as unknown as CashierShiftLedgerService,
     invoices as unknown as InvoicesService,
+    outbox as unknown as OutboxService,
     vnpay as unknown as VnpayService,
   );
   const attempt = {

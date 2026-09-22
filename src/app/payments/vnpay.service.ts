@@ -1,10 +1,17 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   PaymentCallbackQuery,
+  VnpayApiResult,
   VnpayCallbackVerification,
   VnpayPaymentUrlInput,
+  VnpayQueryInput,
+  VnpayRefundInput,
 } from '../../common/types';
 
 const VNPAY_VERSION = '2.1.0';
@@ -18,9 +25,12 @@ export class VnpayService {
     this.getConfig();
   }
 
+  assertApiConfigured() {
+    this.getApiConfig();
+  }
+
   createPaymentUrl(input: VnpayPaymentUrlInput) {
     const { paymentUrl, returnUrl, tmnCode, hashSecret } = this.getConfig();
-    const now = new Date();
     const params: Record<string, string> = {
       vnp_Version: VNPAY_VERSION,
       vnp_Command: 'pay',
@@ -33,13 +43,119 @@ export class VnpayService {
       vnp_Locale: input.locale,
       vnp_ReturnUrl: returnUrl,
       vnp_IpAddr: input.ipAddress,
-      vnp_CreateDate: this.formatVietnamTime(now),
+      vnp_CreateDate: this.formatVietnamTime(input.providerCreatedAt),
       vnp_ExpireDate: this.formatVietnamTime(input.expiresAt),
       ...(input.bankCode ? { vnp_BankCode: input.bankCode } : {}),
     };
     const query = this.toSignedQuery(params);
     const secureHash = this.sign(query, hashSecret);
     return `${paymentUrl}?${query}&vnp_SecureHash=${secureHash}`;
+  }
+
+  queryTransaction(input: VnpayQueryInput) {
+    const { apiUrl, hashSecret, serverIp, timeoutMs, tmnCode } =
+      this.getApiConfig();
+    const params: Record<string, string> = {
+      vnp_RequestId: input.requestId,
+      vnp_Version: VNPAY_VERSION,
+      vnp_Command: 'querydr',
+      vnp_TmnCode: tmnCode,
+      vnp_TxnRef: input.merchantReference,
+      vnp_TransactionDate: this.formatVietnamTime(input.providerCreatedAt),
+      vnp_CreateDate: this.formatVietnamTime(new Date()),
+      vnp_IpAddr: serverIp,
+      vnp_OrderInfo: input.orderInfo,
+    };
+    return this.sendApiRequest(
+      params,
+      [
+        'vnp_RequestId',
+        'vnp_Version',
+        'vnp_Command',
+        'vnp_TmnCode',
+        'vnp_TxnRef',
+        'vnp_TransactionDate',
+        'vnp_CreateDate',
+        'vnp_IpAddr',
+        'vnp_OrderInfo',
+      ],
+      [
+        'vnp_ResponseId',
+        'vnp_Command',
+        'vnp_ResponseCode',
+        'vnp_Message',
+        'vnp_TmnCode',
+        'vnp_TxnRef',
+        'vnp_Amount',
+        'vnp_BankCode',
+        'vnp_PayDate',
+        'vnp_TransactionNo',
+        'vnp_TransactionType',
+        'vnp_TransactionStatus',
+        'vnp_OrderInfo',
+        'vnp_PromotionCode',
+        'vnp_PromotionAmount',
+      ],
+      hashSecret,
+      apiUrl,
+      timeoutMs,
+    );
+  }
+
+  refundTransaction(input: VnpayRefundInput) {
+    const { apiUrl, hashSecret, serverIp, timeoutMs, tmnCode } =
+      this.getApiConfig();
+    const params: Record<string, string> = {
+      vnp_RequestId: input.requestId,
+      vnp_Version: VNPAY_VERSION,
+      vnp_Command: 'refund',
+      vnp_TmnCode: tmnCode,
+      vnp_TransactionType: input.transactionType,
+      vnp_TxnRef: input.merchantReference,
+      vnp_Amount: input.amount.mul(100).toFixed(0),
+      vnp_TransactionNo: input.providerTransactionNo ?? '',
+      vnp_TransactionDate: this.formatVietnamTime(input.providerCreatedAt),
+      vnp_CreateBy: input.createdBy.slice(0, 245),
+      vnp_CreateDate: this.formatVietnamTime(new Date()),
+      vnp_IpAddr: serverIp,
+      vnp_OrderInfo: input.orderInfo,
+    };
+    return this.sendApiRequest(
+      params,
+      [
+        'vnp_RequestId',
+        'vnp_Version',
+        'vnp_Command',
+        'vnp_TmnCode',
+        'vnp_TransactionType',
+        'vnp_TxnRef',
+        'vnp_Amount',
+        'vnp_TransactionNo',
+        'vnp_TransactionDate',
+        'vnp_CreateBy',
+        'vnp_CreateDate',
+        'vnp_IpAddr',
+        'vnp_OrderInfo',
+      ],
+      [
+        'vnp_ResponseId',
+        'vnp_Command',
+        'vnp_ResponseCode',
+        'vnp_Message',
+        'vnp_TmnCode',
+        'vnp_TxnRef',
+        'vnp_Amount',
+        'vnp_BankCode',
+        'vnp_PayDate',
+        'vnp_TransactionNo',
+        'vnp_TransactionType',
+        'vnp_TransactionStatus',
+        'vnp_OrderInfo',
+      ],
+      hashSecret,
+      apiUrl,
+      timeoutMs,
+    );
   }
 
   verifyCallback(query: PaymentCallbackQuery): VnpayCallbackVerification {
@@ -82,6 +198,103 @@ export class VnpayService {
       );
     }
     return { paymentUrl, returnUrl, tmnCode, hashSecret };
+  }
+
+  private getApiConfig() {
+    const tmnCode = this.config.get<string>('VNPAY_TMN_CODE');
+    const hashSecret = this.config.get<string>('VNPAY_HASH_SECRET');
+    const apiUrl = this.config.get<string>('VNPAY_API_URL');
+    const serverIp = this.config.get<string>('VNPAY_SERVER_IP');
+    const timeoutMs = this.config.get<number>('VNPAY_API_TIMEOUT_MS', 5_000);
+    if (!tmnCode || !hashSecret || !apiUrl || !serverIp) {
+      throw new ServiceUnavailableException(
+        'VNPay reconciliation API is not configured for this environment.',
+      );
+    }
+    return { tmnCode, hashSecret, apiUrl, serverIp, timeoutMs };
+  }
+
+  private async sendApiRequest(
+    params: Record<string, string>,
+    requestSignatureFields: string[],
+    responseSignatureFields: string[],
+    hashSecret: string,
+    apiUrl: string,
+    timeoutMs: number,
+  ): Promise<VnpayApiResult> {
+    const request = { ...params };
+    const body = {
+      ...request,
+      vnp_SecureHash: this.signFields(
+        request,
+        requestSignatureFields,
+        hashSecret,
+      ),
+    };
+    let response: Response;
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new BadGatewayException('VNPay API request failed.');
+    }
+    if (!response.ok) {
+      throw new BadGatewayException(
+        `VNPay API returned HTTP ${response.status}.`,
+      );
+    }
+
+    const payload: unknown = await response.json().catch(() => null);
+    const normalized = this.normalizeApiResponse(payload);
+    const receivedHash = normalized.vnp_SecureHash;
+    if (
+      !receivedHash ||
+      !this.safeEqual(
+        this.signFields(normalized, responseSignatureFields, hashSecret),
+        receivedHash.toLowerCase(),
+      )
+    ) {
+      throw new BadGatewayException('VNPay API response signature is invalid.');
+    }
+    if (
+      normalized.vnp_TmnCode !== params.vnp_TmnCode ||
+      normalized.vnp_Command !== params.vnp_Command
+    ) {
+      throw new BadGatewayException(
+        'VNPay API response does not match the request.',
+      );
+    }
+    delete normalized.vnp_SecureHash;
+    return { request, response: normalized };
+  }
+
+  private normalizeApiResponse(payload: unknown) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new BadGatewayException('VNPay API returned an invalid payload.');
+    }
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(payload)) {
+      if (typeof value !== 'string' && typeof value !== 'number') {
+        throw new BadGatewayException('VNPay API returned an invalid payload.');
+      }
+      normalized[key] = String(value);
+    }
+    return normalized;
+  }
+
+  private signFields(
+    params: Record<string, string>,
+    fields: string[],
+    secret: string,
+  ) {
+    return this.sign(
+      fields.map((field) => params[field] ?? '').join('|'),
+      secret,
+    );
   }
 
   private normalizeQuery(query: PaymentCallbackQuery) {

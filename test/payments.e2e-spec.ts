@@ -4,6 +4,8 @@ import {
   PaymentAttemptStatus,
   FundType,
   PaymentMethod,
+  PaymentRefundStatus,
+  PaymentRefundType,
   PaymentStatus,
   Prisma,
   PrismaClient,
@@ -19,6 +21,7 @@ import { InvoicesService } from '../src/app/invoices/invoices.service';
 import { IdempotencyService } from '../src/app/durable/idempotency.service';
 import { OutboxService } from '../src/app/durable/outbox.service';
 import { PaymentsService } from '../src/app/payments/payments.service';
+import { PaymentRefundsService } from '../src/app/payments/payment-refunds.service';
 import { VnpayService } from '../src/app/payments/vnpay.service';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import type { PromotionCalculatorService } from '../src/app/promotions/services/promotion-calculator.service';
@@ -55,7 +58,18 @@ describe('VNPay payment lifecycle (e2e)', () => {
     pagination,
     ledger,
     invoices,
+    outbox,
     new VnpayService(config),
+  );
+  const refundGateway = {
+    assertApiConfigured: jest.fn(),
+    refundTransaction: jest.fn(),
+  };
+  const paymentRefunds = new PaymentRefundsService(
+    extendedPrisma,
+    pagination,
+    outbox,
+    refundGateway as unknown as VnpayService,
   );
   const suffix = randomUUID();
   const invoiceIds: string[] = [];
@@ -217,6 +231,25 @@ describe('VNPay payment lifecycle (e2e)', () => {
 
   afterAll(async () => {
     try {
+      const attempts = await prisma.paymentAttempt.findMany({
+        where: { invoiceId: { in: invoiceIds } },
+        select: { id: true },
+      });
+      const attemptIds = attempts.map(({ id }) => id);
+      const refunds = await prisma.paymentRefund.findMany({
+        where: { paymentAttemptId: { in: attemptIds } },
+        select: { id: true },
+      });
+      const refundIds = refunds.map(({ id }) => id);
+      await prisma.paymentReconciliationIncident.deleteMany({
+        where: { paymentAttemptId: { in: attemptIds } },
+      });
+      await prisma.paymentProviderRequest.deleteMany({
+        where: { paymentAttemptId: { in: attemptIds } },
+      });
+      await prisma.paymentRefund.deleteMany({
+        where: { paymentAttemptId: { in: attemptIds } },
+      });
       await prisma.paymentWebhookEvent.deleteMany({
         where: { paymentAttempt: { invoiceId: { in: invoiceIds } } },
       });
@@ -224,7 +257,9 @@ describe('VNPay payment lifecycle (e2e)', () => {
         where: { invoiceId: { in: invoiceIds } },
       });
       await prisma.outboxEvent.deleteMany({
-        where: { aggregateId: { in: invoiceIds } },
+        where: {
+          aggregateId: { in: [...invoiceIds, ...attemptIds, ...refundIds] },
+        },
       });
       await prisma.idempotencyRequest.deleteMany({
         where: { employeeId: { in: [employeeId, secondEmployeeId] } },
@@ -336,7 +371,7 @@ describe('VNPay payment lifecycle (e2e)', () => {
       RspCode: '04',
       Message: 'Invalid amount',
     });
-    const [unpaid, pending, event] = await Promise.all([
+    const [unpaid, pending, event, incident] = await Promise.all([
       prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } }),
       prisma.paymentAttempt.findUniqueOrThrow({
         where: { id: created.id },
@@ -344,10 +379,14 @@ describe('VNPay payment lifecycle (e2e)', () => {
       prisma.paymentWebhookEvent.findFirstOrThrow({
         where: { paymentAttemptId: created.id },
       }),
+      prisma.paymentReconciliationIncident.findFirstOrThrow({
+        where: { paymentAttemptId: created.id },
+      }),
     ]);
     expect(unpaid.paymentStatus).toBe(PaymentStatus.UNPAID);
-    expect(pending.status).toBe(PaymentAttemptStatus.PENDING);
+    expect(pending.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
     expect(event.processingCode).toBe('04');
+    expect(incident.status).toBe('OPEN');
   });
 
   it('flags a late provider success after another payment won the race', async () => {
@@ -391,14 +430,86 @@ describe('VNPay payment lifecycle (e2e)', () => {
       RspCode: '02',
       Message: 'Order already confirmed',
     });
-    const [attempt, event] = await Promise.all([
+    const [attempt, event, incident] = await Promise.all([
       prisma.paymentAttempt.findUniqueOrThrow({ where: { id: created.id } }),
       prisma.paymentWebhookEvent.findFirstOrThrow({
         where: { paymentAttemptId: created.id },
       }),
+      prisma.paymentReconciliationIncident.findFirstOrThrow({
+        where: { paymentAttemptId: created.id },
+      }),
     ]);
-    expect(attempt.status).toBe(PaymentAttemptStatus.EXPIRED);
+    expect(attempt.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
     expect(event.processingCode).toBe('02_PAYMENT_STATE_CONFLICT');
+    expect(incident.status).toBe('OPEN');
+  });
+
+  it('applies partial refunds idempotently and never exceeds the captured amount', async () => {
+    const { invoice } = await createUnpaidInvoice('100000');
+    const created = await payments.createAttempt(
+      invoice.id,
+      employeeId,
+      '127.0.0.1',
+      {
+        idempotencyKey: `payment-${randomUUID()}`,
+        locale: 'vn',
+        closeSessionAfterPayment: false,
+      },
+    );
+    await payments.handleVnpayIpn(
+      signIpn({
+        merchantReference: created.merchantReference,
+        amount: invoice.totalAmount,
+        transactionNo: `VNP-${randomUUID()}`,
+      }),
+    );
+    refundGateway.refundTransaction.mockImplementation(
+      (input: {
+        requestId: string;
+        merchantReference: string;
+        amount: Prisma.Decimal;
+        transactionType: string;
+      }) =>
+        Promise.resolve({
+          request: { vnp_RequestId: input.requestId },
+          response: {
+            vnp_ResponseCode: '00',
+            vnp_TransactionStatus: '00',
+            vnp_TransactionNo: `RF-${randomUUID()}`,
+            vnp_TxnRef: input.merchantReference,
+            vnp_Amount: input.amount.mul(100).toFixed(0),
+            vnp_TransactionType: input.transactionType,
+            vnp_Message: 'Success',
+          },
+        }),
+    );
+    const firstKey = `refund-${randomUUID()}`;
+    const first = await paymentRefunds.createRefund(created.id, employeeId, {
+      amount: '40000.00',
+      reason: 'Partial customer refund',
+      idempotencyKey: firstKey,
+    });
+    const replay = await paymentRefunds.createRefund(created.id, employeeId, {
+      amount: '40000.00',
+      reason: 'Partial customer refund',
+      idempotencyKey: firstKey,
+    });
+    const second = await paymentRefunds.createRefund(created.id, employeeId, {
+      amount: '60000.00',
+      reason: 'Refund remaining balance',
+      idempotencyKey: `refund-${randomUUID()}`,
+    });
+
+    const refundedInvoice = await prisma.invoice.findUniqueOrThrow({
+      where: { id: invoice.id },
+    });
+    expect(first.type).toBe(PaymentRefundType.PARTIAL);
+    expect(first.status).toBe(PaymentRefundStatus.SUCCEEDED);
+    expect(replay.id).toBe(first.id);
+    expect(second.type).toBe(PaymentRefundType.PARTIAL);
+    expect(second.status).toBe(PaymentRefundStatus.SUCCEEDED);
+    expect(refundedInvoice.paymentStatus).toBe(PaymentStatus.REFUNDED);
+    expect(refundGateway.refundTransaction).toHaveBeenCalledTimes(2);
   });
 
   it('returns the same attempt for concurrent idempotent requests', async () => {
