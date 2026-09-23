@@ -14,6 +14,7 @@ import {
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
 import type { ClaimedOutboxEvent } from '../../common/types';
+import { outboxDispatchTotal } from '../../common/observability/metrics';
 import { DomainEventBusService } from './domain-event-bus.service';
 
 const QUEUE_NAME = 'domain-outbox';
@@ -21,6 +22,7 @@ const POLL_INTERVAL_MS = 1_000;
 const LOCK_TIMEOUT_MS = 15 * 60 * 1_000;
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 50;
+const REDIS_CLOSE_TIMEOUT_MS = 3_000;
 
 @Injectable()
 export class OutboxDispatcherService
@@ -57,8 +59,10 @@ export class OutboxDispatcherService
 
   async onModuleDestroy() {
     if (this.timer) clearInterval(this.timer);
-    await this.worker?.close();
-    await this.queue?.close();
+    await Promise.all([
+      this.closeRedisResource('worker', this.worker),
+      this.closeRedisResource('queue', this.queue),
+    ]);
   }
 
   async drainOnce() {
@@ -95,18 +99,35 @@ export class OutboxDispatcherService
       username: url.username || undefined,
       password: url.password || undefined,
       db: url.pathname.length > 1 ? Number(url.pathname.slice(1)) : 0,
+      connectTimeout: 1_000,
       ...(url.protocol === 'rediss:' ? { tls: {} } : {}),
     };
     this.queue = new Queue<ClaimedOutboxEvent, void, 'publish'>(QUEUE_NAME, {
-      connection,
+      connection: {
+        ...connection,
+        enableOfflineQueue: false,
+        maxRetriesPerRequest: 1,
+      },
     });
     this.worker = new Worker<ClaimedOutboxEvent, void, 'publish'>(
       QUEUE_NAME,
       (job) => this.processJob(job),
-      { connection, concurrency: 10 },
+      {
+        connection: { ...connection, maxRetriesPerRequest: null },
+        concurrency: 10,
+      },
     );
+    this.queue.on('error', (error) => {
+      this.logger.error({
+        event: 'outbox.queue.error',
+        error: error.message,
+      });
+    });
     this.worker.on('error', (error) => {
-      this.logger.error('Outbox worker error.', error.stack);
+      this.logger.error({
+        event: 'outbox.worker.error',
+        error: error.message,
+      });
     });
   }
 
@@ -150,6 +171,7 @@ export class OutboxDispatcherService
         removeOnFail: { age: 7 * 24 * 60 * 60, count: 10_000 },
       });
     } catch (error) {
+      outboxDispatchTotal.inc({ outcome: 'enqueue_failed' });
       await this.release(event.id, error);
     }
   }
@@ -180,6 +202,7 @@ export class OutboxDispatcherService
       if (attempt >= MAX_ATTEMPTS) {
         await this.recordFailure(event.id, error, attempt, true);
       } else {
+        outboxDispatchTotal.inc({ outcome: 'retry' });
         await this.prisma.outboxEvent.updateMany({
           where: { id: event.id, status: OutboxEventStatus.PROCESSING },
           data: {
@@ -195,8 +218,8 @@ export class OutboxDispatcherService
     }
   }
 
-  private markPublished(id: string) {
-    return this.prisma.outboxEvent.updateMany({
+  private async markPublished(id: string) {
+    const result = await this.prisma.outboxEvent.updateMany({
       where: { id, status: OutboxEventStatus.PROCESSING },
       data: {
         status: OutboxEventStatus.PUBLISHED,
@@ -206,6 +229,8 @@ export class OutboxDispatcherService
         lastError: null,
       },
     });
+    if (result.count > 0) outboxDispatchTotal.inc({ outcome: 'published' });
+    return result;
   }
 
   private recordFailure(
@@ -215,9 +240,15 @@ export class OutboxDispatcherService
     deadLetter: boolean,
   ) {
     if (deadLetter) {
-      this.logger.error(
-        `Outbox event ${id} moved to dead-letter after ${attempts} attempts: ${this.errorMessage(error)}`,
-      );
+      outboxDispatchTotal.inc({ outcome: 'dead_letter' });
+      this.logger.error({
+        event: 'outbox.event.dead_lettered',
+        outboxEventId: id,
+        attempts,
+        error: this.errorMessage(error),
+      });
+    } else {
+      outboxDispatchTotal.inc({ outcome: 'retry' });
     }
     return this.prisma.outboxEvent.updateMany({
       where: { id, status: OutboxEventStatus.PROCESSING },
@@ -262,5 +293,47 @@ export class OutboxDispatcherService
   private errorMessage(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return message.slice(0, 2_000);
+  }
+
+  private async closeRedisResource(
+    name: 'queue' | 'worker',
+    resource?: {
+      close(): Promise<void>;
+      disconnect(): Promise<void>;
+    },
+  ) {
+    if (!resource) return;
+    try {
+      await this.withTimeout(
+        resource.close(),
+        REDIS_CLOSE_TIMEOUT_MS,
+        `Outbox ${name} close timed out`,
+      );
+    } catch (error) {
+      this.logger.warn({
+        event: 'outbox.redis.force_disconnect',
+        resource: name,
+        error: this.errorMessage(error),
+      });
+      await resource.disconnect();
+    }
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string,
+  ) {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 }

@@ -90,4 +90,25 @@ describe('OutboxDispatcherService', () => {
       }),
     });
   });
+
+  it('releases a claimed event when Redis enqueue is unavailable', async () => {
+    const queue = {
+      add: jest.fn().mockRejectedValue(new Error('redis unavailable')),
+      close: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    };
+    (service as unknown as { queue: typeof queue }).queue = queue;
+
+    await service.drainOnce();
+
+    expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: { id: event.id, status: OutboxEventStatus.PROCESSING },
+      data: expect.objectContaining({
+        status: OutboxEventStatus.PENDING,
+        lockedAt: null,
+        lockedBy: null,
+        lastError: 'redis unavailable',
+      }),
+    });
+  });
 });
