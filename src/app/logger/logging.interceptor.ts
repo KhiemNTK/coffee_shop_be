@@ -7,8 +7,14 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { catchError, Observable, throwError } from 'rxjs';
+import { trace } from '@opentelemetry/api';
 import type { EmployeeInfo } from '../../common/types';
 import type { RequestWithContext } from '../../common/middlewares/request-context.middleware';
+import {
+  httpRequestDurationSeconds,
+  httpRequestsInFlight,
+  httpRequestsTotal,
+} from '../../common/observability/metrics';
 
 type LoggedRequest = RequestWithContext & { employee?: EmployeeInfo };
 
@@ -21,26 +27,62 @@ export class LoggingInterceptor implements NestInterceptor {
     const req = http.getRequest<LoggedRequest>();
     const res = http.getResponse<Response>();
     const startedAt = performance.now();
+    const traceId = trace.getActiveSpan()?.spanContext().traceId;
+    const ignoredRequest =
+      req.path === '/metrics' || req.path.endsWith('/health/live');
+    let completed = false;
     let failure: { name: string; code?: string } | undefined;
 
-    res.once('finish', () => {
+    if (!ignoredRequest) httpRequestsInFlight.inc();
+
+    const completeRequest = (connectionClosed: boolean) => {
+      if (completed) return;
+      completed = true;
+      const durationSeconds = (performance.now() - startedAt) / 1000;
+      const route = this.routeLabel(req);
+      const clientAborted = connectionClosed && !res.writableEnded;
+      const requestFailed = Boolean(failure) || clientAborted;
+      const statusCode = clientAborted ? '499' : String(res.statusCode);
+
+      if (!ignoredRequest) {
+        httpRequestsInFlight.dec();
+        httpRequestsTotal.inc({
+          method: req.method,
+          route,
+          status_code: statusCode,
+        });
+        httpRequestDurationSeconds.observe(
+          { method: req.method, route, status_code: statusCode },
+          durationSeconds,
+        );
+      }
+
       const logContext = {
-        event: failure ? 'http.request.failed' : 'http.request.completed',
+        event: requestFailed ? 'http.request.failed' : 'http.request.completed',
         requestId: req.requestId,
+        traceId,
         method: req.method,
-        path: req.originalUrl,
-        statusCode: res.statusCode,
-        durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+        path: req.path,
+        route,
+        statusCode: Number(statusCode),
+        durationMs: Math.round(durationSeconds * 100_000) / 100,
         employeeId: req.employee?.employeeId,
-        ...(failure ? { error: failure } : {}),
+        ...(failure
+          ? { error: failure }
+          : clientAborted
+            ? { error: { name: 'ClientAbort' } }
+            : {}),
       };
 
-      if (failure) {
+      if (requestFailed) {
         this.logger.error(logContext);
-      } else {
+      } else if (!ignoredRequest) {
         this.logger.log(logContext);
       }
-    });
+    };
+
+    res.once('finish', () => completeRequest(false));
+    res.once('close', () => completeRequest(true));
 
     return next.handle().pipe(
       catchError((error: unknown) => {
@@ -63,5 +105,11 @@ export class LoggingInterceptor implements NestInterceptor {
       return error.code;
     }
     return undefined;
+  }
+
+  private routeLabel(request: LoggedRequest) {
+    const routePath = (request.route as { path?: unknown } | undefined)?.path;
+    if (typeof routePath === 'string') return routePath;
+    return 'unmatched';
   }
 }

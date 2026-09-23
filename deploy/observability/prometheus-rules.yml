@@ -1,0 +1,132 @@
+groups:
+  - name: coffee-shop-api
+    rules:
+      - alert: CoffeeShopApiTargetDown
+        expr: up{job="coffee-shop-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Coffee Shop API target is unavailable
+          description: Prometheus has been unable to scrape {{ $labels.instance }} for two minutes.
+
+      - alert: CoffeeShopApiHighErrorRate
+        expr: |
+          (
+            sum(rate(coffee_shop_http_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(coffee_shop_http_requests_total[5m])), 0.001)
+            > 0.01
+          )
+          and
+          sum(increase(coffee_shop_http_requests_total[5m])) >= 100
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Coffee Shop API error rate exceeds 1 percent
+          description: The rolling five-minute server error ratio has exceeded the production error budget for ten minutes.
+
+      - alert: CoffeeShopApiReadLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(coffee_shop_http_request_duration_seconds_bucket{method="GET"}[5m])
+            )
+          ) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Coffee Shop API read p95 exceeds 300 ms
+          description: GET request p95 latency has exceeded the initial SLO for ten minutes.
+
+      - alert: CoffeeShopApiMutationLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(coffee_shop_http_request_duration_seconds_bucket{method=~"POST|PUT|PATCH|DELETE"}[5m])
+            )
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Coffee Shop API mutation p95 exceeds 500 ms
+          description: Mutation request p95 latency has exceeded the initial SLO for ten minutes.
+
+      - alert: CoffeeShopPostgresConnectionPressure
+        expr: |
+          coffee_shop_postgres_connections
+          /
+          clamp_min(coffee_shop_postgres_max_connections, 1)
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: PostgreSQL connections exceed 80 percent
+          description: PostgreSQL server connection usage is approaching max_connections.
+
+      - alert: CoffeeShopRedisUnavailable
+        expr: coffee_shop_dependency_up{dependency="redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis is unavailable
+          description: Redis-dependent rate limiting and background processing may be degraded.
+
+  - name: coffee-shop-durable-processing
+    rules:
+      - alert: CoffeeShopOutboxLagHigh
+        expr: coffee_shop_outbox_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Durable outbox lag exceeds 60 seconds
+          description: The oldest unpublished event has remained queued for more than five minutes.
+
+      - alert: CoffeeShopOutboxDeadLetterPresent
+        expr: coffee_shop_outbox_events{status="DEAD_LETTER"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Durable outbox contains dead-letter events
+          description: At least one domain event exhausted all delivery attempts and needs operator review.
+
+      - alert: CoffeeShopTransactionRetrySpike
+        expr: sum(rate(coffee_shop_transaction_retries_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database transaction conflicts are elevated
+          description: Serializable transaction retries exceed one per second and may indicate contention.
+
+      - alert: CoffeeShopPaymentRequiresReview
+        expr: sum(coffee_shop_payment_review_items) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Payment records require manual review
+          description: A payment attempt or refund has remained in manual review for ten minutes.
+
+      - alert: CoffeeShopPaymentMismatchIncident
+        expr: |
+          sum(
+            coffee_shop_payment_reconciliation_incidents{
+              type=~"PAYMENT_STATE_CONFLICT|PROVIDER_PAYMENT_MISMATCH|REFUND_STATE_MISMATCH"
+            }
+          ) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Payment reconciliation mismatch detected
+          description: Local financial state differs from the payment provider and automatic mutation has stopped.

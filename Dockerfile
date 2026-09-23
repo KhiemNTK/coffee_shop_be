@@ -32,4 +32,4 @@ COPY --from=build --chown=node:node /app/prisma ./prisma
 COPY --chown=node:node package.json ./package.json
 USER node
 EXPOSE 3000
-CMD ["node", "dist/main"]
+CMD ["node", "dist/start"]

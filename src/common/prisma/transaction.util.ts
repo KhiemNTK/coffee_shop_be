@@ -4,6 +4,7 @@ import type {
   ExtendedPrismaClient,
   ExtendedPrismaTransactionClient,
 } from '../types';
+import { transactionRetriesTotal } from '../observability/metrics';
 
 export interface TransactionRetryOptions {
   maxRetries?: number;
@@ -44,6 +45,10 @@ export async function runSerializableTransaction<T>(
         isRetryableError(error, retryUniqueViolations) &&
         attempt < maxRetries
       ) {
+        transactionRetriesTotal.inc({
+          context: loggerContext,
+          error_code: error.code,
+        });
         Logger.warn(
           `${loggerContext} conflict. Retrying attempt ${attempt + 1}/${maxRetries}`,
           loggerContext,

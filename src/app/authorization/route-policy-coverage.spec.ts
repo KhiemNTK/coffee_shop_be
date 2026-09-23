@@ -15,6 +15,7 @@ import { HealthController } from '../health/health.controller';
 import { InventoryController } from '../inventory/inventory.controller';
 import { InvoicesController } from '../invoices/invoices.controller';
 import { MenuController } from '../menu/menu.controller';
+import { MetricsController } from '../observability/metrics.controller';
 import { OrdersController } from '../orders/orders.controller';
 import { PaymentsController } from '../payments/payments.controller';
 import { PermissionsController } from '../permissions/permissions.controller';
@@ -40,6 +41,7 @@ const controllers = [
   InventoryController,
   InvoicesController,
   MenuController,
+  MetricsController,
   OrdersController,
   PaymentsController,
   PermissionsController,

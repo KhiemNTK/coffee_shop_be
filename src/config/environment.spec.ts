@@ -11,6 +11,7 @@ const productionEnvironment = {
   AUTH_SIGNUP_ENABLED: 'false',
   CSRF_ENABLED: 'true',
   COOKIE_SECURE: 'true',
+  METRICS_TOKEN: 'strong-metrics-token-with-more-than-32-characters',
   MAIL_HOST: 'smtp.example.com',
   MAIL_PORT: '587',
   MAIL_USER: 'mailer',
@@ -36,6 +37,7 @@ describe('validateEnvironment', () => {
     expect(environment.APP_PREFIX).toBe('/api/v1');
     expect(environment.HOST).toBe('0.0.0.0');
     expect(environment.SWAGGER_ENABLED).toBe(true);
+    expect(environment.METRICS_ENABLED).toBe(true);
   });
 
   it('rejects invalid boolean values instead of silently disabling security', () => {
@@ -81,5 +83,41 @@ describe('validateEnvironment', () => {
           'http://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
       }),
     ).toThrow('VNPAY_API_URL must use HTTPS in production');
+  });
+
+  it('requires a strong metrics token in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        METRICS_TOKEN: 'short-production-token',
+      }),
+    ).toThrow('METRICS_TOKEN must be a strong non-placeholder secret');
+  });
+
+  it('rejects a placeholder metrics token in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        METRICS_TOKEN: 'development-metrics-token-change-before-production',
+      }),
+    ).toThrow('METRICS_TOKEN must be a strong non-placeholder secret');
+  });
+
+  it('does not allow the production outbox dispatcher to be disabled', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        OUTBOX_POLL_INTERVAL_MS: '0',
+      }),
+    ).toThrow('OUTBOX_POLL_INTERVAL_MS cannot be disabled in production');
+  });
+
+  it('requires an OTLP endpoint when tracing is enabled', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        OTEL_ENABLED: 'true',
+      }),
+    ).toThrow('OTEL_EXPORTER_OTLP_ENDPOINT is required');
   });
 });

@@ -32,4 +32,29 @@ describe('HealthService', () => {
       ServiceUnavailableException,
     );
   });
+
+  it('reports a missing optional Redis dependency as disabled', async () => {
+    await expect(createService('test').redisStatus()).resolves.toBe('disabled');
+  });
+
+  it('fails readiness when PostgreSQL is unavailable', async () => {
+    const prisma = {
+      $queryRaw: jest.fn().mockRejectedValue(new Error('connection exhausted')),
+    };
+    const config = {
+      get: jest.fn((key: string, fallback?: unknown) => {
+        if (key === 'NODE_ENV') return 'test';
+        if (key === 'REDIS_URL') return undefined;
+        return fallback;
+      }),
+    };
+    const service = new HealthService(
+      prisma as unknown as ExtendedPrismaClient,
+      config as unknown as ConfigService,
+    );
+
+    await expect(service.readiness()).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+  });
 });

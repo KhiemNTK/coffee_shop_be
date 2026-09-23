@@ -1,5 +1,5 @@
 import { cleanupOpenApiDoc } from 'nestjs-zod';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, RequestMethod } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { applyMiddlewares } from './common/middlewares/common.middleware';
 import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
@@ -101,7 +101,9 @@ const initApp = (app: NestExpressApplication) => {
   const config = app.get(ConfigService);
   const appPrefix = config.get<string>('APP_PREFIX', '/api/v1');
   const frontendUrl = config.get<string>('FE_URL', 'http://localhost:3001');
-  app.setGlobalPrefix(appPrefix);
+  app.setGlobalPrefix(appPrefix, {
+    exclude: [{ path: 'metrics', method: RequestMethod.GET }],
+  });
   const allowedOrigins = frontendUrl
     .split(',')
     .map((url) => url.trim())
@@ -113,7 +115,6 @@ const initApp = (app: NestExpressApplication) => {
   applyMiddlewares(app);
   initBodyParser(app, config);
   initOpenAPI(app, config);
-  app.enableShutdownHooks();
   app.set('trust proxy', config.get<string>('TRUST_PROXY', 'loopback'));
   return app;
 };

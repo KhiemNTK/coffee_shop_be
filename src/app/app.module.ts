@@ -39,6 +39,7 @@ import { ReportsModule } from './reports/reports.module';
 import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
 import { PaymentsModule } from './payments/payments.module';
 import { DurableModule } from './durable/durable.module';
+import { ObservabilityModule } from './observability/observability.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -71,6 +72,7 @@ import { DurableModule } from './durable/durable.module';
     ReportsModule,
     CashierShiftsModule,
     PaymentsModule,
+    ObservabilityModule,
   ],
   controllers: [AppController],
   providers: [

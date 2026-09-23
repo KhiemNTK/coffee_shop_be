@@ -48,6 +48,23 @@ const EnvironmentSchema = z
       .regex(/^\d+(kb|mb)$/i)
       .default('1mb'),
     TRUST_PROXY: z.string().min(1).default('loopback'),
+    METRICS_ENABLED: BooleanEnvSchema.default(true),
+    METRICS_TOKEN: z.string().trim().min(16).optional(),
+    OUTBOX_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(60_000)
+      .default(1_000),
+    SHUTDOWN_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(60_000)
+      .default(10_000),
+    OTEL_ENABLED: BooleanEnvSchema.default(false),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.url().optional(),
+    OTEL_TRACES_SAMPLER_ARG: z.coerce.number().min(0).max(1).default(0.1),
     THROTTLE_TTL: z.coerce.number().int().positive().default(60000),
     THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
     MAIL_HOST: z.string().optional(),
@@ -147,6 +164,25 @@ export function validateEnvironment(raw: Record<string, unknown>) {
   }
   if (!environment.COOKIE_SECURE) {
     throw new Error('COOKIE_SECURE must be enabled in production');
+  }
+  if (
+    environment.METRICS_ENABLED &&
+    ((environment.METRICS_TOKEN?.length ?? 0) < 32 ||
+      WEAK_SECRET_MARKERS.some((marker) =>
+        environment.METRICS_TOKEN?.toLowerCase().includes(marker),
+      ))
+  ) {
+    throw new Error(
+      'METRICS_TOKEN must be a strong non-placeholder secret of at least 32 characters when metrics are enabled in production',
+    );
+  }
+  if (environment.OUTBOX_POLL_INTERVAL_MS === 0) {
+    throw new Error('OUTBOX_POLL_INTERVAL_MS cannot be disabled in production');
+  }
+  if (environment.OTEL_ENABLED && !environment.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    throw new Error(
+      'OTEL_EXPORTER_OTLP_ENDPOINT is required when OpenTelemetry is enabled',
+    );
   }
   const insecureOrigin = environment.FE_URL.split(',')
     .map((origin) => origin.trim())
