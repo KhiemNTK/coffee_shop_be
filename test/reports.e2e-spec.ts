@@ -6,6 +6,8 @@ import {
   FundType,
   PaymentAttemptStatus,
   PaymentMethod,
+  PaymentReconciliationIncidentStatus,
+  PaymentRefundStatus,
   PaymentStatus,
   Prisma,
   PrismaClient,
@@ -65,6 +67,13 @@ describe('Reports queries (e2e)', () => {
   let successfulAttemptBaselineAmount = new Prisma.Decimal(0);
   let failedAttemptBaselineCount = 0;
   let failedAttemptBaselineAmount = new Prisma.Decimal(0);
+  let reviewAttemptBaselineCount = 0;
+  let reviewAttemptBaselineAmount = new Prisma.Decimal(0);
+  let successfulRefundBaselineCount = 0;
+  let successfulRefundBaselineAmount = new Prisma.Decimal(0);
+  let reviewRefundBaselineCount = 0;
+  let reviewRefundBaselineAmount = new Prisma.Decimal(0);
+  let openReconciliationIncidentBaselineCount = 0;
   let webhookExceptionBaselineCount = 0;
 
   beforeAll(async () => {
@@ -80,6 +89,10 @@ describe('Reports queries (e2e)', () => {
       stalePendingAttemptBaseline,
       successfulAttemptBaseline,
       failedAttemptBaseline,
+      reviewAttemptBaseline,
+      successfulRefundBaseline,
+      reviewRefundBaseline,
+      openReconciliationIncidentBaseline,
       webhookExceptionBaseline,
     ] = await Promise.all([
       prisma.cashHandover.aggregate({
@@ -176,6 +189,30 @@ describe('Reports queries (e2e)', () => {
         _count: true,
         _sum: { amount: true },
       }),
+      prisma.paymentAttempt.aggregate({
+        where: { status: PaymentAttemptStatus.REQUIRES_REVIEW },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentRefund.aggregate({
+        where: {
+          status: PaymentRefundStatus.SUCCEEDED,
+          completedAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lt: new Date('2026-06-03T00:00:00.000Z'),
+          },
+        },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentRefund.aggregate({
+        where: { status: PaymentRefundStatus.REQUIRES_REVIEW },
+        _count: true,
+        _sum: { amount: true },
+      }),
+      prisma.paymentReconciliationIncident.count({
+        where: { status: PaymentReconciliationIncidentStatus.OPEN },
+      }),
       prisma.paymentWebhookEvent.count({
         where: {
           receivedAt: {
@@ -221,6 +258,17 @@ describe('Reports queries (e2e)', () => {
     failedAttemptBaselineCount = failedAttemptBaseline._count;
     failedAttemptBaselineAmount =
       failedAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    reviewAttemptBaselineCount = reviewAttemptBaseline._count;
+    reviewAttemptBaselineAmount =
+      reviewAttemptBaseline._sum.amount ?? new Prisma.Decimal(0);
+    successfulRefundBaselineCount = successfulRefundBaseline._count;
+    successfulRefundBaselineAmount =
+      successfulRefundBaseline._sum.amount ?? new Prisma.Decimal(0);
+    reviewRefundBaselineCount = reviewRefundBaseline._count;
+    reviewRefundBaselineAmount =
+      reviewRefundBaseline._sum.amount ?? new Prisma.Decimal(0);
+    openReconciliationIncidentBaselineCount =
+      openReconciliationIncidentBaseline;
     webhookExceptionBaselineCount = webhookExceptionBaseline;
 
     const position = await prisma.position.create({
@@ -650,6 +698,13 @@ describe('Reports queries (e2e)', () => {
       successfulAttemptAmount: successfulAttemptBaselineAmount.toFixed(2),
       failedAttemptCount: failedAttemptBaselineCount,
       failedAttemptAmount: failedAttemptBaselineAmount.toFixed(2),
+      requiresReviewAttemptCount: reviewAttemptBaselineCount,
+      requiresReviewAttemptAmount: reviewAttemptBaselineAmount.toFixed(2),
+      successfulRefundCount: successfulRefundBaselineCount,
+      successfulRefundAmount: successfulRefundBaselineAmount.toFixed(2),
+      reviewRefundCount: reviewRefundBaselineCount,
+      reviewRefundAmount: reviewRefundBaselineAmount.toFixed(2),
+      openReconciliationIncidentCount: openReconciliationIncidentBaselineCount,
       successRatePercent:
         completedAttemptCount === 0
           ? '0.00'
