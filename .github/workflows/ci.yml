@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:15
@@ -45,11 +45,6 @@ jobs:
       FE_URL: http://localhost:3001
       CSRF_ENABLED: 'true'
       COOKIE_SECURE: 'false'
-      MAIL_HOST: localhost
-      MAIL_PORT: '1025'
-      MAIL_USER: ci
-      MAIL_PASS: ci
-      MAIL_FROM: ci@example.com
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -61,11 +56,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm prisma:generate
-      - run: pnpm prisma:validate
       - run: pnpm exec prisma migrate deploy
       - run: pnpm prisma:preflight
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm build
-      - run: pnpm exec jest --runInBand
+      - name: Check deployed schema for drift
+        run: pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+      - run: pnpm verify
       - run: pnpm exec jest --config ./test/jest-e2e.json --runInBand --detectOpenHandles
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --tag coffee-shop-api:ci .
+      - name: Verify runtime is non-root
+        run: test "$(docker run --rm --entrypoint id coffee-shop-api:ci -u)" = 1000
+      - name: Verify generated Prisma Client is in the runtime image
+        run: docker run --rm --entrypoint node coffee-shop-api:ci -e "if (typeof require('@prisma/client').PrismaClient !== 'function') process.exit(1)"
