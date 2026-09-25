@@ -119,6 +119,7 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.SYSTEM_SETTINGS_UPDATE,
       PermissionKeys.REPORTS_READ,
       PermissionKeys.REPORTS_EXPORT,
+      PermissionKeys.REPORTS_CLOSE,
       PermissionKeys.FUNDS_READ,
       PermissionKeys.FUNDS_MANAGE,
       PermissionKeys.CASHIER_SHIFTS_CURRENT,
@@ -333,8 +334,8 @@ async function seedCashControlSettings() {
   }
 }
 
-async function main() {
-  await seedCashControlSettings();
+async function main(permissionsOnly: boolean) {
+  if (!permissionsOnly) await seedCashControlSettings();
   const permissions = await Promise.all(permissionSeeds.map(upsertPermission));
   const permissionByKey = new Map(
     permissions.map((permission) => [permission.key, permission.id]),
@@ -342,18 +343,21 @@ async function main() {
 
   for (const roleSeed of roleSeeds) {
     const role = await upsertRole(roleSeed);
-    await prisma.$transaction([
-      prisma.rolePermission.deleteMany({ where: { roleId: role.id } }),
-      prisma.rolePermission.createMany({
-        data: roleSeed.permissions.map((permissionKey) => ({
-          roleId: role.id,
-          permissionId: permissionByKey.get(permissionKey)!,
-        })),
-        skipDuplicates: true,
-      }),
-    ]);
+    const data = roleSeed.permissions.map((permissionKey) => ({
+      roleId: role.id,
+      permissionId: permissionByKey.get(permissionKey)!,
+    }));
+    if (permissionsOnly) {
+      await prisma.rolePermission.createMany({ data, skipDuplicates: true });
+    } else {
+      await prisma.$transaction([
+        prisma.rolePermission.deleteMany({ where: { roleId: role.id } }),
+        prisma.rolePermission.createMany({ data, skipDuplicates: true }),
+      ]);
+    }
   }
 
+  if (permissionsOnly) return;
   const ownerEmail = process.env.OWNER_EMAIL;
   if (ownerEmail) {
     const [existingOwner, ownerRole] = await Promise.all([
@@ -415,7 +419,7 @@ async function main() {
   }
 }
 
-main()
+main(process.argv.includes('--permissions-only'))
   .then(async () => {
     await prisma.$disconnect();
   })

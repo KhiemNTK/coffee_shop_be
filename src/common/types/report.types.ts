@@ -31,6 +31,36 @@ export interface ReportTrendRow {
   netRevenue: Decimal;
 }
 
+export interface ReportProfitabilityRow {
+  paidInvoiceCount: bigint;
+  grossSales: Decimal;
+  discountAmount: Decimal;
+  taxAmount: Decimal;
+  refundCount: bigint;
+  refundAmount: Decimal;
+  netReceipts: Decimal;
+  netSalesExTax: Decimal;
+  ingredientCost: Decimal;
+  wasteCost: Decimal;
+  soldItemCount: bigint;
+  itemsWithCostSnapshot: bigint;
+  zeroCostSnapshotCount: bigint;
+}
+
+export interface ReportDailyCloseBlockersRow {
+  openShiftCount: bigint;
+  unpaidInvoiceCount: bigint;
+  unfinishedItemCount: bigint;
+  uncertainPaymentCount: bigint;
+  uncertainRefundCount: bigint;
+  openIncidentCount: bigint;
+}
+
+export interface ReportRefundTotalsRow {
+  count: bigint;
+  amount: Decimal;
+}
+
 export interface ReportPaymentMethodRow {
   paymentMethod: PaymentMethod;
   paidInvoiceCount: bigint;

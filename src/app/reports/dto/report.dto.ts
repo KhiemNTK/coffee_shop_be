@@ -17,3 +17,17 @@ export class GetDashboardReportDto extends createZodDto(
     lowStockThreshold: z.coerce.number().min(0).max(1_000_000).default(5),
   }),
 ) {}
+
+const BusinessDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return (
+      !Number.isNaN(date.getTime()) && date.toISOString().startsWith(value)
+    );
+  }, 'Invalid business date.');
+
+export class BusinessDateDto extends createZodDto(
+  z.object({ businessDate: BusinessDateSchema }),
+) {}

@@ -116,6 +116,7 @@ export const PermissionKeys = {
 
   REPORTS_READ: '/reports_read',
   REPORTS_EXPORT: '/reports_export',
+  REPORTS_CLOSE: '/reports_close',
 
   FUNDS_READ: '/funds_read',
   FUNDS_MANAGE: '/funds_manage',

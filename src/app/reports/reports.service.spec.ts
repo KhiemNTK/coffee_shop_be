@@ -52,6 +52,23 @@ describe('ReportsService', () => {
       ])
       .mockResolvedValueOnce([
         {
+          paidInvoiceCount: 2n,
+          grossSales: new Prisma.Decimal('220000'),
+          discountAmount: new Prisma.Decimal('20000'),
+          taxAmount: new Prisma.Decimal('16000'),
+          refundCount: 0n,
+          refundAmount: new Prisma.Decimal('0'),
+          netReceipts: new Prisma.Decimal('216000'),
+          netSalesExTax: new Prisma.Decimal('200000'),
+          ingredientCost: new Prisma.Decimal('70000'),
+          wasteCost: new Prisma.Decimal('5000'),
+          soldItemCount: 2n,
+          itemsWithCostSnapshot: 2n,
+          zeroCostSnapshotCount: 0n,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
           bucket: '2026-01-01',
           paidInvoiceCount: 2n,
           netRevenue: new Prisma.Decimal('216000'),
@@ -194,6 +211,23 @@ describe('ReportsService', () => {
       cashShortageAmount: '5000.00',
       cashOverageAmount: '0.00',
     });
+    expect(result.profitability).toEqual({
+      asOf: expect.any(String),
+      paidInvoiceCount: 2,
+      grossSales: '220000.00',
+      discountAmount: '20000.00',
+      taxAmount: '16000.00',
+      refundCount: 0,
+      refundAmount: '0.00',
+      netReceipts: '216000.00',
+      estimatedNetSalesExTax: '200000.00',
+      ingredientCost: '70000.00',
+      wasteCost: '5000.00',
+      estimatedGrossProfit: '125000.00',
+      soldItemCount: 2,
+      itemsWithCostSnapshot: 2,
+      zeroCostSnapshotCount: 0,
+    });
     expect(result.paymentMethods).toEqual([
       {
         paymentMethod: PaymentMethod.CASH,
@@ -311,6 +345,7 @@ describe('ReportsService', () => {
     expect(excelUtil.generateExcel).toHaveBeenCalledWith({
       worksheets: expect.arrayContaining([
         expect.objectContaining({ sheetName: 'Summary' }),
+        expect.objectContaining({ sheetName: 'Profitability' }),
         expect.objectContaining({ sheetName: 'Promotions' }),
         expect.objectContaining({ sheetName: 'Inventory Waste' }),
         expect.objectContaining({ sheetName: 'Cash Risk Summary' }),

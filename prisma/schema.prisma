@@ -529,6 +529,7 @@ model Employee {
   resolvedPaymentIncidents  PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
   idempotencyRequests       IdempotencyRequest[]
   requestedPrintJobs        PrintJob[]                      @relation("PrintJobRequestedBy")
+  dailySalesCloses           DailySalesClose[]
 }
 
 model AuthSession {
@@ -1035,6 +1036,21 @@ model Invoice {
   @@index([shiftId])
   @@index([paymentStatus, createdAt])
   @@index([createdAt])
+}
+
+model DailySalesClose {
+  id           String   @id @default(uuid())
+  businessDate DateTime @unique @db.Date
+  timeZone     String   @default("Asia/Ho_Chi_Minh")
+  periodStart  DateTime
+  periodEnd    DateTime
+  closedAt     DateTime @default(now())
+  snapshot     Json
+
+  closedById String
+  closedBy   Employee @relation(fields: [closedById], references: [id], onDelete: Restrict)
+
+  @@index([closedAt])
 }
 
 model KitchenStation {

@@ -21,6 +21,7 @@ import type {
 } from '../../common/types';
 import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
 import { GetDashboardReportDto } from './dto';
+import { queryProfitability } from './profitability.query';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_REPORT_RANGE_MS = 366 * DAY_MS;
@@ -36,9 +37,11 @@ export class ReportsService {
 
   async getDashboard(query: GetDashboardReportDto) {
     const period = this.resolvePeriod(query);
+    const asOf = new Date();
     const dashboard = await this.prisma.$transaction(
       async (tx) => {
         const summary = await this.getSummary(tx, period);
+        const profitability = await queryProfitability(tx, period, asOf);
         const trend = await this.getTrend(tx, period);
         const paymentMethods = await this.getPaymentMethods(tx, period);
         const topItems = await this.getTopItems(tx, period, query.topLimit);
@@ -68,6 +71,7 @@ export class ReportsService {
 
         return {
           summary,
+          profitability,
           trend,
           paymentMethods,
           topItems,
@@ -108,6 +112,7 @@ export class ReportsService {
     return this.excelUtil.generateExcel({
       worksheets: [
         { sheetName: 'Summary', data: [report.summary] },
+        { sheetName: 'Profitability', data: [report.profitability] },
         { sheetName: 'Sales Trend', data: report.trend },
         { sheetName: 'Payment Methods', data: report.paymentMethods },
         { sheetName: 'Top Items', data: report.topItems },

@@ -32,6 +32,7 @@
     "prisma:generate:zod": "prisma generate",
     "prisma:seed": "prisma db seed -- --environment dev",
     "prisma:seed:prod": "prisma db seed -- --environment prod",
+    "prisma:seed:permissions": "ts-node prisma/seed.ts --permissions-only",
     "prisma:reset": "prisma migrate reset"
   },
   "dependencies": {
