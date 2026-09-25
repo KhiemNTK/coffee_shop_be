@@ -1,7 +1,6 @@
 .git
 .github
 .env*
-!.example.env
 node_modules
 dist
 coverage
