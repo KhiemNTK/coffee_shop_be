@@ -12,6 +12,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { OrderPolicyService } from './order-policy.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
+import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
 
 describe('OrdersService', () => {
   let service: OrdersService;
@@ -23,6 +24,7 @@ describe('OrdersService', () => {
     recordWaste: jest.Mock;
   };
   let cashierShiftLedger: { findOpenShiftId: jest.Mock };
+  let kitchenRouting: { createTickets: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -56,6 +58,11 @@ describe('OrdersService', () => {
         findUnique: jest.fn(),
         updateMany: jest.fn(),
       },
+      kitchenTicketItem: {
+        findUnique: jest.fn(),
+        update: jest.fn(),
+        create: jest.fn(),
+      },
       menuItem: {
         findMany: jest.fn(),
       },
@@ -82,6 +89,9 @@ describe('OrdersService', () => {
     cashierShiftLedger = {
       findOpenShiftId: jest.fn().mockResolvedValue(null),
     };
+    kitchenRouting = {
+      createTickets: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -102,6 +112,10 @@ describe('OrdersService', () => {
         {
           provide: CashierShiftLedgerService,
           useValue: cashierShiftLedger,
+        },
+        {
+          provide: KitchenRoutingService,
+          useValue: kitchenRouting,
         },
       ],
     }).compile();
@@ -318,11 +332,11 @@ describe('OrdersService', () => {
 
     expect(tx.menuItem.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           id: { in: ['menu-item-id'] },
           deletedAt: null,
           isAvailable: true,
-        },
+        }),
       }),
     );
     expect(tx.orderItem.createManyAndReturn).not.toHaveBeenCalled();

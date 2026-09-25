@@ -6,11 +6,6 @@ export interface OpenSessionInput {
   guestCount?: number;
 }
 
-export interface MenuItemPriceSnapshot {
-  id: string;
-  price: Prisma.Decimal;
-}
-
 export interface SplittableOrderItem {
   id: string;
   orderSessionId: string;

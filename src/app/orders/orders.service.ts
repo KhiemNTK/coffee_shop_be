@@ -31,7 +31,6 @@ import { ORDER_EVENTS } from './events/order.events';
 import { OrderPolicyService } from './order-policy.service';
 import type {
   ExtendedPrismaTransactionClient,
-  MenuItemPriceSnapshot,
   OpenSessionInput,
   OrderEventBase,
   SplittableOrderItem,
@@ -44,6 +43,7 @@ import {
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { OutboxService } from '../durable/outbox.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
+import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
 
 @Injectable()
 export class OrdersService {
@@ -56,6 +56,7 @@ export class OrdersService {
     private readonly orderPolicy: OrderPolicyService,
     private readonly inventoryConsumption: InventoryConsumptionService,
     private readonly cashierShiftLedger: CashierShiftLedgerService,
+    private readonly kitchenRouting: KitchenRoutingService,
   ) {}
 
   private readonly orderSessionInclude = {
@@ -340,19 +341,39 @@ export class OrdersService {
       );
 
       const menuItemIds = [...new Set(items.map((item) => item.menuItemId))];
-      const menuItems = (await tx.menuItem.findMany({
+      const menuItems = await tx.menuItem.findMany({
         where: {
           id: {
             in: menuItemIds,
           },
           deletedAt: null,
           isAvailable: true,
+          OR: [
+            { kitchenStationId: null },
+            {
+              kitchenStation: {
+                is: { isActive: true, deletedAt: null },
+              },
+            },
+          ],
         },
         select: {
           id: true,
+          name: true,
           price: true,
+          kitchenStation: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              prepSlaSeconds: true,
+              printDevice: {
+                select: { id: true, isActive: true, deletedAt: true },
+              },
+            },
+          },
         },
-      })) as MenuItemPriceSnapshot[];
+      });
 
       if (menuItems.length !== menuItemIds.length) {
         throw new NotFoundException(
@@ -382,7 +403,18 @@ export class OrdersService {
             note: item.note,
           };
         }),
-        select: { id: true },
+        select: {
+          id: true,
+          menuItemId: true,
+          quantity: true,
+          note: true,
+        },
+      });
+
+      const kitchenTickets = await this.kitchenRouting.createTickets(tx, {
+        orderSessionId,
+        menuItems,
+        orderItems: createdItems,
       });
 
       const updatedSession = await tx.orderSession.findUnique({
@@ -401,6 +433,7 @@ export class OrdersService {
             sessionId: updatedSession.id,
             tableId: updatedSession.tableId,
             orderItemIds: createdItems.map((item) => item.id),
+            kitchenTicketIds: kitchenTickets.map((ticket) => ticket.id),
           },
         );
       }
@@ -1152,7 +1185,7 @@ export class OrdersService {
             );
           }
 
-          await tx.orderItem.create({
+          const movedItem = await tx.orderItem.create({
             data: {
               orderSessionId: newDestSession.id,
               menuItemId: dbItem.menuItemId,
@@ -1161,7 +1194,29 @@ export class OrdersService {
               note: dbItem.note,
               serveStatus: dbItem.serveStatus,
             },
+            select: { id: true },
           });
+
+          const ticketItem = await tx.kitchenTicketItem.findUnique({
+            where: { orderItemId: dbItem.id },
+          });
+          if (ticketItem) {
+            await tx.kitchenTicketItem.update({
+              where: { id: ticketItem.id },
+              data: {
+                quantity: dbItem.quantity - payloadItem.quantityToMove,
+              },
+            });
+            await tx.kitchenTicketItem.create({
+              data: {
+                ticketId: ticketItem.ticketId,
+                orderItemId: movedItem.id,
+                itemName: ticketItem.itemName,
+                quantity: payloadItem.quantityToMove,
+                note: ticketItem.note,
+              },
+            });
+          }
         }
       }
 

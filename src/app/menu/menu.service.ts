@@ -173,12 +173,16 @@ export class MenuService {
     return this.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
       await this.findActiveCategory(tx, dto.categoryId);
+      if (dto.kitchenStationId) {
+        await this.findActiveKitchenStation(tx, dto.kitchenStationId);
+      }
 
       const item = await tx.menuItem.create({
         data: {
           name: dto.name,
           price: this.toPrice(dto.price),
           categoryId: dto.categoryId,
+          kitchenStationId: dto.kitchenStationId,
         },
         include: this.itemInclude,
       });
@@ -188,6 +192,7 @@ export class MenuService {
         name: item.name,
         price: item.price.toString(),
         categoryId: item.categoryId,
+        kitchenStationId: item.kitchenStationId,
       });
       return item;
     });
@@ -246,12 +251,16 @@ export class MenuService {
       if (dto.categoryId) {
         await this.findActiveCategory(tx, dto.categoryId);
       }
+      if (dto.kitchenStationId) {
+        await this.findActiveKitchenStation(tx, dto.kitchenStationId);
+      }
 
       const item = await tx.menuItem.update({
         where: { id },
         data: {
           name: dto.name,
           categoryId: dto.categoryId,
+          kitchenStationId: dto.kitchenStationId,
           price: dto.price === undefined ? undefined : this.toPrice(dto.price),
         },
         include: this.itemInclude,
@@ -264,6 +273,9 @@ export class MenuService {
             ? { categoryId: dto.categoryId }
             : {}),
           ...(dto.price !== undefined ? { price: item.price.toString() } : {}),
+          ...(dto.kitchenStationId !== undefined
+            ? { kitchenStationId: dto.kitchenStationId }
+            : {}),
         },
       });
       return item;
@@ -452,6 +464,7 @@ export class MenuService {
 
   private readonly itemInclude = {
     category: { select: { id: true, name: true } },
+    kitchenStation: { select: { id: true, code: true, name: true } },
   } as const;
 
   private readonly recipeIngredientSelect = {
@@ -493,6 +506,21 @@ export class MenuService {
       throw new NotFoundException(`Menu item with ID ${id} not found.`);
     }
     return item;
+  }
+
+  private async findActiveKitchenStation(
+    tx: ExtendedPrismaTransactionClient,
+    id: string,
+  ) {
+    const station = await tx.kitchenStation.findFirst({
+      where: { id, isActive: true, deletedAt: null },
+      select: { id: true },
+    });
+    if (!station) {
+      throw new NotFoundException(
+        `Active kitchen station with ID ${id} not found.`,
+      );
+    }
   }
 
   private async assertActiveEmployee(

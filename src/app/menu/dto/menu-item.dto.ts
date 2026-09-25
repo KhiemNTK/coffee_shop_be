@@ -11,6 +11,10 @@ const MenuItemInputSchema = {
   name: z.string().trim().min(1).max(160),
   price: MenuMoneyInputSchema,
   categoryId: z.uuid('Invalid UUID for menu category'),
+  kitchenStationId: z
+    .uuid('Invalid UUID for kitchen station')
+    .nullable()
+    .optional(),
 };
 
 export class CreateMenuItemDto extends createZodDto(
@@ -22,6 +26,7 @@ export class UpdateMenuItemDto extends createZodDto(
     name: MenuItemInputSchema.name.optional(),
     price: MenuItemInputSchema.price.optional(),
     categoryId: MenuItemInputSchema.categoryId.optional(),
+    kitchenStationId: MenuItemInputSchema.kitchenStationId,
   }),
 ) {}
 

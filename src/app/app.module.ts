@@ -40,6 +40,8 @@ import { CashierShiftsModule } from './cashier-shifts/cashier-shifts.module';
 import { PaymentsModule } from './payments/payments.module';
 import { DurableModule } from './durable/durable.module';
 import { ObservabilityModule } from './observability/observability.module';
+import { PrintingModule } from './printing/printing.module';
+import { KitchenModule } from './kitchen/kitchen.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -73,6 +75,8 @@ import { ObservabilityModule } from './observability/observability.module';
     CashierShiftsModule,
     PaymentsModule,
     ObservabilityModule,
+    PrintingModule,
+    KitchenModule,
   ],
   controllers: [AppController],
   providers: [

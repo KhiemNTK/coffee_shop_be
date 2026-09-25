@@ -30,6 +30,7 @@ export interface OrderItemsAddedPayload extends OrderEventBase {
   sessionId: string;
   tableId: string | null;
   orderItemIds: string[];
+  kitchenTicketIds: string[];
 }
 
 export interface OrderItemStatusUpdatedPayload extends OrderEventBase {

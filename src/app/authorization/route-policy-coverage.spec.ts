@@ -15,11 +15,14 @@ import { HealthController } from '../health/health.controller';
 import { InventoryController } from '../inventory/inventory.controller';
 import { InvoicesController } from '../invoices/invoices.controller';
 import { MenuController } from '../menu/menu.controller';
+import { KitchenController } from '../kitchen/kitchen.controller';
 import { MetricsController } from '../observability/metrics.controller';
 import { OrdersController } from '../orders/orders.controller';
 import { PaymentsController } from '../payments/payments.controller';
 import { PermissionsController } from '../permissions/permissions.controller';
 import { PositionsController } from '../positions/positions.controller';
+import { PrintAgentController } from '../printing/print-agent.controller';
+import { PrintingController } from '../printing/printing.controller';
 import { PromotionsController } from '../promotions/promotions.controller';
 import { ReportsController } from '../reports/reports.controller';
 import { ReservationsController } from '../reservations/reservations.controller';
@@ -40,12 +43,15 @@ const controllers = [
   HealthController,
   InventoryController,
   InvoicesController,
+  KitchenController,
   MenuController,
   MetricsController,
   OrdersController,
   PaymentsController,
   PermissionsController,
   PositionsController,
+  PrintAgentController,
+  PrintingController,
   PromotionsController,
   ReportsController,
   ReservationsController,
