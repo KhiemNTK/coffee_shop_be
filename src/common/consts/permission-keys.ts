@@ -50,6 +50,10 @@ export const PermissionKeys = {
   ORDERS_TABLES_SPLIT: '/orders_tables_split',
   ORDERS_TABLES_CLEAR: '/orders_tables_clear',
 
+  KITCHEN_STATIONS_READ: '/kitchen-stations_read',
+  KITCHEN_STATIONS_MANAGE: '/kitchen-stations_manage',
+  KITCHEN_TICKETS_READ: '/kitchen-tickets_read',
+
   MENU_READ: '/menu_read',
   MENU_CREATE: '/menu_create',
   MENU_UPDATE: '/menu_update',
@@ -59,6 +63,15 @@ export const PermissionKeys = {
   INVENTORY_CREATE: '/inventory_create',
   INVENTORY_UPDATE: '/inventory_update',
   INVENTORY_DELETE: '/inventory_delete',
+  INVENTORY_STOCK_ADJUST: '/inventory_stock_adjust',
+  INVENTORY_SUPPLIERS_READ: '/inventory_suppliers_read',
+  INVENTORY_SUPPLIERS_MANAGE: '/inventory_suppliers_manage',
+  INVENTORY_PURCHASE_RECEIPTS_READ: '/inventory_purchase-receipts_read',
+  INVENTORY_PURCHASE_RECEIPTS_CREATE: '/inventory_purchase-receipts_create',
+  INVENTORY_PURCHASE_RECEIPTS_POST: '/inventory_purchase-receipts_post',
+  INVENTORY_STOCKTAKES_READ: '/inventory_stocktakes_read',
+  INVENTORY_STOCKTAKES_CREATE: '/inventory_stocktakes_create',
+  INVENTORY_STOCKTAKES_POST: '/inventory_stocktakes_post',
 
   INVOICES_READ: '/invoices_read',
   INVOICES_CREATE: '/invoices_create',
@@ -71,6 +84,12 @@ export const PermissionKeys = {
   PAYMENT_REFUNDS_READ: '/payment-refunds_read',
   PAYMENT_RECONCILIATION_READ: '/payment-reconciliation_read',
   PAYMENT_RECONCILIATION_MANAGE: '/payment-reconciliation_manage',
+
+  PRINT_DEVICES_READ: '/print-devices_read',
+  PRINT_DEVICES_MANAGE: '/print-devices_manage',
+  PRINT_JOBS_READ: '/print-jobs_read',
+  PRINT_JOBS_MANAGE: '/print-jobs_manage',
+  RECEIPTS_REPRINT: '/receipts_reprint',
 
   RESERVATIONS_READ: '/reservations_read',
   RESERVATIONS_CREATE: '/reservations_create',

@@ -23,11 +23,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-generator custom_generator {
-  provider = "prisma-generator-fake-data"
-  output   = "../src/generated/faker/data.ts"
-}
-
 // =============================================
 // ENUMS (Chuẩn hóa trạng thái dữ liệu)
 // =============================================
@@ -47,6 +42,30 @@ enum ServeStatus {
   PENDING
   COOKING
   SERVED
+  CANCELLED
+}
+
+enum PrintDeviceType {
+  RECEIPT
+  KITCHEN
+}
+
+enum PrintDeviceStatus {
+  READY
+  ERROR
+  PAUSED
+}
+
+enum PrintJobType {
+  RECEIPT
+  KITCHEN_TICKET
+}
+
+enum PrintJobStatus {
+  PENDING
+  PROCESSING
+  PRINTED
+  FAILED
   CANCELLED
 }
 
@@ -130,6 +149,18 @@ enum OutboxEventStatus {
 enum InventoryTxType {
   IMPORT
   EXPORT
+}
+
+enum PurchaseReceiptStatus {
+  DRAFT
+  POSTED
+  CANCELLED
+}
+
+enum StocktakeStatus {
+  DRAFT
+  POSTED
+  CANCELLED
 }
 
 enum CashFlowType {
@@ -341,6 +372,9 @@ model MenuItem {
   categoryId String
   category   MenuCategory @relation(fields: [categoryId], references: [id])
 
+  kitchenStationId String?
+  kitchenStation   KitchenStation? @relation(fields: [kitchenStationId], references: [id], onDelete: SetNull)
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
@@ -349,6 +383,7 @@ model MenuItem {
   ingredients MenuItemIngredient[]
 
   @@index([deletedAt, categoryId, isAvailable])
+  @@index([kitchenStationId, deletedAt, isAvailable])
 }
 
 model Promotion {
@@ -462,31 +497,38 @@ model Employee {
   positionId String // MaChucVu
   position   Position @relation(fields: [positionId], references: [id])
 
-  employeeRoles            EmployeeRole[]
-  orderSessions            OrderSession[]
-  invoices                 Invoice[]
-  actionLogs               ActionLog[]
-  cashTransactions         CashTransaction[]
-  reservations             Reservation[]
-  equipment                Equipment[]
-  equipmentEvents          EquipmentLifecycleEvent[]
-  printSetting             PrintSetting?
-  shifts                   CashierShift[]
-  authSessions             AuthSession[]
-  passwordResetTokens      PasswordResetToken[]
-  inventoryWastes          InventoryWaste[]
-  updatedSettings          SystemSetting[]                 @relation("SystemSettingUpdatedBy")
-  settingRevisions         SystemSettingRevision[]         @relation("SystemSettingRevisionEmployee")
-  requestedCashExpenses    CashExpenseRequest[]            @relation("CashExpenseRequestedBy")
-  resolvedCashExpenses     CashExpenseRequest[]            @relation("CashExpenseResolvedBy")
-  requestedCashHandovers   CashHandover[]                  @relation("CashHandoverRequestedBy")
-  resolvedCashHandovers    CashHandover[]                  @relation("CashHandoverResolvedBy")
-  settledCashHandovers     CashHandover[]                  @relation("CashHandoverSettledBy")
-  importedBankStatements   BankStatementImport[]
-  paymentAttempts          PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
-  requestedPaymentRefunds  PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
-  resolvedPaymentIncidents PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
-  idempotencyRequests      IdempotencyRequest[]
+  employeeRoles             EmployeeRole[]
+  orderSessions             OrderSession[]
+  invoices                  Invoice[]
+  actionLogs                ActionLog[]
+  cashTransactions          CashTransaction[]
+  reservations              Reservation[]
+  equipment                 Equipment[]
+  equipmentEvents           EquipmentLifecycleEvent[]
+  printSetting              PrintSetting?
+  shifts                    CashierShift[]
+  authSessions              AuthSession[]
+  passwordResetTokens       PasswordResetToken[]
+  inventoryWastes           InventoryWaste[]
+  createdPurchaseReceipts   PurchaseReceipt[]               @relation("PurchaseReceiptCreatedBy")
+  postedPurchaseReceipts    PurchaseReceipt[]               @relation("PurchaseReceiptPostedBy")
+  cancelledPurchaseReceipts PurchaseReceipt[]               @relation("PurchaseReceiptCancelledBy")
+  createdStocktakes         Stocktake[]                     @relation("StocktakeCreatedBy")
+  postedStocktakes          Stocktake[]                     @relation("StocktakePostedBy")
+  cancelledStocktakes       Stocktake[]                     @relation("StocktakeCancelledBy")
+  updatedSettings           SystemSetting[]                 @relation("SystemSettingUpdatedBy")
+  settingRevisions          SystemSettingRevision[]         @relation("SystemSettingRevisionEmployee")
+  requestedCashExpenses     CashExpenseRequest[]            @relation("CashExpenseRequestedBy")
+  resolvedCashExpenses      CashExpenseRequest[]            @relation("CashExpenseResolvedBy")
+  requestedCashHandovers    CashHandover[]                  @relation("CashHandoverRequestedBy")
+  resolvedCashHandovers     CashHandover[]                  @relation("CashHandoverResolvedBy")
+  settledCashHandovers      CashHandover[]                  @relation("CashHandoverSettledBy")
+  importedBankStatements    BankStatementImport[]
+  paymentAttempts           PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
+  requestedPaymentRefunds   PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
+  resolvedPaymentIncidents  PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
+  idempotencyRequests       IdempotencyRequest[]
+  requestedPrintJobs        PrintJob[]                      @relation("PrintJobRequestedBy")
 }
 
 model AuthSession {
@@ -539,9 +581,11 @@ model InventoryCategory {
 }
 
 model InventoryItem {
-  id    String  @id @default(uuid()) // MaHangHoa
-  name  String // TenHangHoa
-  stock Decimal @default(0) @db.Decimal(18, 4) // Số lượng tồn kho hiện tại
+  id              String  @id @default(uuid()) // MaHangHoa
+  name            String // TenHangHoa
+  stock           Decimal @default(0) @db.Decimal(18, 4) // Số lượng tồn kho hiện tại
+  averageUnitCost Decimal @default(0) @db.Decimal(18, 2)
+  reorderPoint    Decimal @default(0) @db.Decimal(18, 4)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -553,9 +597,11 @@ model InventoryItem {
   unitId String // MaDonViTinh
   unit   Unit   @relation(fields: [unitId], references: [id])
 
-  ingredients  MenuItemIngredient[]
-  transactions InventoryTransaction[]
-  snapshots    OrderItemIngredientSnapshot[]
+  ingredients    MenuItemIngredient[]
+  transactions   InventoryTransaction[]
+  snapshots      OrderItemIngredientSnapshot[]
+  receiptItems   PurchaseReceiptItem[]
+  stocktakeItems StocktakeItem[]
 
   @@index([categoryId])
   @@index([unitId])
@@ -661,6 +707,12 @@ model InventoryTransaction {
   orderItemId String?
   orderItem   OrderItem? @relation(fields: [orderItemId], references: [id])
 
+  purchaseReceiptItemId String?              @unique
+  purchaseReceiptItem   PurchaseReceiptItem? @relation(fields: [purchaseReceiptItemId], references: [id], onDelete: Restrict)
+
+  stocktakeItemId String?        @unique
+  stocktakeItem   StocktakeItem? @relation(fields: [stocktakeItemId], references: [id], onDelete: Restrict)
+
   @@unique([orderItemId, inventoryItemId])
   @@index([inventoryItemId])
   @@index([type, transactionDate])
@@ -675,6 +727,8 @@ model OrderItemIngredientSnapshot {
   unitName          String
   quantityPerItem   Decimal  @db.Decimal(18, 4)
   totalQuantity     Decimal  @db.Decimal(18, 4)
+  unitCost          Decimal  @default(0) @db.Decimal(18, 2)
+  totalCost         Decimal  @default(0) @db.Decimal(18, 2)
   createdAt         DateTime @default(now())
 
   orderItem     OrderItem       @relation(fields: [orderItemId], references: [id])
@@ -702,6 +756,130 @@ model InventoryWaste {
   @@index([inventoryItemId, createdAt])
   @@index([employeeId])
   @@index([createdAt])
+}
+
+model Supplier {
+  id          String  @id @default(uuid())
+  code        String
+  name        String
+  contactName String?
+  phoneNumber String?
+  email       String?
+  address     String?
+  taxCode     String?
+  notes       String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  purchaseReceipts PurchaseReceipt[]
+
+  @@index([deletedAt, name])
+  @@index([name])
+}
+
+model PurchaseReceipt {
+  id                 String                @id @default(uuid())
+  receiptNumber      String                @unique
+  status             PurchaseReceiptStatus @default(DRAFT)
+  receivedAt         DateTime              @default(now())
+  totalAmount        Decimal               @default(0) @db.Decimal(18, 2)
+  note               String?
+  postedAt           DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  createdById String
+  createdBy   Employee @relation("PurchaseReceiptCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  postedById String?
+  postedBy   Employee? @relation("PurchaseReceiptPostedBy", fields: [postedById], references: [id], onDelete: Restrict)
+
+  cancelledById String?
+  cancelledBy   Employee? @relation("PurchaseReceiptCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict)
+
+  items PurchaseReceiptItem[]
+
+  @@index([status, receivedAt])
+  @@index([supplierId, status])
+  @@index([createdById, createdAt])
+}
+
+model PurchaseReceiptItem {
+  id                String  @id @default(uuid())
+  inventoryItemName String
+  unitName          String
+  quantity          Decimal @db.Decimal(18, 4)
+  unitPrice         Decimal @db.Decimal(18, 2)
+  totalAmount       Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+
+  purchaseReceiptId String
+  purchaseReceipt   PurchaseReceipt @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  inventoryTransaction InventoryTransaction?
+
+  @@unique([purchaseReceiptId, inventoryItemId])
+  @@index([inventoryItemId])
+}
+
+model Stocktake {
+  id                 String          @id @default(uuid())
+  stocktakeNumber    String          @unique
+  status             StocktakeStatus @default(DRAFT)
+  note               String?
+  postedAt           DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdById String
+  createdBy   Employee @relation("StocktakeCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  postedById String?
+  postedBy   Employee? @relation("StocktakePostedBy", fields: [postedById], references: [id], onDelete: Restrict)
+
+  cancelledById String?
+  cancelledBy   Employee? @relation("StocktakeCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict)
+
+  items StocktakeItem[]
+
+  @@index([status, createdAt])
+  @@index([createdById, createdAt])
+}
+
+model StocktakeItem {
+  id                 String    @id @default(uuid())
+  inventoryItemName  String
+  unitName           String
+  expectedQuantity   Decimal   @db.Decimal(18, 4)
+  countedQuantity    Decimal?  @db.Decimal(18, 4)
+  differenceQuantity Decimal?  @db.Decimal(18, 4)
+  countedAt          DateTime?
+
+  stocktakeId String
+  stocktake   Stocktake @relation(fields: [stocktakeId], references: [id], onDelete: Cascade)
+
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  inventoryTransaction InventoryTransaction?
+
+  @@unique([stocktakeId, inventoryItemId])
+  @@index([inventoryItemId])
 }
 
 // =============================================
@@ -776,7 +954,8 @@ model OrderSession {
   shiftId String?
   shift   CashierShift? @relation(fields: [shiftId], references: [id])
 
-  reservation Reservation?
+  reservation    Reservation?
+  kitchenTickets KitchenTicket[]
 
   @@index([sessionStatus, createdAt])
   @@index([tableId, sessionStatus])
@@ -808,6 +987,7 @@ model OrderItem {
 
   ingredientSnapshots   OrderItemIngredientSnapshot[]
   inventoryTransactions InventoryTransaction[]
+  kitchenTicketItem     KitchenTicketItem?
 
   @@index([orderSessionId])
   @@index([menuItemId])
@@ -848,12 +1028,135 @@ model Invoice {
   orderItems      OrderItem[]
   cashTransaction CashTransaction?
   paymentAttempts PaymentAttempt[]
+  printJobs       PrintJob[]
 
   @@index([orderSessionId])
   @@index([employeeId])
   @@index([shiftId])
   @@index([paymentStatus, createdAt])
   @@index([createdAt])
+}
+
+model KitchenStation {
+  id             String  @id @default(uuid())
+  code           String
+  name           String
+  prepSlaSeconds Int     @default(900)
+  isActive       Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  printDeviceId String?
+  printDevice   PrintDevice? @relation(fields: [printDeviceId], references: [id], onDelete: SetNull)
+
+  menuItems MenuItem[]
+  tickets   KitchenTicket[]
+
+  @@index([deletedAt, isActive, name])
+  @@index([printDeviceId])
+}
+
+model KitchenTicket {
+  id        String   @id @default(uuid())
+  sequence  Int      @unique @default(autoincrement())
+  dueAt     DateTime
+  createdAt DateTime @default(now())
+
+  stationId String
+  station   KitchenStation @relation(fields: [stationId], references: [id], onDelete: Restrict)
+
+  orderSessionId String
+  orderSession   OrderSession @relation(fields: [orderSessionId], references: [id], onDelete: Restrict)
+
+  items     KitchenTicketItem[]
+  printJobs PrintJob[]
+
+  @@index([stationId, dueAt, createdAt])
+  @@index([orderSessionId, createdAt])
+}
+
+model KitchenTicketItem {
+  id        String   @id @default(uuid())
+  itemName  String
+  quantity  Int
+  note      String?
+  createdAt DateTime @default(now())
+
+  ticketId String
+  ticket   KitchenTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  orderItemId String    @unique
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, createdAt])
+}
+
+model PrintDevice {
+  id         String            @id @default(uuid())
+  name       String
+  type       PrintDeviceType
+  paperSize  String
+  isActive   Boolean           @default(true)
+  isDefault  Boolean           @default(false)
+  apiKeyHash String            @unique
+  status     PrintDeviceStatus @default(READY)
+  lastSeenAt DateTime?
+  lastError  String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  kitchenStations KitchenStation[]
+  printJobs       PrintJob[]
+
+  @@index([deletedAt, type, isActive])
+  @@index([status, lastSeenAt])
+}
+
+model PrintJob {
+  id               String         @id @default(uuid())
+  type             PrintJobType
+  status           PrintJobStatus @default(PENDING)
+  payload          Json
+  copies           Int            @default(1)
+  attempts         Int            @default(0)
+  maxAttempts      Int            @default(5)
+  availableAt      DateTime       @default(now())
+  lockedAt         DateTime?
+  leaseExpiresAt   DateTime?
+  leaseTokenHash   String?
+  printedAt        DateTime?
+  failedAt         DateTime?
+  lastError        String?
+  deduplicationKey String?        @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deviceId String?
+  device   PrintDevice? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  requestedById String?
+  requestedBy   Employee? @relation("PrintJobRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  kitchenTicketId String?
+  kitchenTicket   KitchenTicket? @relation(fields: [kitchenTicketId], references: [id], onDelete: Restrict)
+
+  reprintOfId String?
+  reprintOf   PrintJob?  @relation("PrintJobReprints", fields: [reprintOfId], references: [id], onDelete: Restrict)
+  reprints    PrintJob[] @relation("PrintJobReprints")
+
+  @@index([deviceId, status, availableAt, createdAt])
+  @@index([invoiceId, createdAt])
+  @@index([kitchenTicketId])
+  @@index([requestedById, createdAt])
+  @@index([leaseExpiresAt])
 }
 
 model PaymentAttempt {
