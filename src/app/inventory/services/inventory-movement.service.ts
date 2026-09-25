@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
 import { InventoryTxType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type {
@@ -9,13 +13,19 @@ import type {
 import { IdempotencyService } from '../../durable/idempotency.service';
 import { OutboxService } from '../../durable/outbox.service';
 import {
-  BulkInventoryMovementDto,
-  InventoryMovementDto,
+  BulkInventoryExportDto,
+  BulkInventoryImportDto,
+  InventoryExportDto,
+  InventoryImportDto,
 } from '../dto/inventory-common.dto';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
 import { InventoryPolicyService } from '../policies/inventory-policy.service';
 import { InventoryRepository } from '../repositories/inventory.repository';
 import { InventoryAuditService } from './inventory-audit.service';
+import {
+  calculateInventoryValue,
+  calculateWeightedAverageCost,
+} from './inventory-costing';
 import { InventoryTransactionService } from './inventory-transaction.service';
 
 @Injectable()
@@ -32,7 +42,7 @@ export class InventoryMovementService {
   async importItem(
     inventoryItemId: string,
     employeeId: string,
-    dto: InventoryMovementDto,
+    dto: InventoryImportDto,
   ) {
     const [movement] = await this.executeMovement(
       employeeId,
@@ -56,7 +66,7 @@ export class InventoryMovementService {
   async exportItem(
     inventoryItemId: string,
     employeeId: string,
-    dto: InventoryMovementDto,
+    dto: InventoryExportDto,
   ) {
     const [movement] = await this.executeMovement(
       employeeId,
@@ -68,7 +78,6 @@ export class InventoryMovementService {
           inventoryItemId,
           type: InventoryTxType.EXPORT,
           quantity: dto.quantity,
-          unitPrice: dto.unitPrice,
           transactionDate: dto.transactionDate,
           note: dto.note,
         },
@@ -77,7 +86,7 @@ export class InventoryMovementService {
     return movement;
   }
 
-  async bulkImport(employeeId: string, dto: BulkInventoryMovementDto) {
+  async bulkImport(employeeId: string, dto: BulkInventoryImportDto) {
     this.inventoryPolicy.assertBulkSize(dto.items.length);
     this.inventoryPolicy.assertNoDuplicateInventoryItems(
       dto.items.map((item) => item.inventoryItemId),
@@ -88,14 +97,16 @@ export class InventoryMovementService {
       'inventory.stock.bulk-import',
       dto.idempotencyKey,
       { ...dto, idempotencyKey: undefined },
-      dto.items.map((item) => ({
-        ...item,
-        type: InventoryTxType.IMPORT,
-      })),
+      dto.items
+        .map((item) => ({
+          ...item,
+          type: InventoryTxType.IMPORT,
+        }))
+        .sort((a, b) => a.inventoryItemId.localeCompare(b.inventoryItemId)),
     );
   }
 
-  async bulkExport(employeeId: string, dto: BulkInventoryMovementDto) {
+  async bulkExport(employeeId: string, dto: BulkInventoryExportDto) {
     this.inventoryPolicy.assertBulkSize(dto.items.length);
     this.inventoryPolicy.assertNoDuplicateInventoryItems(
       dto.items.map((item) => item.inventoryItemId),
@@ -151,8 +162,8 @@ export class InventoryMovementService {
       note?: string | null;
     }>,
   ) {
-    const employee = await tx.employee.findUnique({
-      where: { id: employeeId },
+    const employee = await tx.employee.findFirst({
+      where: { id: employeeId, deletedAt: null },
       select: { isActive: true },
     });
     this.inventoryPolicy.assertActiveEmployee(employee);
@@ -174,7 +185,10 @@ export class InventoryMovementService {
           transactionId: result.transactionId,
           type: result.type,
           quantity: result.quantity.toString(),
+          unitCost: result.unitCost.toString(),
+          totalAmount: result.totalAmount.toString(),
           stockAfter: result.stockAfter.toString(),
+          averageUnitCost: result.averageUnitCost.toString(),
         })),
       },
     });
@@ -193,7 +207,7 @@ export class InventoryMovementService {
       note?: string | null;
     },
   ): Promise<InventoryMovementResult> {
-    await this.inventoryRepository.ensureActiveItemExists(
+    const item = await this.inventoryRepository.ensureActiveItemExists(
       movement.inventoryItemId,
       tx,
     );
@@ -202,16 +216,19 @@ export class InventoryMovementService {
       movement.quantity,
       'quantity',
     );
-    const unitPrice =
-      movement.unitPrice !== undefined
-        ? this.inventoryPolicy.toNonNegativeDecimal(
-            movement.unitPrice,
-            'unitPrice',
-          )
-        : null;
-    const totalAmount = unitPrice
-      ? unitPrice.mul(quantity).toDecimalPlaces(2)
-      : null;
+    let unitCost = item.averageUnitCost;
+    if (movement.type === InventoryTxType.IMPORT) {
+      if (movement.unitPrice === undefined) {
+        throw new BadRequestException(
+          'unitPrice is required for stock imports.',
+        );
+      }
+      unitCost = this.inventoryPolicy.toNonNegativeMoney(
+        movement.unitPrice,
+        'unitPrice',
+      );
+    }
+    const totalAmount = calculateInventoryValue(quantity, unitCost);
 
     if (movement.type === InventoryTxType.EXPORT) {
       const updated = await tx.inventoryItem.updateMany({
@@ -230,10 +247,17 @@ export class InventoryMovementService {
         );
       }
     } else {
+      const averageUnitCost = calculateWeightedAverageCost({
+        stock: item.stock,
+        averageUnitCost: item.averageUnitCost,
+        importedQuantity: quantity,
+        importedUnitCost: unitCost,
+      });
       await tx.inventoryItem.update({
         where: { id: movement.inventoryItemId },
         data: {
           stock: { increment: quantity },
+          averageUnitCost,
         },
       });
     }
@@ -243,7 +267,7 @@ export class InventoryMovementService {
         inventoryItemId: movement.inventoryItemId,
         type: movement.type,
         quantity,
-        unitPrice,
+        unitPrice: unitCost,
         totalAmount,
         transactionDate: movement.transactionDate ?? new Date(),
         note: movement.note ?? null,
@@ -251,9 +275,9 @@ export class InventoryMovementService {
       select: { id: true },
     });
 
-    const item = await tx.inventoryItem.findUnique({
-      where: { id: movement.inventoryItemId },
-      select: { stock: true },
+    const updatedItem = await tx.inventoryItem.findFirst({
+      where: { id: movement.inventoryItemId, deletedAt: null },
+      select: { stock: true, averageUnitCost: true },
     });
 
     return {
@@ -261,7 +285,10 @@ export class InventoryMovementService {
       transactionId: transaction.id,
       type: movement.type,
       quantity,
-      stockAfter: item?.stock ?? new Decimal(0),
+      unitCost,
+      totalAmount,
+      stockAfter: updatedItem?.stock ?? new Decimal(0),
+      averageUnitCost: updatedItem?.averageUnitCost ?? new Decimal(0),
     };
   }
 

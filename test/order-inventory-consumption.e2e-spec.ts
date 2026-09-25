@@ -66,6 +66,7 @@ describe('Order inventory consumption (e2e)', () => {
           data: {
             name: `Concurrent Ingredient ${suffix}`,
             stock: 10,
+            averageUnitCost: 20_000,
             categoryId: inventoryCategoryId,
             unitId,
           },
@@ -247,10 +248,10 @@ describe('Order inventory consumption (e2e)', () => {
         prisma.inventoryItem.findUniqueOrThrow({
           where: { id: concurrentInventoryItemId },
         }),
-        prisma.orderItemIngredientSnapshot.count({
+        prisma.orderItemIngredientSnapshot.findMany({
           where: { orderItemId: concurrentOrderItemId },
         }),
-        prisma.inventoryTransaction.count({
+        prisma.inventoryTransaction.findMany({
           where: { orderItemId: concurrentOrderItemId },
         }),
       ]);
@@ -258,7 +259,11 @@ describe('Order inventory consumption (e2e)', () => {
     expect(successfulClaims).toHaveLength(1);
     expect(orderItem.serveStatus).toBe(ServeStatus.COOKING);
     expect(inventoryItem.stock.toString()).toBe('8');
-    expect(snapshots).toBe(1);
-    expect(transactions).toBe(1);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.unitCost).toEqual(new Prisma.Decimal(20_000));
+    expect(snapshots[0]?.totalCost).toEqual(new Prisma.Decimal(40_000));
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]?.unitPrice).toEqual(new Prisma.Decimal(20_000));
+    expect(transactions[0]?.totalAmount).toEqual(new Prisma.Decimal(40_000));
   });
 });

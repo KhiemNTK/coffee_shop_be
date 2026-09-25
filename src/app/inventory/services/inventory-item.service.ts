@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InventoryTxType } from '@prisma/client';
+import {
+  InventoryTxType,
+  PurchaseReceiptStatus,
+  StocktakeStatus,
+} from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 import { OutboxService } from '../../durable/outbox.service';
@@ -12,6 +16,7 @@ import { INVENTORY_EVENTS } from '../events/inventory.events';
 import { InventoryPolicyService } from '../policies/inventory-policy.service';
 import { InventoryRepository } from '../repositories/inventory.repository';
 import { InventoryAuditService } from './inventory-audit.service';
+import { calculateInventoryValue } from './inventory-costing';
 import { InventoryTransactionService } from './inventory-transaction.service';
 
 @Injectable()
@@ -29,11 +34,25 @@ export class InventoryItemService {
       dto.stock !== undefined
         ? this.inventoryPolicy.toNonNegativeDecimal(dto.stock, 'stock')
         : new Decimal(0);
+    const initialUnitCost =
+      dto.initialUnitCost !== undefined
+        ? this.inventoryPolicy.toNonNegativeMoney(
+            dto.initialUnitCost,
+            'initialUnitCost',
+          )
+        : new Decimal(0);
+    const reorderPoint =
+      dto.reorderPoint !== undefined
+        ? this.inventoryPolicy.toNonNegativeDecimal(
+            dto.reorderPoint,
+            'reorderPoint',
+          )
+        : new Decimal(0);
 
     const item = await this.inventoryTransactionService.runSerializable(
       async (tx) => {
-        const employee = await tx.employee.findUnique({
-          where: { id: employeeId },
+        const employee = await tx.employee.findFirst({
+          where: { id: employeeId, deletedAt: null },
           select: { isActive: true },
         });
         this.inventoryPolicy.assertActiveEmployee(employee);
@@ -55,6 +74,8 @@ export class InventoryItemService {
             categoryId: dto.categoryId,
             unitId: dto.unitId,
             stock: initialStock,
+            averageUnitCost: initialUnitCost,
+            reorderPoint,
           },
           include: this.itemInclude,
         });
@@ -65,8 +86,11 @@ export class InventoryItemService {
               inventoryItemId: created.id,
               type: InventoryTxType.IMPORT,
               quantity: initialStock,
-              unitPrice: null,
-              totalAmount: null,
+              unitPrice: initialUnitCost,
+              totalAmount: calculateInventoryValue(
+                initialStock,
+                initialUnitCost,
+              ),
               transactionDate: new Date(),
               note: 'Initial stock',
             },
@@ -82,6 +106,8 @@ export class InventoryItemService {
             categoryId: created.categoryId,
             unitId: created.unitId,
             initialStock: initialStock.toString(),
+            initialUnitCost: initialUnitCost.toString(),
+            reorderPoint: reorderPoint.toString(),
           },
         });
         await this.enqueueItemEvent(
@@ -120,8 +146,8 @@ export class InventoryItemService {
   async update(id: string, employeeId: string, dto: UpdateInventoryItemDto) {
     const item = await this.inventoryTransactionService.runSerializable(
       async (tx) => {
-        const employee = await tx.employee.findUnique({
-          where: { id: employeeId },
+        const employee = await tx.employee.findFirst({
+          where: { id: employeeId, deletedAt: null },
           select: { isActive: true },
         });
         this.inventoryPolicy.assertActiveEmployee(employee);
@@ -150,9 +176,20 @@ export class InventoryItemService {
           });
         }
 
+        const { reorderPoint: nextReorderPoint, ...changes } = dto;
         const updated = await tx.inventoryItem.update({
           where: { id },
-          data: dto,
+          data: {
+            ...changes,
+            ...(nextReorderPoint !== undefined
+              ? {
+                  reorderPoint: this.inventoryPolicy.toNonNegativeDecimal(
+                    nextReorderPoint,
+                    'reorderPoint',
+                  ),
+                }
+              : {}),
+          },
           include: this.itemInclude,
         });
         await this.inventoryAuditService.log(tx, {
@@ -169,8 +206,8 @@ export class InventoryItemService {
 
   async remove(id: string, employeeId: string) {
     await this.inventoryTransactionService.runSerializable(async (tx) => {
-      const employee = await tx.employee.findUnique({
-        where: { id: employeeId },
+      const employee = await tx.employee.findFirst({
+        where: { id: employeeId, deletedAt: null },
         select: { isActive: true },
       });
       this.inventoryPolicy.assertActiveEmployee(employee);
@@ -179,11 +216,25 @@ export class InventoryItemService {
         id,
         tx,
       );
-      const activeRecipeLinks = await tx.menuItemIngredient.count({
-        where: { inventoryItemId: id },
-      });
+      const [activeRecipeLinks, draftReceiptLinks, draftStocktakeLinks] =
+        await Promise.all([
+          tx.menuItemIngredient.count({ where: { inventoryItemId: id } }),
+          tx.purchaseReceiptItem.count({
+            where: {
+              inventoryItemId: id,
+              purchaseReceipt: { status: PurchaseReceiptStatus.DRAFT },
+            },
+          }),
+          tx.stocktakeItem.count({
+            where: {
+              inventoryItemId: id,
+              stocktake: { status: StocktakeStatus.DRAFT },
+            },
+          }),
+        ]);
       this.inventoryPolicy.assertCanDeleteItem({
         activeRecipeLinks,
+        draftDocumentLinks: draftReceiptLinks + draftStocktakeLinks,
         stock: item.stock,
       });
 
@@ -213,8 +264,8 @@ export class InventoryItemService {
     tx: ExtendedPrismaTransactionClient,
     id: string,
   ) {
-    const item = await tx.inventoryItem.findUnique({
-      where: { id },
+    const item = await tx.inventoryItem.findFirst({
+      where: { id, deletedAt: null },
       select: { name: true },
     });
 

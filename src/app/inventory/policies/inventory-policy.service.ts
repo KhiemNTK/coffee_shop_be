@@ -27,6 +27,16 @@ export class InventoryPolicyService {
     return decimal;
   }
 
+  toNonNegativeMoney(value: string | number | Decimal, fieldName: string) {
+    const decimal = new Decimal(value).toDecimalPlaces(2);
+    if (!decimal.isFinite() || decimal.lt(0)) {
+      throw new BadRequestException(
+        `${fieldName} must be greater than or equal to 0.`,
+      );
+    }
+    return decimal;
+  }
+
   assertActiveEmployee(employee: { isActive: boolean } | null) {
     if (!employee?.isActive) {
       throw new BadRequestException('Employee is inactive or not found.');
@@ -72,14 +82,22 @@ export class InventoryPolicyService {
 
   assertCanDeleteItem({
     activeRecipeLinks,
+    draftDocumentLinks = 0,
     stock,
   }: {
     activeRecipeLinks: number;
+    draftDocumentLinks?: number;
     stock: Decimal;
   }) {
     if (activeRecipeLinks > 0) {
       throw new ConflictException(
         'Cannot delete inventory item while menu recipes still reference it.',
+      );
+    }
+
+    if (draftDocumentLinks > 0) {
+      throw new ConflictException(
+        'Cannot delete inventory item while draft inventory documents reference it.',
       );
     }
 

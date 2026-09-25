@@ -1,17 +1,33 @@
 import { Injectable } from '@nestjs/common';
 import {
-  BulkInventoryMovementDto,
+  BulkInventoryExportDto,
+  BulkInventoryImportDto,
+  CancelPurchaseReceiptDto,
+  CancelStocktakeDto,
   CreateInventoryCategoryDto,
   CreateInventoryItemDto,
+  CreatePurchaseReceiptDto,
+  CreateStocktakeDto,
+  CreateSupplierDto,
   CreateUnitDto,
   GetInventoryCategoriesDto,
   GetInventoryItemsDto,
+  GetInventoryReorderAlertsDto,
   GetInventoryTransactionsDto,
   GetInventoryWasteDto,
+  GetPurchaseReceiptsDto,
+  GetStocktakesDto,
+  GetSuppliersDto,
   GetUnitsDto,
-  InventoryMovementDto,
+  InventoryExportDto,
+  InventoryImportDto,
+  PostPurchaseReceiptDto,
+  PostStocktakeDto,
   UpdateInventoryCategoryDto,
   UpdateInventoryItemDto,
+  UpdatePurchaseReceiptDto,
+  UpdateStocktakeCountsDto,
+  UpdateSupplierDto,
   UpdateUnitDto,
 } from './dto';
 import { InventoryCategoryService } from './services/inventory-category.service';
@@ -19,6 +35,9 @@ import { InventoryItemService } from './services/inventory-item.service';
 import { InventoryMovementService } from './services/inventory-movement.service';
 import { InventoryQueryService } from './services/inventory-query.service';
 import { UnitService } from './services/unit.service';
+import { PurchaseReceiptService } from './services/purchase-receipt.service';
+import { StocktakeService } from './services/stocktake.service';
+import { SupplierService } from './services/supplier.service';
 
 @Injectable()
 export class InventoryService {
@@ -28,6 +47,9 @@ export class InventoryService {
     private readonly itemService: InventoryItemService,
     private readonly movementService: InventoryMovementService,
     private readonly queryService: InventoryQueryService,
+    private readonly supplierService: SupplierService,
+    private readonly purchaseReceiptService: PurchaseReceiptService,
+    private readonly stocktakeService: StocktakeService,
   ) {}
 
   createCategory(employeeId: string, dto: CreateInventoryCategoryDto) {
@@ -94,19 +116,19 @@ export class InventoryService {
     return this.itemService.remove(id, employeeId);
   }
 
-  importItem(id: string, employeeId: string, dto: InventoryMovementDto) {
+  importItem(id: string, employeeId: string, dto: InventoryImportDto) {
     return this.movementService.importItem(id, employeeId, dto);
   }
 
-  exportItem(id: string, employeeId: string, dto: InventoryMovementDto) {
+  exportItem(id: string, employeeId: string, dto: InventoryExportDto) {
     return this.movementService.exportItem(id, employeeId, dto);
   }
 
-  bulkImport(employeeId: string, dto: BulkInventoryMovementDto) {
+  bulkImport(employeeId: string, dto: BulkInventoryImportDto) {
     return this.movementService.bulkImport(employeeId, dto);
   }
 
-  bulkExport(employeeId: string, dto: BulkInventoryMovementDto) {
+  bulkExport(employeeId: string, dto: BulkInventoryExportDto) {
     return this.movementService.bulkExport(employeeId, dto);
   }
 
@@ -114,7 +136,95 @@ export class InventoryService {
     return this.queryService.findTransactions(query);
   }
 
+  getReorderAlerts(query: GetInventoryReorderAlertsDto) {
+    return this.queryService.findReorderAlerts(query);
+  }
+
   getWaste(query: GetInventoryWasteDto) {
     return this.queryService.findWaste(query);
+  }
+
+  createSupplier(employeeId: string, dto: CreateSupplierDto) {
+    return this.supplierService.create(employeeId, dto);
+  }
+
+  getSuppliers(query: GetSuppliersDto) {
+    return this.supplierService.findAll(query);
+  }
+
+  getSupplierById(id: string) {
+    return this.supplierService.findOne(id);
+  }
+
+  updateSupplier(id: string, employeeId: string, dto: UpdateSupplierDto) {
+    return this.supplierService.update(id, employeeId, dto);
+  }
+
+  deleteSupplier(id: string, employeeId: string) {
+    return this.supplierService.remove(id, employeeId);
+  }
+
+  createPurchaseReceipt(employeeId: string, dto: CreatePurchaseReceiptDto) {
+    return this.purchaseReceiptService.create(employeeId, dto);
+  }
+
+  getPurchaseReceipts(query: GetPurchaseReceiptsDto) {
+    return this.purchaseReceiptService.findAll(query);
+  }
+
+  getPurchaseReceiptById(id: string) {
+    return this.purchaseReceiptService.findOne(id);
+  }
+
+  updatePurchaseReceipt(
+    id: string,
+    employeeId: string,
+    dto: UpdatePurchaseReceiptDto,
+  ) {
+    return this.purchaseReceiptService.update(id, employeeId, dto);
+  }
+
+  postPurchaseReceipt(
+    id: string,
+    employeeId: string,
+    dto: PostPurchaseReceiptDto,
+  ) {
+    return this.purchaseReceiptService.post(id, employeeId, dto);
+  }
+
+  cancelPurchaseReceipt(
+    id: string,
+    employeeId: string,
+    dto: CancelPurchaseReceiptDto,
+  ) {
+    return this.purchaseReceiptService.cancel(id, employeeId, dto);
+  }
+
+  createStocktake(employeeId: string, dto: CreateStocktakeDto) {
+    return this.stocktakeService.create(employeeId, dto);
+  }
+
+  getStocktakes(query: GetStocktakesDto) {
+    return this.stocktakeService.findAll(query);
+  }
+
+  getStocktakeById(id: string) {
+    return this.stocktakeService.findOne(id);
+  }
+
+  updateStocktakeCounts(
+    id: string,
+    employeeId: string,
+    dto: UpdateStocktakeCountsDto,
+  ) {
+    return this.stocktakeService.updateCounts(id, employeeId, dto);
+  }
+
+  postStocktake(id: string, employeeId: string, dto: PostStocktakeDto) {
+    return this.stocktakeService.post(id, employeeId, dto);
+  }
+
+  cancelStocktake(id: string, employeeId: string, dto: CancelStocktakeDto) {
+    return this.stocktakeService.cancel(id, employeeId, dto);
   }
 }

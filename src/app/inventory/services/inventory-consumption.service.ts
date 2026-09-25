@@ -7,6 +7,7 @@ import type {
 } from '../../../common/types';
 import { OutboxService } from '../../durable/outbox.service';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
+import { calculateInventoryValue } from './inventory-costing';
 
 @Injectable()
 export class InventoryConsumptionService {
@@ -26,6 +27,7 @@ export class InventoryConsumptionService {
             id: true,
             name: true,
             deletedAt: true,
+            averageUnitCost: true,
             unit: { select: { name: true } },
           },
         },
@@ -38,13 +40,21 @@ export class InventoryConsumptionService {
       );
     }
 
-    const ingredients = recipe.map(({ inventoryItem, quantity }) => ({
-      inventoryItemId: inventoryItem.id,
-      inventoryItemName: inventoryItem.name,
-      unitName: inventoryItem.unit.name,
-      quantityPerItem: quantity,
-      totalQuantity: quantity.mul(orderItem.quantity),
-    }));
+    const ingredients = recipe.map(({ inventoryItem, quantity }) => {
+      const totalQuantity = quantity.mul(orderItem.quantity);
+      return {
+        inventoryItemId: inventoryItem.id,
+        inventoryItemName: inventoryItem.name,
+        unitName: inventoryItem.unit.name,
+        quantityPerItem: quantity,
+        totalQuantity,
+        unitCost: inventoryItem.averageUnitCost,
+        totalCost: calculateInventoryValue(
+          totalQuantity,
+          inventoryItem.averageUnitCost,
+        ),
+      };
+    });
 
     for (const ingredient of ingredients) {
       const updated = await tx.inventoryItem.updateMany({
@@ -79,8 +89,8 @@ export class InventoryConsumptionService {
         orderItemId: orderItem.id,
         type: InventoryTxType.EXPORT,
         quantity: ingredient.totalQuantity,
-        unitPrice: null,
-        totalAmount: null,
+        unitPrice: ingredient.unitCost,
+        totalAmount: ingredient.totalCost,
         transactionDate,
         note: 'Order recipe consumption',
       })),
@@ -91,7 +101,7 @@ export class InventoryConsumptionService {
       where: {
         id: { in: ingredients.map(({ inventoryItemId }) => inventoryItemId) },
       },
-      select: { id: true, stock: true },
+      select: { id: true, stock: true, averageUnitCost: true },
     });
     const transactionIds = new Map(
       transactions.map((transaction) => [
@@ -99,12 +109,12 @@ export class InventoryConsumptionService {
         transaction.id,
       ]),
     );
-    const stocks = new Map(stockRows.map((item) => [item.id, item.stock]));
+    const stockByItemId = new Map(stockRows.map((item) => [item.id, item]));
 
     const movements = ingredients.map((ingredient) => {
       const transactionId = transactionIds.get(ingredient.inventoryItemId);
-      const stockAfter = stocks.get(ingredient.inventoryItemId);
-      if (!transactionId || !stockAfter) {
+      const inventoryItem = stockByItemId.get(ingredient.inventoryItemId);
+      if (!transactionId || !inventoryItem) {
         throw new ConflictException(
           'Inventory consumption could not be persisted consistently.',
         );
@@ -115,7 +125,10 @@ export class InventoryConsumptionService {
         transactionId,
         type: InventoryTxType.EXPORT,
         quantity: ingredient.totalQuantity,
-        stockAfter,
+        unitCost: ingredient.unitCost,
+        totalAmount: ingredient.totalCost,
+        stockAfter: inventoryItem.stock,
+        averageUnitCost: inventoryItem.averageUnitCost,
       };
     });
     await this.outbox.enqueue(tx, {

@@ -5,6 +5,9 @@ import { InventoryItemService } from './services/inventory-item.service';
 import { InventoryMovementService } from './services/inventory-movement.service';
 import { InventoryQueryService } from './services/inventory-query.service';
 import { UnitService } from './services/unit.service';
+import { PurchaseReceiptService } from './services/purchase-receipt.service';
+import { StocktakeService } from './services/stocktake.service';
+import { SupplierService } from './services/supplier.service';
 
 describe('InventoryService', () => {
   let service: InventoryService;
@@ -18,6 +21,9 @@ describe('InventoryService', () => {
         { provide: InventoryItemService, useValue: {} },
         { provide: InventoryMovementService, useValue: {} },
         { provide: InventoryQueryService, useValue: {} },
+        { provide: SupplierService, useValue: {} },
+        { provide: PurchaseReceiptService, useValue: {} },
+        { provide: StocktakeService, useValue: {} },
       ],
     }).compile();
 

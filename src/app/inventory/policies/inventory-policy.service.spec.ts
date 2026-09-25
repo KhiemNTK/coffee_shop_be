@@ -19,6 +19,12 @@ describe('InventoryPolicyService', () => {
     );
   });
 
+  it('normalizes money to two decimal places', () => {
+    expect(service.toNonNegativeMoney('12.345', 'unitPrice').toString()).toBe(
+      '12.35',
+    );
+  });
+
   it('rejects duplicate item IDs in bulk movements', () => {
     expect(() =>
       service.assertNoDuplicateInventoryItems(['item-1', 'item-1']),

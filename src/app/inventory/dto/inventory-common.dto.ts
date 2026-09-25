@@ -28,28 +28,49 @@ export const InventoryPaginationSchema = z.object({
   keyword: z.string().trim().min(1).max(120).optional(),
 });
 
-export const IdempotencyKeySchema = z
+export const RequiredIdempotencyKeySchema = z
   .string()
   .trim()
   .min(8, 'Idempotency key must be at least 8 characters')
-  .max(120, 'Idempotency key must not exceed 120 characters')
-  .optional();
+  .max(120, 'Idempotency key must not exceed 120 characters');
+
+export const IdempotencyKeySchema = RequiredIdempotencyKeySchema.optional();
+
+export const MoneyInputSchema = z.union([
+  z
+    .string()
+    .trim()
+    .regex(/^\d+(\.\d{1,2})?$/, 'Invalid money value'),
+  z.number().nonnegative(),
+]);
 
 const InventoryMovementBaseSchema = z.object({
   quantity: PositiveInventoryDecimalInputSchema,
-  unitPrice: InventoryDecimalInputSchema.optional(),
   transactionDate: OptionalDateSchema,
-  note: z.string().trim().max(500).optional(),
+  note: z.string().trim().min(3).max(500),
 });
 
-export const InventoryMovementSchema = InventoryMovementBaseSchema.extend({
+export const InventoryImportSchema = InventoryMovementBaseSchema.extend({
+  unitPrice: MoneyInputSchema,
   idempotencyKey: IdempotencyKeySchema,
 });
 
-export const BulkInventoryMovementItemSchema =
-  InventoryMovementBaseSchema.extend({
+export const InventoryExportSchema = InventoryMovementBaseSchema.extend({
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export const BulkInventoryImportItemSchema = InventoryMovementBaseSchema.extend(
+  {
     inventoryItemId: z.uuid('Invalid UUID for inventory item'),
-  });
+    unitPrice: MoneyInputSchema,
+  },
+);
+
+export const BulkInventoryExportItemSchema = InventoryMovementBaseSchema.extend(
+  {
+    inventoryItemId: z.uuid('Invalid UUID for inventory item'),
+  },
+);
 
 export const InventoryTransactionsQuerySchema =
   InventoryPaginationSchema.extend({
@@ -79,14 +100,24 @@ export const InventoryWasteQuerySchema = InventoryPaginationSchema.pick({
     },
   );
 
-export class InventoryMovementDto extends createZodDto(
-  InventoryMovementSchema,
-) {}
+export class InventoryImportDto extends createZodDto(InventoryImportSchema) {}
 
-export class BulkInventoryMovementDto extends createZodDto(
+export class InventoryExportDto extends createZodDto(InventoryExportSchema) {}
+
+export class BulkInventoryImportDto extends createZodDto(
   z.object({
     items: z
-      .array(BulkInventoryMovementItemSchema)
+      .array(BulkInventoryImportItemSchema)
+      .min(1, 'At least one inventory movement is required')
+      .max(100, 'Cannot process more than 100 inventory movements'),
+    idempotencyKey: IdempotencyKeySchema,
+  }),
+) {}
+
+export class BulkInventoryExportDto extends createZodDto(
+  z.object({
+    items: z
+      .array(BulkInventoryExportItemSchema)
       .min(1, 'At least one inventory movement is required')
       .max(100, 'Cannot process more than 100 inventory movements'),
     idempotencyKey: IdempotencyKeySchema,

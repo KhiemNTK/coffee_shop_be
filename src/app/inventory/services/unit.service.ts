@@ -132,8 +132,8 @@ export class UnitService {
     tx: ExtendedPrismaTransactionClient,
     employeeId: string,
   ) {
-    const employee = await tx.employee.findUnique({
-      where: { id: employeeId },
+    const employee = await tx.employee.findFirst({
+      where: { id: employeeId, deletedAt: null },
       select: { isActive: true },
     });
     this.inventoryPolicy.assertActiveEmployee(employee);

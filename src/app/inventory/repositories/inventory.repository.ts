@@ -26,8 +26,8 @@ export class InventoryRepository {
     id: string,
     tx: ExtendedPrismaTransactionClient = this.prisma,
   ) {
-    const category = await tx.inventoryCategory.findUnique({
-      where: { id },
+    const category = await tx.inventoryCategory.findFirst({
+      where: { id, deletedAt: null },
       select: { id: true },
     });
 
@@ -44,8 +44,8 @@ export class InventoryRepository {
     id: string,
     tx: ExtendedPrismaTransactionClient = this.prisma,
   ) {
-    const unit = await tx.unit.findUnique({
-      where: { id },
+    const unit = await tx.unit.findFirst({
+      where: { id, deletedAt: null },
       select: { id: true },
     });
 
@@ -60,13 +60,17 @@ export class InventoryRepository {
     id: string,
     tx: ExtendedPrismaTransactionClient = this.prisma,
   ) {
-    const item = await tx.inventoryItem.findUnique({
-      where: { id },
+    const item = await tx.inventoryItem.findFirst({
+      where: { id, deletedAt: null },
       select: {
         id: true,
+        name: true,
         stock: true,
+        averageUnitCost: true,
+        reorderPoint: true,
         categoryId: true,
         unitId: true,
+        unit: { select: { name: true } },
       },
     });
 

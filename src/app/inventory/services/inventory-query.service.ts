@@ -1,13 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { InventoryTxType, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
+import type { InventoryReorderAlertRow } from '../../../common/types';
 import { PaginationUtilService } from '../../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../../common/utils/query-util/query-util.service';
 import {
   GetInventoryTransactionsDto,
   GetInventoryWasteDto,
 } from '../dto/inventory-common.dto';
-import { GetInventoryItemsDto } from '../dto/inventory-item.dto';
+import {
+  GetInventoryItemsDto,
+  GetInventoryReorderAlertsDto,
+} from '../dto/inventory-item.dto';
 import { InventoryRepository } from '../repositories/inventory.repository';
 
 @Injectable()
@@ -129,6 +133,58 @@ export class InventoryQueryService {
         take: paging.itemPerPage,
         orderBy: [{ transactionDate: 'desc' }, { id: 'desc' }],
       });
+
+    return paging.format(list);
+  }
+
+  async findReorderAlerts({
+    page,
+    itemPerPage,
+    keyword,
+    categoryId,
+  }: GetInventoryReorderAlertsDto) {
+    const filters = [
+      Prisma.sql`item."deletedAt" IS NULL`,
+      Prisma.sql`item."reorderPoint" > 0`,
+      Prisma.sql`item."stock" <= item."reorderPoint"`,
+      ...(keyword ? [Prisma.sql`item."name" ILIKE ${`%${keyword}%`}`] : []),
+      ...(categoryId ? [Prisma.sql`item."categoryId" = ${categoryId}`] : []),
+    ];
+    const where = Prisma.join(filters, ' AND ');
+    const [countRow] = await this.inventoryRepository.client.$queryRaw<
+      Array<{ count: bigint }>
+    >(Prisma.sql`
+      SELECT COUNT(*)::bigint AS "count"
+      FROM "InventoryItem" item
+      WHERE ${where}
+    `);
+    const paging = this.paginationUtilService.paging({
+      page,
+      itemPerPage,
+      totalItems: Number(countRow?.count ?? 0),
+    });
+    const list = await this.inventoryRepository.client.$queryRaw<
+      InventoryReorderAlertRow[]
+    >(Prisma.sql`
+      SELECT
+        item."id",
+        item."name",
+        item."stock",
+        item."reorderPoint",
+        item."reorderPoint" - item."stock" AS "shortageQuantity",
+        item."averageUnitCost",
+        unit."name" AS "unitName",
+        category."name" AS "categoryName"
+      FROM "InventoryItem" item
+      JOIN "Unit" unit ON unit."id" = item."unitId"
+      JOIN "InventoryCategory" category ON category."id" = item."categoryId"
+      WHERE ${where}
+      ORDER BY
+        (item."stock" / NULLIF(item."reorderPoint", 0)) ASC,
+        item."name" ASC
+      LIMIT ${paging.itemPerPage}
+      OFFSET ${paging.skip}
+    `);
 
     return paging.format(list);
   }

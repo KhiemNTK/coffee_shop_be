@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
+import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 
 @Injectable()
 export class InventoryAuditService {
   async log(
-    tx: any,
+    tx: ExtendedPrismaTransactionClient,
     {
       employeeId,
       actionType,
@@ -18,7 +20,7 @@ export class InventoryAuditService {
       data: {
         employeeId,
         actionType,
-        details,
+        details: JSON.parse(JSON.stringify(details)) as Prisma.InputJsonValue,
       },
     });
   }

@@ -13,6 +13,9 @@ import { InventoryQueryService } from './services/inventory-query.service';
 import { InventoryTransactionService } from './services/inventory-transaction.service';
 import { UnitService } from './services/unit.service';
 import { InventoryConsumptionService } from './services/inventory-consumption.service';
+import { PurchaseReceiptService } from './services/purchase-receipt.service';
+import { StocktakeService } from './services/stocktake.service';
+import { SupplierService } from './services/supplier.service';
 
 @Module({
   imports: [PaginationUtilModule, QueryUtilModule],
@@ -29,6 +32,9 @@ import { InventoryConsumptionService } from './services/inventory-consumption.se
     InventoryMovementService,
     InventoryConsumptionService,
     InventoryQueryService,
+    SupplierService,
+    PurchaseReceiptService,
+    StocktakeService,
   ],
   exports: [
     InventoryService,

@@ -33,6 +33,7 @@ describe('InventoryConsumptionService', () => {
           id: 'coffee-id',
           name: 'Coffee beans',
           deletedAt: null,
+          averageUnitCost: new Prisma.Decimal('200000'),
           unit: { name: 'kg' },
         },
       },
@@ -42,6 +43,7 @@ describe('InventoryConsumptionService', () => {
           id: 'milk-id',
           name: 'Milk',
           deletedAt: null,
+          averageUnitCost: new Prisma.Decimal('30000'),
           unit: { name: 'l' },
         },
       },
@@ -52,8 +54,16 @@ describe('InventoryConsumptionService', () => {
       { id: 'milk-tx', inventoryItemId: 'milk-id' },
     ]);
     tx.inventoryItem.findMany.mockResolvedValue([
-      { id: 'coffee-id', stock: new Prisma.Decimal('9.5') },
-      { id: 'milk-id', stock: new Prisma.Decimal('4.8') },
+      {
+        id: 'coffee-id',
+        stock: new Prisma.Decimal('9.5'),
+        averageUnitCost: new Prisma.Decimal('200000'),
+      },
+      {
+        id: 'milk-id',
+        stock: new Prisma.Decimal('4.8'),
+        averageUnitCost: new Prisma.Decimal('30000'),
+      },
     ]);
 
     const movements = await service.consumeOrderItem(tx as never, {
@@ -78,6 +88,8 @@ describe('InventoryConsumptionService', () => {
           inventoryItemName: 'Coffee beans',
           unitName: 'kg',
           totalQuantity: new Prisma.Decimal('0.5'),
+          unitCost: new Prisma.Decimal('200000'),
+          totalCost: new Prisma.Decimal('100000'),
         }),
         expect.objectContaining({
           orderItemId: 'order-item-id',
@@ -94,6 +106,8 @@ describe('InventoryConsumptionService', () => {
             inventoryItemId: 'coffee-id',
             type: InventoryTxType.EXPORT,
             quantity: new Prisma.Decimal('0.5'),
+            unitPrice: new Prisma.Decimal('200000'),
+            totalAmount: new Prisma.Decimal('100000'),
           }),
         ]),
       }),
@@ -102,6 +116,8 @@ describe('InventoryConsumptionService', () => {
       expect.objectContaining({
         inventoryItemId: 'coffee-id',
         transactionId: 'coffee-tx',
+        unitCost: new Prisma.Decimal('200000'),
+        totalAmount: new Prisma.Decimal('100000'),
         stockAfter: new Prisma.Decimal('9.5'),
       }),
       expect.objectContaining({
@@ -127,6 +143,7 @@ describe('InventoryConsumptionService', () => {
           id: 'coffee-id',
           name: 'Coffee beans',
           deletedAt: null,
+          averageUnitCost: new Prisma.Decimal('200000'),
           unit: { name: 'kg' },
         },
       },
