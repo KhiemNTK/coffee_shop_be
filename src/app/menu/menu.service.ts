@@ -231,6 +231,128 @@ export class MenuService {
     return paging.format(list);
   }
 
+  getPublicCategories() {
+    return this.prisma.menuCategory.findMany({
+      where: {
+        deletedAt: null,
+        menuItems: { some: { deletedAt: null, isAvailable: true } },
+      },
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    });
+  }
+
+  async getPublicItems(query: GetMenuItemsDto) {
+    const where: Prisma.MenuItemWhereInput = {
+      deletedAt: null,
+      isAvailable: true,
+      category: { deletedAt: null },
+      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+      ...(query.keyword
+        ? {
+            name: {
+              contains: query.keyword,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          }
+        : {}),
+    };
+    const totalItems = await this.prisma.menuItem.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const list = await this.prisma.menuItem.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        price: true,
+        category: { select: { id: true, name: true } },
+      },
+    });
+    return paging.format(list);
+  }
+
+  async getItemStockStatus(query: GetMenuItemsDto) {
+    const where: Prisma.MenuItemWhereInput = {
+      deletedAt: null,
+      category: { deletedAt: null },
+      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+      ...(query.isAvailable !== undefined
+        ? { isAvailable: query.isAvailable }
+        : {}),
+      ...(query.keyword
+        ? {
+            name: {
+              contains: query.keyword,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          }
+        : {}),
+    };
+    const totalItems = await this.prisma.menuItem.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const items = await this.prisma.menuItem.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        isAvailable: true,
+        ingredients: {
+          select: {
+            quantity: true,
+            inventoryItem: {
+              select: {
+                id: true,
+                name: true,
+                stock: true,
+                reorderPoint: true,
+                deletedAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return paging.format(
+      items.map((item) => {
+        const insufficient = item.ingredients.filter(
+          ({ quantity, inventoryItem }) =>
+            inventoryItem.deletedAt || inventoryItem.stock.lt(quantity),
+        );
+        const low = item.ingredients.filter(
+          ({ inventoryItem }) =>
+            !inventoryItem.deletedAt &&
+            inventoryItem.stock.lte(inventoryItem.reorderPoint),
+        );
+        return {
+          id: item.id,
+          name: item.name,
+          isAvailable: item.isAvailable,
+          stockStatus:
+            item.ingredients.length === 0
+              ? 'UNTRACKED'
+              : insufficient.length > 0
+                ? 'INSUFFICIENT'
+                : low.length > 0
+                  ? 'LOW'
+                  : 'OK',
+          atRiskIngredients: (insufficient.length > 0 ? insufficient : low).map(
+            ({ inventoryItem }) => ({
+              id: inventoryItem.id,
+              name: inventoryItem.name,
+            }),
+          ),
+        };
+      }),
+    );
+  }
+
   async getItemById(id: string) {
     const item = await this.prisma.menuItem.findFirst({
       where: { id, deletedAt: null, category: { deletedAt: null } },

@@ -73,6 +73,99 @@ describe('MenuService', () => {
     expect(tx.actionLog.create).not.toHaveBeenCalled();
   });
 
+  it('publishes only available items with public fields', async () => {
+    prisma.menuItem.count.mockResolvedValue(1);
+    prisma.menuItem.findMany.mockResolvedValue([
+      { id: 'menu-item-id', name: 'Espresso', price: '30000' },
+    ]);
+
+    await service.getPublicItems({ page: 1, itemPerPage: 20 });
+
+    expect(prisma.menuItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ isAvailable: true, deletedAt: null }),
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          category: { select: { id: true, name: true } },
+        },
+      }),
+    );
+  });
+
+  it('reports recipe stock risk without reserving or changing stock', async () => {
+    prisma.menuItem.count.mockResolvedValue(1);
+    prisma.menuItem.findMany.mockResolvedValue([
+      {
+        id: 'menu-item-id',
+        name: 'Espresso',
+        isAvailable: true,
+        ingredients: [
+          {
+            quantity: new Prisma.Decimal('2'),
+            inventoryItem: {
+              id: 'inventory-id',
+              name: 'Coffee beans',
+              stock: new Prisma.Decimal('1'),
+              reorderPoint: new Prisma.Decimal('5'),
+              deletedAt: null,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const result = await service.getItemStockStatus({
+      page: 1,
+      itemPerPage: 20,
+    });
+
+    expect(result.list[0]).toEqual({
+      id: 'menu-item-id',
+      name: 'Espresso',
+      isAvailable: true,
+      stockStatus: 'INSUFFICIENT',
+      atRiskIngredients: [{ id: 'inventory-id', name: 'Coffee beans' }],
+    });
+    expect(prisma.menuItem.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes an untracked recipe from low stock', async () => {
+    prisma.menuItem.count.mockResolvedValue(2);
+    prisma.menuItem.findMany.mockResolvedValue([
+      { id: 'untracked', name: 'Tea', isAvailable: true, ingredients: [] },
+      {
+        id: 'low',
+        name: 'Latte',
+        isAvailable: true,
+        ingredients: [
+          {
+            quantity: new Prisma.Decimal('1'),
+            inventoryItem: {
+              id: 'milk-id',
+              name: 'Milk',
+              stock: new Prisma.Decimal('5'),
+              reorderPoint: new Prisma.Decimal('5'),
+              deletedAt: null,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const result = await service.getItemStockStatus({
+      page: 1,
+      itemPerPage: 20,
+    });
+
+    expect(result.list.map((item) => item.stockStatus)).toEqual([
+      'UNTRACKED',
+      'LOW',
+    ]);
+  });
+
   it('rejects replacing a recipe when an inventory item is inactive or missing', async () => {
     tx.inventoryItem.findMany.mockResolvedValue([]);
 

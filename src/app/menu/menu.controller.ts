@@ -14,6 +14,7 @@ import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import { SkipAuth } from '../auth/auth.decorator';
 import {
   CreateMenuCategoryDto,
   CreateMenuItemDto,
@@ -30,6 +31,18 @@ import { MenuService } from './menu.service';
 @Controller('menu')
 export class MenuController {
   constructor(private readonly menuService: MenuService) {}
+
+  @Get('public/categories')
+  @SkipAuth()
+  getPublicCategories() {
+    return this.menuService.getPublicCategories();
+  }
+
+  @Get('public/items')
+  @SkipAuth()
+  getPublicItems(@Query() query: GetMenuItemsDto) {
+    return this.menuService.getPublicItems(query);
+  }
 
   @Post('categories')
   @RequirePermissions(PermissionKeys.MENU_CREATE)
@@ -84,6 +97,12 @@ export class MenuController {
   @RequirePermissions(PermissionKeys.MENU_READ)
   getItems(@Query() query: GetMenuItemsDto) {
     return this.menuService.getItems(query);
+  }
+
+  @Get('items/stock-status')
+  @RequirePermissions(PermissionKeys.MENU_READ)
+  getItemStockStatus(@Query() query: GetMenuItemsDto) {
+    return this.menuService.getItemStockStatus(query);
   }
 
   @Get('items/:id')
