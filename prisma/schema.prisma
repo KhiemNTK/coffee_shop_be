@@ -186,6 +186,13 @@ enum ReservationStatus {
   NO_SHOW
 }
 
+enum ReservationRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
 enum EquipmentStatus {
   IN_USE // Đang sử dụng
   MAINTENANCE // Đang bảo trì / Sửa chữa
@@ -497,39 +504,40 @@ model Employee {
   positionId String // MaChucVu
   position   Position @relation(fields: [positionId], references: [id])
 
-  employeeRoles             EmployeeRole[]
-  orderSessions             OrderSession[]
-  invoices                  Invoice[]
-  actionLogs                ActionLog[]
-  cashTransactions          CashTransaction[]
-  reservations              Reservation[]
-  equipment                 Equipment[]
-  equipmentEvents           EquipmentLifecycleEvent[]
-  printSetting              PrintSetting?
-  shifts                    CashierShift[]
-  authSessions              AuthSession[]
-  passwordResetTokens       PasswordResetToken[]
-  inventoryWastes           InventoryWaste[]
-  createdPurchaseReceipts   PurchaseReceipt[]               @relation("PurchaseReceiptCreatedBy")
-  postedPurchaseReceipts    PurchaseReceipt[]               @relation("PurchaseReceiptPostedBy")
-  cancelledPurchaseReceipts PurchaseReceipt[]               @relation("PurchaseReceiptCancelledBy")
-  createdStocktakes         Stocktake[]                     @relation("StocktakeCreatedBy")
-  postedStocktakes          Stocktake[]                     @relation("StocktakePostedBy")
-  cancelledStocktakes       Stocktake[]                     @relation("StocktakeCancelledBy")
-  updatedSettings           SystemSetting[]                 @relation("SystemSettingUpdatedBy")
-  settingRevisions          SystemSettingRevision[]         @relation("SystemSettingRevisionEmployee")
-  requestedCashExpenses     CashExpenseRequest[]            @relation("CashExpenseRequestedBy")
-  resolvedCashExpenses      CashExpenseRequest[]            @relation("CashExpenseResolvedBy")
-  requestedCashHandovers    CashHandover[]                  @relation("CashHandoverRequestedBy")
-  resolvedCashHandovers     CashHandover[]                  @relation("CashHandoverResolvedBy")
-  settledCashHandovers      CashHandover[]                  @relation("CashHandoverSettledBy")
-  importedBankStatements    BankStatementImport[]
-  paymentAttempts           PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
-  requestedPaymentRefunds   PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
-  resolvedPaymentIncidents  PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
-  idempotencyRequests       IdempotencyRequest[]
-  requestedPrintJobs        PrintJob[]                      @relation("PrintJobRequestedBy")
-  dailySalesCloses           DailySalesClose[]
+  employeeRoles               EmployeeRole[]
+  orderSessions               OrderSession[]
+  invoices                    Invoice[]
+  actionLogs                  ActionLog[]
+  cashTransactions            CashTransaction[]
+  reservations                Reservation[]
+  reviewedReservationRequests ReservationRequest[]
+  equipment                   Equipment[]
+  equipmentEvents             EquipmentLifecycleEvent[]
+  printSetting                PrintSetting?
+  shifts                      CashierShift[]
+  authSessions                AuthSession[]
+  passwordResetTokens         PasswordResetToken[]
+  inventoryWastes             InventoryWaste[]
+  createdPurchaseReceipts     PurchaseReceipt[]               @relation("PurchaseReceiptCreatedBy")
+  postedPurchaseReceipts      PurchaseReceipt[]               @relation("PurchaseReceiptPostedBy")
+  cancelledPurchaseReceipts   PurchaseReceipt[]               @relation("PurchaseReceiptCancelledBy")
+  createdStocktakes           Stocktake[]                     @relation("StocktakeCreatedBy")
+  postedStocktakes            Stocktake[]                     @relation("StocktakePostedBy")
+  cancelledStocktakes         Stocktake[]                     @relation("StocktakeCancelledBy")
+  updatedSettings             SystemSetting[]                 @relation("SystemSettingUpdatedBy")
+  settingRevisions            SystemSettingRevision[]         @relation("SystemSettingRevisionEmployee")
+  requestedCashExpenses       CashExpenseRequest[]            @relation("CashExpenseRequestedBy")
+  resolvedCashExpenses        CashExpenseRequest[]            @relation("CashExpenseResolvedBy")
+  requestedCashHandovers      CashHandover[]                  @relation("CashHandoverRequestedBy")
+  resolvedCashHandovers       CashHandover[]                  @relation("CashHandoverResolvedBy")
+  settledCashHandovers        CashHandover[]                  @relation("CashHandoverSettledBy")
+  importedBankStatements      BankStatementImport[]
+  paymentAttempts             PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
+  requestedPaymentRefunds     PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
+  resolvedPaymentIncidents    PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
+  idempotencyRequests         IdempotencyRequest[]
+  requestedPrintJobs          PrintJob[]                      @relation("PrintJobRequestedBy")
+  dailySalesCloses            DailySalesClose[]
 }
 
 model AuthSession {
@@ -638,12 +646,35 @@ model Reservation {
   employeeId String // MaNhanVien
   employee   Employee @relation(fields: [employeeId], references: [id])
 
-  orderSessionId String?       @unique
-  orderSession   OrderSession? @relation(fields: [orderSessionId], references: [id], onDelete: SetNull)
+  orderSessionId String?             @unique
+  orderSession   OrderSession?       @relation(fields: [orderSessionId], references: [id], onDelete: SetNull)
+  publicRequest  ReservationRequest?
 
   @@index([status, startsAt])
   @@index([tableId, startsAt])
   @@index([phoneNumber])
+}
+
+model ReservationRequest {
+  id              String                   @id @default(uuid())
+  customerName    String
+  phoneNumber     String
+  startsAt        DateTime
+  endsAt          DateTime
+  guestCount      Int
+  notes           String?
+  status          ReservationRequestStatus @default(PENDING)
+  rejectionReason String?
+  createdAt       DateTime                 @default(now())
+  reviewedAt      DateTime?
+
+  reviewedById  String?
+  reviewedBy    Employee?    @relation(fields: [reviewedById], references: [id], onDelete: Restrict)
+  reservationId Int?         @unique
+  reservation   Reservation? @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+
+  @@index([status, startsAt, createdAt])
+  @@index([phoneNumber, createdAt])
 }
 
 model CashierShift {
@@ -1568,4 +1599,5 @@ model ActionLog {
 
   @@index([requestId])
   @@index([employeeId, createdAt])
+  @@index([createdAt, id])
 }
