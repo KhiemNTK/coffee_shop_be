@@ -41,6 +41,7 @@ enum SessionStatus {
 enum ServeStatus {
   PENDING
   COOKING
+  READY
   SERVED
   CANCELLED
 }
@@ -1002,8 +1003,9 @@ model OrderItem {
   priceAtTime Decimal @db.Decimal(18, 2) // GiaTien tai thoi diem goi
   note        String? // Ghi chu (VD: Khong hanh)
 
-  serveStatus ServeStatus @default(PENDING) // TrangThaiBep: PENDING, COOKING, SERVED, CANCELLED
+  serveStatus ServeStatus @default(PENDING) // PENDING, COOKING, READY, SERVED, CANCELLED
   isPaid      Boolean     @default(false) // Danh dau mon da duoc thanh toan chua
+  readyAt     DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

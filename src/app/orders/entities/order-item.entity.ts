@@ -11,6 +11,7 @@ export class OrderItemEntity implements PrismaOrderItem {
   note!: string | null;
   serveStatus!: ServeStatus;
   isPaid!: boolean;
+  readyAt!: Date | null;
   createdAt!: Date;
   updatedAt!: Date;
   orderSessionId!: string;
