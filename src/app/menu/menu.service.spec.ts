@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { MenuService } from './menu.service';
@@ -61,6 +61,8 @@ describe('MenuService', () => {
     };
     service = new MenuService(prisma as never, new PaginationUtilService());
   });
+
+  afterEach(() => jest.restoreAllMocks());
 
   it('blocks deleting a category that still has active menu items', async () => {
     tx.menuItem.count.mockResolvedValue(1);
@@ -285,6 +287,7 @@ describe('MenuService', () => {
   });
 
   it('retries serialization conflicts', async () => {
+    const warning = jest.spyOn(Logger, 'warn').mockImplementation();
     const serializationConflict = new Prisma.PrismaClientKnownRequestError(
       'Serialization conflict',
       { code: 'P2034', clientVersion: 'test' },
@@ -304,5 +307,9 @@ describe('MenuService', () => {
     });
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith(
+      'MenuService conflict. Retrying attempt 2/3',
+      'MenuService',
+    );
   });
 });

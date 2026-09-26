@@ -3,7 +3,6 @@ import {
   ConflictException,
   Inject,
   Injectable,
-  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -12,6 +11,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
@@ -27,9 +27,6 @@ import {
 
 @Injectable()
 export class MenuService {
-  private readonly logger = new Logger(MenuService.name);
-  private readonly maxTransactionRetries = 3;
-
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
@@ -696,33 +693,8 @@ export class MenuService {
   private async runSerializable<T>(
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ): Promise<T> {
-    for (let attempt = 1; attempt <= this.maxTransactionRetries; attempt++) {
-      try {
-        return await this.prisma.$transaction(callback, {
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        });
-      } catch (error) {
-        if (
-          this.isSerializationConflict(error) &&
-          attempt < this.maxTransactionRetries
-        ) {
-          this.logger.warn(
-            `Menu transaction conflict. Retrying attempt ${attempt + 1}/${this.maxTransactionRetries}`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    throw new ConflictException('Menu transaction failed. Please try again.');
-  }
-
-  private isSerializationConflict(error: unknown) {
-    return (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2034'
-    );
+    return runSerializableTransaction(this.prisma, callback, {
+      loggerContext: MenuService.name,
+    });
   }
 }
