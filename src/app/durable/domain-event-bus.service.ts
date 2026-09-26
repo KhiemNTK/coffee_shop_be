@@ -1,10 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
 export type DomainEventListener = (payload: unknown) => void | Promise<void>;
 
 @Injectable()
 export class DomainEventBusService {
-  private readonly logger = new Logger(DomainEventBusService.name);
   private readonly listeners = new Map<string, Set<DomainEventListener>>();
 
   on(eventName: string, listener: DomainEventListener) {
@@ -27,7 +26,6 @@ export class DomainEventBusService {
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
     if (failure) {
-      this.logger.error(`Domain event listener failed for ${eventName}`);
       throw failure.reason;
     }
   }

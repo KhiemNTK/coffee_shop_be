@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, Logger } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
   PaymentProvider,
@@ -131,6 +131,8 @@ describe('PaymentRefundsService', () => {
     });
   });
 
+  afterEach(() => jest.restoreAllMocks());
+
   it('reserves and completes a full refund without exceeding the payment', async () => {
     const result = await service.createRefund('attempt-id', 'employee-id', {
       amount: '100000.00',
@@ -163,6 +165,7 @@ describe('PaymentRefundsService', () => {
   });
 
   it('does not retry an uncertain provider refund automatically', async () => {
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     vnpay.refundTransaction.mockRejectedValue(new Error('timeout'));
 
     const result = await service.createRefund('attempt-id', 'employee-id', {
@@ -174,6 +177,9 @@ describe('PaymentRefundsService', () => {
     expect(result.status).toBe(PaymentRefundStatus.REQUIRES_REVIEW);
     expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
     expect(vnpay.refundTransaction).toHaveBeenCalledTimes(1);
+    expect(errorLog).toHaveBeenCalledWith(
+      'VNPay refund request refund-id is uncertain.',
+    );
   });
 
   it('quarantines a signed provider response for another transaction', async () => {

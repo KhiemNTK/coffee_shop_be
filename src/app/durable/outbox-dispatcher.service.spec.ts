@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OutboxEventStatus } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
@@ -39,6 +40,8 @@ describe('OutboxDispatcherService', () => {
     );
   });
 
+  afterEach(() => jest.restoreAllMocks());
+
   it('publishes and acknowledges a claimed event without Redis', async () => {
     const listener = jest.fn();
     eventBus.on(event.eventName, listener);
@@ -74,6 +77,7 @@ describe('OutboxDispatcherService', () => {
   });
 
   it('moves a repeatedly failing event to dead-letter', async () => {
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     prisma.$queryRaw.mockResolvedValue([{ ...event, attempts: 4 }]);
     eventBus.on(event.eventName, () => {
       throw new Error('permanent failure');
@@ -88,6 +92,12 @@ describe('OutboxDispatcherService', () => {
         attempts: 5,
         lastError: 'permanent failure',
       }),
+    });
+    expect(errorLog).toHaveBeenCalledWith({
+      event: 'outbox.event.dead_lettered',
+      outboxEventId: event.id,
+      attempts: 5,
+      error: 'permanent failure',
     });
   });
 
