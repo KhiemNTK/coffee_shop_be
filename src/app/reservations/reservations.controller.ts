@@ -2,6 +2,9 @@ import {
   Body,
   Controller,
   Get,
+  Header,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -22,6 +25,7 @@ import {
   RejectReservationRequestDto,
   ReservationIdDto,
   ReservationRequestIdDto,
+  TrackPublicReservationRequestDto,
   UpdateReservationDto,
 } from './dto';
 import { ReservationsService } from './reservations.service';
@@ -32,9 +36,32 @@ export class ReservationsController {
 
   @Post('public/requests')
   @SkipAuth()
+  @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   createPublicRequest(@Body() dto: CreatePublicReservationRequestDto) {
     return this.reservationsService.createPublicRequest(dto);
+  }
+
+  @Post('public/requests/status')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  trackPublicRequest(
+    @Body() { accessToken }: TrackPublicReservationRequestDto,
+  ) {
+    return this.reservationsService.trackPublicRequest(accessToken);
+  }
+
+  @Post('public/requests/cancel')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  cancelPublicRequest(
+    @Body() { accessToken }: TrackPublicReservationRequestDto,
+  ) {
+    return this.reservationsService.cancelPublicRequest(accessToken);
   }
 
   @Get('requests')

@@ -192,6 +192,7 @@ enum ReservationRequestStatus {
   APPROVED
   REJECTED
   EXPIRED
+  CANCELLED
 }
 
 enum EquipmentStatus {
@@ -658,6 +659,7 @@ model Reservation {
 
 model ReservationRequest {
   id              String                   @id @default(uuid())
+  accessTokenHash String?                  @unique @db.VarChar(64)
   customerName    String
   phoneNumber     String
   startsAt        DateTime
@@ -666,6 +668,7 @@ model ReservationRequest {
   notes           String?
   status          ReservationRequestStatus @default(PENDING)
   rejectionReason String?
+  cancelledAt     DateTime?
   createdAt       DateTime                 @default(now())
   reviewedAt      DateTime?
 

@@ -49,6 +49,12 @@ separate staging rehearsal before go-live.
   `POST /api/v1/reservations/requests/:id/reject`. Pending requests expire after their
   requested start time. Public writes have a process-local rate limit; put a
   shared edge rate limit or abuse control in front of multiple API replicas.
+- Creation returns a one-time `accessToken`. The client uses it in the body of
+  `POST /api/v1/reservations/public/requests/status` to check the outcome, or
+  `POST /api/v1/reservations/public/requests/cancel` to withdraw while still
+  pending and before the start time. Do not put the token in URLs or logs; only
+  its hash is stored. Already-approved bookings must be cancelled by staff.
+  Requests created before this feature have no token and remain staff-managed.
 - `GET /api/v1/menu/items/stock-status` is a paginated, permission-protected
   advisory based on recipe and current stock. It does not reserve stock or
   toggle `isAvailable`; inventory is consumed when an item enters `COOKING`.

@@ -125,17 +125,46 @@ describe('Public menu and reservation request (e2e)', () => {
       })
       .expect(201);
     const requestId = response.body.data.requestId as string;
+    const accessToken = response.body.data.accessToken as string;
     publicRequestIds.push(requestId);
     expect(response.body.data).toEqual({
       requestId,
       status: 'PENDING',
+      accessToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
+    expect(response.headers['cache-control']).toBe('no-store');
     expect(await prisma.reservation.count({ where: { tableId } })).toBe(0);
+
+    const pending = await request(app.getHttpServer())
+      .post(`${prefix}/reservations/public/requests/status`)
+      .send({ accessToken })
+      .expect(200);
+    expect(pending.headers['cache-control']).toBe('no-store');
+    expect(pending.body.data).toMatchObject({
+      requestId,
+      status: 'PENDING',
+      reservationStatus: null,
+    });
+    expect(pending.body.data).not.toHaveProperty('phoneNumber');
+    expect(pending.body.data).not.toHaveProperty('customerName');
+    await request(app.getHttpServer())
+      .post(`${prefix}/reservations/public/requests/status`)
+      .send({ accessToken: 'A'.repeat(43) })
+      .expect(404);
 
     const approved = await reservations.approveRequest(requestId, employeeId, {
       tableId,
     });
     expect(approved.tableId).toBe(tableId);
+    const tracked = await request(app.getHttpServer())
+      .post(`${prefix}/reservations/public/requests/status`)
+      .send({ accessToken })
+      .expect(200);
+    expect(tracked.body.data).toMatchObject({
+      requestId,
+      status: 'APPROVED',
+      reservationStatus: 'PENDING',
+    });
     await expect(
       reservations.approveRequest(requestId, employeeId, { tableId }),
     ).rejects.toThrow('Request has already been reviewed.');
@@ -173,5 +202,66 @@ describe('Public menu and reservation request (e2e)', () => {
         select: { status: true, reservationId: true },
       }),
     ).toMatchObject({ status: 'APPROVED', reservationId: expect.any(Number) });
+  });
+
+  it('lets the customer withdraw a pending request only once', async () => {
+    const startsAt = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const response = await request(app.getHttpServer())
+      .post(`${prefix}/reservations/public/requests`)
+      .send({
+        customerName: 'Cancelling guest',
+        phoneNumber: '0900000002',
+        startsAt: startsAt.toISOString(),
+        endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000).toISOString(),
+        guestCount: 2,
+      })
+      .expect(201);
+    const { requestId, accessToken } = response.body.data as {
+      requestId: string;
+      accessToken: string;
+    };
+    publicRequestIds.push(requestId);
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cancelled = await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests/cancel`)
+        .send({ accessToken })
+        .expect(200);
+      expect(cancelled.body.data).toEqual({ requestId, status: 'CANCELLED' });
+    }
+    await expect(
+      reservations.approveRequest(requestId, employeeId, { tableId }),
+    ).rejects.toThrow('Request has already been reviewed.');
+    expect(
+      await prisma.reservationRequest.findUniqueOrThrow({
+        where: { id: requestId },
+        select: { reservationId: true, cancelledAt: true },
+      }),
+    ).toMatchObject({ reservationId: null, cancelledAt: expect.any(Date) });
+  });
+
+  it('allows only one winner when withdrawal races with staff approval', async () => {
+    const startsAt = new Date(Date.now() + 96 * 60 * 60 * 1000);
+    const { requestId, accessToken } = await reservations.createPublicRequest({
+      customerName: 'Racing guest',
+      phoneNumber: '0900000003',
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000),
+      guestCount: 2,
+    });
+    publicRequestIds.push(requestId);
+
+    await Promise.allSettled([
+      reservations.cancelPublicRequest(accessToken),
+      reservations.approveRequest(requestId, employeeId, { tableId }),
+    ]);
+    const record = await prisma.reservationRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      select: { status: true, reservationId: true },
+    });
+    expect(
+      (record.status === 'CANCELLED' && record.reservationId === null) ||
+        (record.status === 'APPROVED' && record.reservationId !== null),
+    ).toBe(true);
   });
 });

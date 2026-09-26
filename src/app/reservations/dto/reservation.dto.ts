@@ -98,6 +98,10 @@ export class CreatePublicReservationRequestDto extends createZodDto(
     .superRefine(validateWindow),
 ) {}
 
+export class TrackPublicReservationRequestDto extends createZodDto(
+  z.object({ accessToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }),
+) {}
+
 export class GetReservationRequestsDto extends createZodDto(
   z.object({
     itemPerPage: z.coerce.number().int().min(1).max(100).default(20),

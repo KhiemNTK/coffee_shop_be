@@ -1,4 +1,9 @@
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { ReservationRequestStatus, ReservationStatus } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { ReservationsService } from './reservations.service';
@@ -43,6 +48,7 @@ describe('ReservationsService', () => {
       create: jest.fn(),
       count: jest.fn(),
       findMany: jest.fn(),
+      findUnique: jest.fn(),
       updateMany: jest.fn(),
     },
   };
@@ -105,19 +111,116 @@ describe('ReservationsService', () => {
       status: ReservationRequestStatus.PENDING,
     });
 
-    await expect(
-      service.createPublicRequest({
-        customerName: 'Guest',
-        phoneNumber: '0900000000',
-        startsAt,
-        endsAt,
-        guestCount: 2,
-      }),
-    ).resolves.toEqual({
+    const result = await service.createPublicRequest({
+      customerName: 'Guest',
+      phoneNumber: '0900000000',
+      startsAt,
+      endsAt,
+      guestCount: 2,
+    });
+    expect(result).toEqual({
       requestId: 'request-id',
       status: ReservationRequestStatus.PENDING,
+      accessToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
+    expect(prisma.reservationRequest.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          accessTokenHash: createHash('sha256')
+            .update(result.accessToken)
+            .digest('hex'),
+        }),
+      }),
+    );
     expect(tx.reservation.create).not.toHaveBeenCalled();
+  });
+
+  it('tracks a request without exposing contact details', async () => {
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.APPROVED,
+      startsAt,
+      endsAt,
+      guestCount: 2,
+      customerName: 'Guest',
+      phoneNumber: '0900000000',
+      reservation: { status: ReservationStatus.PENDING },
+    });
+
+    await expect(service.trackPublicRequest('test-token')).resolves.toEqual({
+      requestId: 'request-id',
+      status: ReservationRequestStatus.APPROVED,
+      startsAt,
+      endsAt,
+      guestCount: 2,
+      reservationStatus: ReservationStatus.PENDING,
+    });
+    expect(prisma.reservationRequest.findUnique).toHaveBeenCalledWith({
+      where: {
+        accessTokenHash: createHash('sha256')
+          .update('test-token')
+          .digest('hex'),
+      },
+      select: expect.not.objectContaining({
+        phoneNumber: true,
+        customerName: true,
+      }),
+    });
+  });
+
+  it('returns the same not-found response for unknown tracking tokens', async () => {
+    prisma.reservationRequest.findUnique.mockResolvedValue(null);
+    await expect(service.trackPublicRequest('unknown')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    await expect(service.cancelPublicRequest('unknown')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('withdraws only a pending request and treats repeats as success', async () => {
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.PENDING,
+    });
+    prisma.reservationRequest.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(service.cancelPublicRequest('test-token')).resolves.toEqual({
+      requestId: 'request-id',
+      status: ReservationRequestStatus.CANCELLED,
+    });
+    expect(prisma.reservationRequest.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'request-id',
+        status: ReservationRequestStatus.PENDING,
+        startsAt: { gt: expect.any(Date) },
+      },
+      data: {
+        status: ReservationRequestStatus.CANCELLED,
+        cancelledAt: expect.any(Date),
+      },
+    });
+
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.CANCELLED,
+    });
+    await expect(service.cancelPublicRequest('test-token')).resolves.toEqual({
+      requestId: 'request-id',
+      status: ReservationRequestStatus.CANCELLED,
+    });
+    expect(prisma.reservationRequest.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to withdraw a request staff already reviewed', async () => {
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.APPROVED,
+    });
+    await expect(
+      service.cancelPublicRequest('test-token'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.reservationRequest.updateMany).not.toHaveBeenCalled();
   });
 
   it('assigns a table once when approving a public request', async () => {

@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -74,8 +75,10 @@ export class ReservationsService
         'Reservations are limited to 30 days ahead.',
       );
     }
+    const accessToken = randomBytes(32).toString('base64url');
     const request = await this.prisma.reservationRequest.create({
       data: {
+        accessTokenHash: this.hashAccessToken(accessToken),
         customerName: dto.customerName,
         phoneNumber: dto.phoneNumber,
         startsAt: dto.startsAt,
@@ -85,7 +88,70 @@ export class ReservationsService
       },
       select: { id: true, status: true },
     });
-    return { requestId: request.id, status: request.status };
+    return { requestId: request.id, status: request.status, accessToken };
+  }
+
+  async trackPublicRequest(accessToken: string) {
+    const request = await this.prisma.reservationRequest.findUnique({
+      where: { accessTokenHash: this.hashAccessToken(accessToken) },
+      select: {
+        id: true,
+        status: true,
+        startsAt: true,
+        endsAt: true,
+        guestCount: true,
+        reservation: { select: { status: true } },
+      },
+    });
+    if (!request) throw new NotFoundException('Request not found.');
+    return {
+      requestId: request.id,
+      status: request.status,
+      startsAt: request.startsAt,
+      endsAt: request.endsAt,
+      guestCount: request.guestCount,
+      reservationStatus: request.reservation?.status ?? null,
+    };
+  }
+
+  async cancelPublicRequest(accessToken: string) {
+    const accessTokenHash = this.hashAccessToken(accessToken);
+    const request = await this.prisma.reservationRequest.findUnique({
+      where: { accessTokenHash },
+      select: { id: true, status: true },
+    });
+    if (!request) throw new NotFoundException('Request not found.');
+    if (request.status === ReservationRequestStatus.CANCELLED) {
+      return { requestId: request.id, status: request.status };
+    }
+    if (request.status !== ReservationRequestStatus.PENDING) {
+      throw new ConflictException('Request can no longer be withdrawn.');
+    }
+
+    const now = new Date();
+    const cancelled = await this.prisma.reservationRequest.updateMany({
+      where: {
+        id: request.id,
+        status: ReservationRequestStatus.PENDING,
+        startsAt: { gt: now },
+      },
+      data: { status: ReservationRequestStatus.CANCELLED, cancelledAt: now },
+    });
+    if (cancelled.count === 1) {
+      return {
+        requestId: request.id,
+        status: ReservationRequestStatus.CANCELLED,
+      };
+    }
+
+    const latest = await this.prisma.reservationRequest.findUnique({
+      where: { id: request.id },
+      select: { status: true },
+    });
+    if (latest?.status === ReservationRequestStatus.CANCELLED) {
+      return { requestId: request.id, status: latest.status };
+    }
+    throw new ConflictException('Request can no longer be withdrawn.');
   }
 
   async findRequests(query: GetReservationRequestsDto) {
@@ -390,6 +456,10 @@ export class ReservationsService
       select: { id: true, sessionStatus: true, createdAt: true },
     },
   } as const;
+
+  private hashAccessToken(accessToken: string) {
+    return createHash('sha256').update(accessToken).digest('hex');
+  }
 
   private assertValidWindow(
     startsAt: Date,
