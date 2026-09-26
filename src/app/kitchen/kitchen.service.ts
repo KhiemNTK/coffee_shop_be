@@ -246,7 +246,9 @@ export class KitchenService {
     if (
       statuses.every(
         (status) =>
-          status === ServeStatus.SERVED || status === ServeStatus.CANCELLED,
+          status === ServeStatus.READY ||
+          status === ServeStatus.SERVED ||
+          status === ServeStatus.CANCELLED,
       )
     ) {
       return 'COMPLETED';
@@ -254,7 +256,9 @@ export class KitchenService {
     if (
       statuses.some(
         (status) =>
-          status === ServeStatus.COOKING || status === ServeStatus.SERVED,
+          status === ServeStatus.COOKING ||
+          status === ServeStatus.READY ||
+          status === ServeStatus.SERVED,
       )
     ) {
       return 'IN_PROGRESS';

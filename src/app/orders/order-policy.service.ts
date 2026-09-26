@@ -29,6 +29,7 @@ export class OrderPolicyService {
     const hasProcessedItems = items.some(
       (item) =>
         item.serveStatus === ServeStatus.COOKING ||
+        item.serveStatus === ServeStatus.READY ||
         item.serveStatus === ServeStatus.SERVED,
     );
 
@@ -37,26 +38,12 @@ export class OrderPolicyService {
     }
   }
 
-  assertItemCanBeChanged(item: {
-    isPaid: boolean;
-    invoiceId?: string | null;
-    serveStatus: ServeStatus;
-  }) {
-    if (item.isPaid || item.invoiceId) {
-      throw new BadRequestException(
-        'Cannot change a paid or invoiced order item.',
-      );
-    }
-
-    if (item.serveStatus === ServeStatus.CANCELLED) {
-      throw new BadRequestException('Cannot change a cancelled order item.');
-    }
-  }
-
   assertServeStatusTransition(current: ServeStatus, next: ServeStatus) {
     const isAllowed =
       (current === ServeStatus.PENDING && next === ServeStatus.COOKING) ||
-      (current === ServeStatus.COOKING && next === ServeStatus.SERVED);
+      (current === ServeStatus.COOKING &&
+        (next === ServeStatus.READY || next === ServeStatus.SERVED)) ||
+      (current === ServeStatus.READY && next === ServeStatus.SERVED);
 
     if (!isAllowed) {
       throw new BadRequestException(

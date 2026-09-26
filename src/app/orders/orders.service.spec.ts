@@ -13,6 +13,7 @@ import { OrderPolicyService } from './order-policy.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
+import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 
 describe('OrdersService', () => {
   let service: OrdersService;
@@ -79,6 +80,10 @@ describe('OrdersService', () => {
         findMany: jest.fn(),
         findUnique: jest.fn(),
       },
+      orderItem: {
+        count: jest.fn(),
+        findMany: jest.fn(),
+      },
     };
 
     outbox = { enqueue: jest.fn() };
@@ -117,6 +122,7 @@ describe('OrdersService', () => {
           provide: KitchenRoutingService,
           useValue: kitchenRouting,
         },
+        PaginationUtilService,
       ],
     }).compile();
 
@@ -226,6 +232,170 @@ describe('OrdersService', () => {
     expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
     expect(tx.actionLog.create).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('marks a paid item READY after its session has completed', async () => {
+    const item = {
+      id: 'order-item-id',
+      menuItemId: 'menu-item-id',
+      quantity: 1,
+      isPaid: true,
+      invoiceId: 'invoice-id',
+      serveStatus: ServeStatus.COOKING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.COMPLETED,
+        tableId: null,
+      },
+    };
+    tx.orderItem.findUnique
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.READY });
+    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await service.updateItemStatus(item.id, 'employee-id', {
+      serveStatus: ServeStatus.READY,
+    });
+
+    expect(result.serveStatus).toBe(ServeStatus.READY);
+    expect(tx.orderItem.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        serveStatus: ServeStatus.COOKING,
+        orderSession: { is: { sessionStatus: SessionStatus.COMPLETED } },
+      }),
+      data: { serveStatus: ServeStatus.READY, readyAt: expect.any(Date) },
+    });
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the direct cooking-to-served path for dine-in orders', async () => {
+    const item = {
+      id: 'order-item-id',
+      isPaid: false,
+      invoiceId: null,
+      serveStatus: ServeStatus.COOKING,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+    };
+    tx.orderItem.findUnique
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.SERVED });
+    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      service.updateItemStatus(item.id, 'employee-id', {
+        serveStatus: ServeStatus.SERVED,
+      }),
+    ).resolves.toMatchObject({ serveStatus: ServeStatus.SERVED });
+  });
+
+  it('rejects READY for dine-in until table lifecycle supports it', async () => {
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'order-item-id',
+      serveStatus: ServeStatus.COOKING,
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: 'table-id',
+      },
+    });
+
+    await expect(
+      service.updateItemStatus('order-item-id', 'employee-id', {
+        serveStatus: ServeStatus.READY,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('hands off a READY takeaway item without consuming inventory again', async () => {
+    const item = {
+      id: 'order-item-id',
+      isPaid: true,
+      invoiceId: 'invoice-id',
+      serveStatus: ServeStatus.READY,
+      orderSessionId: 'session-id',
+      orderSession: {
+        sessionStatus: SessionStatus.COMPLETED,
+        tableId: null,
+      },
+    };
+    tx.orderItem.findUnique
+      .mockResolvedValueOnce(item)
+      .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.SERVED });
+    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+
+    await service.handoffTakeawayItem(item.id, 'employee-id');
+
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+    expect(tx.orderItem.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ serveStatus: ServeStatus.READY }),
+      data: { serveStatus: ServeStatus.SERVED },
+    });
+  });
+
+  it('does not hand off an item that is still cooking', async () => {
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'order-item-id',
+      invoiceId: 'invoice-id',
+      serveStatus: ServeStatus.COOKING,
+      orderSession: {
+        sessionStatus: SessionStatus.COMPLETED,
+        tableId: null,
+      },
+    });
+
+    await expect(
+      service.handoffTakeawayItem('order-item-id', 'employee-id'),
+    ).rejects.toThrow('Takeaway item is not ready for handoff.');
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('lists only READY items for staff handoff with ticket numbers', async () => {
+    const readyAt = new Date();
+    prisma.orderItem.count.mockResolvedValue(1);
+    prisma.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'order-item-id',
+        quantity: 2,
+        readyAt,
+        orderSessionId: 'session-id',
+        orderSession: { table: null },
+        menuItem: { name: 'Latte' },
+        kitchenTicketItem: {
+          ticket: { sequence: 42, station: { code: 'BAR' } },
+        },
+      },
+    ]);
+
+    const page = await service.getHandoffItems({
+      page: 1,
+      itemPerPage: 20,
+    });
+
+    expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          serveStatus: ServeStatus.READY,
+          orderSession: {
+            is: {
+              tableId: null,
+              sessionStatus: { not: SessionStatus.CANCELLED },
+            },
+          },
+        },
+        take: 20,
+      }),
+    );
+    expect(page.list[0]).toMatchObject({
+      id: 'order-item-id',
+      ticketNumber: 'BAR-42',
+      readyAt,
+    });
+    expect(page.list[0]).not.toHaveProperty('kitchenTicketItem');
   });
 
   it('rejects cancelling a paid order item', async () => {

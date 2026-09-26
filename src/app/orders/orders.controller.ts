@@ -6,10 +6,12 @@ import {
   Patch,
   Param,
   Delete,
+  Query,
 } from '@nestjs/common';
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  GetHandoffItemsDto,
   MergeDiningTableDto,
   OpenSessionDto,
   SplitOrderSessionDto,
@@ -44,6 +46,12 @@ export class OrdersController {
     return this.ordersService.getActiveSessions();
   }
 
+  @Get('takeaway/handoff')
+  @RequirePermissions(PermissionKeys.ORDERS_SESSIONS_READ)
+  getHandoffItems(@Query() query: GetHandoffItemsDto) {
+    return this.ordersService.getHandoffItems(query);
+  }
+
   @Get('sessions/:id')
   @RequirePermissions(PermissionKeys.ORDERS_SESSIONS_READ)
   getSessionById(@Param() { id }: IDDto) {
@@ -71,6 +79,15 @@ export class OrdersController {
       employeeId,
       updateItemStatusDto,
     );
+  }
+
+  @Post('items/:id/handoff')
+  @RequirePermissions(PermissionKeys.ORDERS_ITEMS_HANDOFF)
+  handoffTakeawayItem(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.handoffTakeawayItem(id, employeeId);
   }
 
   @Patch('items/:id/cancel')

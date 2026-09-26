@@ -18,6 +18,7 @@ import {
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  GetHandoffItemsDto,
   MergeDiningTableDto,
   SplitOrderSessionDto,
   TransferDiningTableDto,
@@ -44,6 +45,7 @@ import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledge
 import { OutboxService } from '../durable/outbox.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
+import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 
 @Injectable()
 export class OrdersService {
@@ -57,6 +59,7 @@ export class OrdersService {
     private readonly inventoryConsumption: InventoryConsumptionService,
     private readonly cashierShiftLedger: CashierShiftLedgerService,
     private readonly kitchenRouting: KitchenRoutingService,
+    private readonly pagination: PaginationUtilService,
   ) {}
 
   private readonly orderSessionInclude = {
@@ -310,6 +313,51 @@ export class OrdersService {
     });
   }
 
+  async getHandoffItems(query: GetHandoffItemsDto) {
+    const where: Prisma.OrderItemWhereInput = {
+      serveStatus: ServeStatus.READY,
+      orderSession: {
+        is: {
+          tableId: null,
+          sessionStatus: { not: SessionStatus.CANCELLED },
+        },
+      },
+    };
+    const totalItems = await this.prisma.orderItem.count({ where });
+    const paging = this.pagination.paging({ ...query, totalItems });
+    const items = await this.prisma.orderItem.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ readyAt: { sort: 'asc', nulls: 'last' } }, { id: 'asc' }],
+      select: {
+        id: true,
+        quantity: true,
+        readyAt: true,
+        orderSessionId: true,
+        menuItem: { select: { name: true } },
+        kitchenTicketItem: {
+          select: {
+            ticket: {
+              select: {
+                sequence: true,
+                station: { select: { code: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+    return paging.format(
+      items.map(({ kitchenTicketItem, ...item }) => ({
+        ...item,
+        ticketNumber: kitchenTicketItem
+          ? `${kitchenTicketItem.ticket.station.code}-${kitchenTicketItem.ticket.sequence}`
+          : null,
+      })),
+    );
+  }
+
   async getSessionById(id: string) {
     const session = await this.prisma.orderSession.findUnique({
       where: { id },
@@ -447,10 +495,23 @@ export class OrdersService {
     return result.session;
   }
 
-  async updateItemStatus(
+  updateItemStatus(
     id: string,
     employeeId: string,
     { serveStatus }: UpdateOrderItemStatusDto,
+  ) {
+    return this.changeItemStatus(id, employeeId, serveStatus, false);
+  }
+
+  handoffTakeawayItem(id: string, employeeId: string) {
+    return this.changeItemStatus(id, employeeId, ServeStatus.SERVED, true);
+  }
+
+  private async changeItemStatus(
+    id: string,
+    employeeId: string,
+    serveStatus: ServeStatus,
+    handoffOnly: boolean,
   ) {
     const result = await this.runSerializableTransaction(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
@@ -466,11 +527,34 @@ export class OrdersService {
         throw new NotFoundException(`Order item with ID ${id} not found.`);
       }
 
-      this.orderPolicy.assertActiveSession(
-        item.orderSession.sessionStatus,
-        'Cannot update item status in an inactive order session.',
-      );
-      this.orderPolicy.assertItemCanBeChanged(item);
+      if (
+        item.orderSession.sessionStatus === SessionStatus.CANCELLED ||
+        (item.orderSession.sessionStatus === SessionStatus.COMPLETED &&
+          !item.invoiceId)
+      ) {
+        throw new BadRequestException(
+          'Cannot update item status in this order session.',
+        );
+      }
+      if (item.serveStatus === ServeStatus.CANCELLED) {
+        throw new BadRequestException('Cannot change a cancelled order item.');
+      }
+      if (
+        handoffOnly &&
+        (item.orderSession.tableId !== null ||
+          (item.serveStatus !== ServeStatus.READY &&
+            item.serveStatus !== ServeStatus.SERVED))
+      ) {
+        throw new ConflictException('Takeaway item is not ready for handoff.');
+      }
+      if (
+        serveStatus === ServeStatus.READY &&
+        item.orderSession.tableId !== null
+      ) {
+        throw new BadRequestException(
+          'READY handoff is only supported for takeaway orders.',
+        );
+      }
 
       if (item.serveStatus === serveStatus) {
         return {
@@ -489,16 +573,17 @@ export class OrdersService {
       const updateResult = await tx.orderItem.updateMany({
         where: {
           id,
-          isPaid: false,
-          invoiceId: null,
           serveStatus: item.serveStatus,
           orderSession: {
             is: {
-              sessionStatus: SessionStatus.ACTIVE,
+              sessionStatus: item.orderSession.sessionStatus,
             },
           },
         },
-        data: { serveStatus },
+        data: {
+          serveStatus,
+          ...(serveStatus === ServeStatus.READY ? { readyAt: new Date() } : {}),
+        },
       });
 
       if (updateResult.count !== 1) {
@@ -596,6 +681,7 @@ export class OrdersService {
 
       const wasPrepared =
         item.serveStatus === ServeStatus.COOKING ||
+        item.serveStatus === ServeStatus.READY ||
         item.serveStatus === ServeStatus.SERVED;
       if (wasPrepared && !reason) {
         throw new BadRequestException(

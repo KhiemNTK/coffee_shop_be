@@ -54,6 +54,14 @@ separate staging rehearsal before go-live.
   toggle `isAvailable`; inventory is consumed when an item enters `COOKING`.
 - `GET /api/v1/audit-logs` is read-only, paginated, redacted, and requires
   `/audit-logs_read`. OWNER and MANAGER receive that permission from the seed.
+- For takeaway sessions, `PATCH /api/v1/orders/items/:id/status` supports
+  `COOKING -> READY -> SERVED`. Staff can read ready items through
+  `GET /api/v1/orders/takeaway/handoff`, including paid orders whose session is
+  already complete. Waiters and cashiers use `POST /api/v1/orders/items/:id/handoff`
+  to acknowledge collection without receiving kitchen status permissions.
+  `readyAt` is persisted when the item becomes ready. Dine-in
+  keeps the existing `COOKING -> SERVED` path until prepaid table lifecycle is
+  addressed; the direct path remains valid for older takeaway clients too.
 
 Deploy the new migrations before calling the reservation-request API. Apply
 permission seed changes to the intended database in a controlled release; code

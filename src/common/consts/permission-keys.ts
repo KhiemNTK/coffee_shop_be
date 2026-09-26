@@ -44,6 +44,7 @@ export const PermissionKeys = {
   ORDERS_SESSIONS_CANCEL: '/orders_sessions_cancel',
   ORDERS_ITEMS_CREATE: '/orders_items_create',
   ORDERS_ITEMS_UPDATE_STATUS: '/orders_items_update-status',
+  ORDERS_ITEMS_HANDOFF: '/orders_items_handoff',
   ORDERS_ITEMS_CANCEL: '/orders_items_cancel',
   ORDERS_TABLES_TRANSFER: '/orders_tables_transfer',
   ORDERS_TABLES_MERGE: '/orders_tables_merge',

@@ -67,7 +67,7 @@ export class DailySalesCloseService {
                WHERE i."createdAt" >= ${period.from}
                  AND i."createdAt" < ${period.to}
                  AND i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
-                 AND oi."serveStatus" IN ('PENDING', 'COOKING')
+                 AND oi."serveStatus" IN ('PENDING', 'COOKING', 'READY')
               )::bigint AS "unfinishedItemCount",
               (SELECT COUNT(*) FROM "PaymentAttempt" pa
                JOIN "Invoice" i ON i."id" = pa."invoiceId"

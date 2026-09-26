@@ -5,9 +5,15 @@ import { OrderPolicyService } from './order-policy.service';
 import { InventoryModule } from '../inventory/inventory.module';
 import { CashierShiftsModule } from '../cashier-shifts/cashier-shifts.module';
 import { KitchenModule } from '../kitchen/kitchen.module';
+import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 
 @Module({
-  imports: [CashierShiftsModule, InventoryModule, KitchenModule],
+  imports: [
+    CashierShiftsModule,
+    InventoryModule,
+    KitchenModule,
+    PaginationUtilModule,
+  ],
   controllers: [OrdersController],
   providers: [OrdersService, OrderPolicyService],
   exports: [OrdersService, OrderPolicyService],
