@@ -120,6 +120,7 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.REPORTS_READ,
       PermissionKeys.REPORTS_EXPORT,
       PermissionKeys.REPORTS_CLOSE,
+      PermissionKeys.AUDIT_LOGS_READ,
       PermissionKeys.FUNDS_READ,
       PermissionKeys.FUNDS_MANAGE,
       PermissionKeys.CASHIER_SHIFTS_CURRENT,

@@ -2,6 +2,7 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { readdirSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { AppController } from '../app.controller';
+import { AuditLogsController } from '../audit-logs/audit-logs.controller';
 import { AuthController } from '../auth/auth.controller';
 import { IS_SKIP_AUTH } from '../auth/auth.decorator';
 import { BankReconciliationController } from '../cashier-shifts/bank-reconciliation.controller';
@@ -32,6 +33,7 @@ import { REQUIRED_PERMISSIONS_KEY } from './authorization.decorator';
 
 const controllers = [
   AppController,
+  AuditLogsController,
   AuthController,
   BankReconciliationController,
   CashHandoversController,

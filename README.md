@@ -36,3 +36,25 @@ currently a go-live blocker; see the release runbook.
 
 CI checks schema drift. Backup/restore and point-in-time recovery require a
 separate staging rehearsal before go-live.
+
+## Customer-facing and operator APIs
+
+- `GET /api/v1/menu/public/categories` and `/menu/public/items` expose only
+  active categories and saleable item names/prices. Availability is manually
+  controlled; this is not a promise that ingredients are reserved.
+- `POST /api/v1/reservations/public/requests` accepts a request up to 30 days
+  ahead. It does **not** reserve a table or confirm the booking. Staff review
+  requests through `GET /api/v1/reservations/requests` and approve with
+  `POST /api/v1/reservations/requests/:id/approve` plus a table ID, or reject with
+  `POST /api/v1/reservations/requests/:id/reject`. Pending requests expire after their
+  requested start time. Public writes have a process-local rate limit; put a
+  shared edge rate limit or abuse control in front of multiple API replicas.
+- `GET /api/v1/menu/items/stock-status` is a paginated, permission-protected
+  advisory based on recipe and current stock. It does not reserve stock or
+  toggle `isAvailable`; inventory is consumed when an item enters `COOKING`.
+- `GET /api/v1/audit-logs` is read-only, paginated, redacted, and requires
+  `/audit-logs_read`. OWNER and MANAGER receive that permission from the seed.
+
+Deploy the new migrations before calling the reservation-request API. Apply
+permission seed changes to the intended database in a controlled release; code
+deployment alone does not grant existing roles the new audit permission.

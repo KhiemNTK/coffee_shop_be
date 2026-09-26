@@ -42,6 +42,7 @@ import { DurableModule } from './durable/durable.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { PrintingModule } from './printing/printing.module';
 import { KitchenModule } from './kitchen/kitchen.module';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -77,6 +78,7 @@ import { KitchenModule } from './kitchen/kitchen.module';
     ObservabilityModule,
     PrintingModule,
     KitchenModule,
+    AuditLogsModule,
   ],
   controllers: [AppController],
   providers: [
