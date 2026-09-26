@@ -15,6 +15,8 @@ export class InvoiceEntity implements InvoicePrisma {
   changeAmount!: Decimal | null;
   paymentMethod!: PaymentMethod;
   paymentStatus!: PaymentStatus;
+  pickupCodeVersion!: number | null;
+  pickupCodeIssuedAt!: Date | null;
   taxAmount!: Decimal;
   taxRate!: Decimal;
   createdAt!: Date;

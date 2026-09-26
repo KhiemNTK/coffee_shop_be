@@ -1044,6 +1044,8 @@ model Invoice {
   changeAmount   Decimal?      @db.Decimal(18, 2) // Tiền thối lại
   paymentMethod  PaymentMethod @default(CASH)
   paymentStatus  PaymentStatus @default(UNPAID)
+  pickupCodeVersion Int?       @default(0)
+  pickupCodeIssuedAt DateTime?
   taxAmount      Decimal       @default(0) @db.Decimal(18, 2) // Số tiền thuế
   taxRate        Decimal       @default(0) @db.Decimal(5, 2) // % Thuế (VD: 8, 10)
 
@@ -1066,12 +1068,25 @@ model Invoice {
   cashTransaction CashTransaction?
   paymentAttempts PaymentAttempt[]
   printJobs       PrintJob[]
+  takeawayFeedback TakeawayFeedback?
 
   @@index([orderSessionId])
   @@index([employeeId])
   @@index([shiftId])
   @@index([paymentStatus, createdAt])
   @@index([createdAt])
+}
+
+model TakeawayFeedback {
+  id        String   @id @default(uuid())
+  invoiceId String   @unique
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  rating    Int
+  comment   String?  @db.VarChar(500)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt, id])
+  @@index([rating, createdAt, id])
 }
 
 model DailySalesClose {

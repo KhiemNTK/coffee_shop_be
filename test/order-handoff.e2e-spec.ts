@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ConflictException, INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ServeStatus, SessionStatus } from '@prisma/client';
@@ -9,13 +10,16 @@ import { KitchenService } from '../src/app/kitchen/kitchen.service';
 import { DailySalesCloseService } from '../src/app/reports/daily-sales-close.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
+import request from 'supertest';
+import { App } from 'supertest/types';
 
 describe('Paid order handoff (e2e)', () => {
-  let app: INestApplication;
+  let app: INestApplication<App>;
   let prisma: PrismaService;
   let orders: OrdersService;
   let kitchen: KitchenService;
   let dailyClose: DailySalesCloseService;
+  let prefix: string;
   const ids: Record<string, string> = {};
   const suffix = randomUUID();
   let ticketSequence: number;
@@ -31,6 +35,7 @@ describe('Paid order handoff (e2e)', () => {
     orders = module.get(OrdersService);
     kitchen = module.get(KitchenService);
     dailyClose = module.get(DailySalesCloseService);
+    prefix = module.get(ConfigService).get<string>('APP_PREFIX', '/api/v1');
     await app.init();
 
     const position = await prisma.position.create({
@@ -122,6 +127,10 @@ describe('Paid order handoff (e2e)', () => {
       if (ids.orderItem)
         await prisma.orderItem.deleteMany({ where: { id: ids.orderItem } });
       if (ids.invoice)
+        await prisma.takeawayFeedback.deleteMany({
+          where: { invoiceId: ids.invoice },
+        });
+      if (ids.invoice)
         await prisma.invoice.deleteMany({ where: { id: ids.invoice } });
       if (ids.session)
         await prisma.orderSession.deleteMany({ where: { id: ids.session } });
@@ -197,6 +206,74 @@ describe('Paid order handoff (e2e)', () => {
       state: 'COMPLETED',
     });
 
+    const pickup = await orders.issuePickupCode(ids.invoice, ids.employee);
+    expect(pickup.code).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await orders.issuePickupCode(ids.invoice, ids.employee)).toEqual(
+      pickup,
+    );
+    const publicStatus = await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/status`)
+      .send({ invoiceId: ids.invoice, code: pickup.code })
+      .expect(200);
+    expect(publicStatus.headers['cache-control']).toBe('no-store');
+    expect(publicStatus.body.data).toMatchObject({
+      invoiceId: ids.invoice,
+      status: 'READY',
+      items: [
+        {
+          id: ids.orderItem,
+          name: `Handoff latte ${suffix}`,
+          serveStatus: ServeStatus.READY,
+        },
+      ],
+    });
+    expect(publicStatus.body.data).not.toHaveProperty('employeeId');
+    await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/feedback`)
+      .send({ invoiceId: ids.invoice, code: pickup.code, rating: 5 })
+      .expect(409);
+
+    const rotated = await orders.rotatePickupCode(
+      ids.invoice,
+      pickup.code,
+      ids.employee,
+    );
+    expect(rotated.code).not.toBe(pickup.code);
+    await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/status`)
+      .send({ invoiceId: ids.invoice, code: pickup.code })
+      .expect(404);
+    await expect(
+      orders.handoffWithPickupCode(
+        ids.invoice,
+        pickup.code,
+        ids.orderItem,
+        ids.employee,
+      ),
+    ).rejects.toThrow('Pickup is no longer available.');
+    await expect(
+      orders.rotatePickupCode(ids.invoice, pickup.code, ids.employee),
+    ).rejects.toThrow('Pickup code changed or expired.');
+    await orders.revokePickupCode(ids.invoice, rotated.code, ids.employee);
+    await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/status`)
+      .send({ invoiceId: ids.invoice, code: rotated.code })
+      .expect(404);
+    const reissued = await orders.issuePickupCode(ids.invoice, ids.employee);
+    expect(reissued.code).not.toBe(rotated.code);
+    const rotations = await Promise.allSettled([
+      orders.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
+      orders.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
+    ]);
+    expect(
+      rotations.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      rotations.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    const currentCode = await orders.issuePickupCode(ids.invoice, ids.employee);
+    expect(currentCode.code).not.toBe(reissued.code);
+
     await prisma.invoice.update({
       where: { id: ids.invoice },
       data: { createdAt: new Date('2025-01-01T05:00:00.000Z') },
@@ -210,8 +287,92 @@ describe('Paid order handoff (e2e)', () => {
       }),
     });
 
-    await orders.handoffTakeawayItem(ids.orderItem, ids.employee);
-    await orders.handoffTakeawayItem(ids.orderItem, ids.employee);
+    await prisma.invoice.update({
+      where: { id: ids.invoice },
+      data: {
+        createdAt: new Date(),
+        paymentStatus: 'REFUNDED',
+      },
+    });
+    await expect(
+      orders.handoffWithPickupCode(
+        ids.invoice,
+        currentCode.code,
+        ids.orderItem,
+        ids.employee,
+      ),
+    ).rejects.toThrow('Pickup is no longer available.');
+    await prisma.invoice.update({
+      where: { id: ids.invoice },
+      data: { paymentStatus: 'PAID' },
+    });
+
+    await orders.handoffWithPickupCode(
+      ids.invoice,
+      currentCode.code,
+      ids.orderItem,
+      ids.employee,
+    );
+    await orders.handoffWithPickupCode(
+      ids.invoice,
+      currentCode.code,
+      ids.orderItem,
+      ids.employee,
+    );
+    const collectedStatus = await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/status`)
+      .send({ invoiceId: ids.invoice, code: currentCode.code })
+      .expect(200);
+    expect(collectedStatus.body.data.status).toBe('COLLECTED');
+    const feedbackInput = {
+      invoiceId: ids.invoice,
+      code: currentCode.code,
+      rating: 5,
+      comment: 'Quick pickup',
+    };
+    const [firstFeedback, repeatedFeedback] = await Promise.all([
+      request(app.getHttpServer())
+        .post(`${prefix}/orders/takeaway/pickup/feedback`)
+        .send(feedbackInput)
+        .expect(200),
+      request(app.getHttpServer())
+        .post(`${prefix}/orders/takeaway/pickup/feedback`)
+        .send(feedbackInput)
+        .expect(200),
+    ]);
+    expect(firstFeedback.body.data.id).toBe(repeatedFeedback.body.data.id);
+    expect(
+      await prisma.takeawayFeedback.count({
+        where: { invoiceId: ids.invoice },
+      }),
+    ).toBe(1);
+    await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/feedback`)
+      .send({ ...feedbackInput, rating: 1 })
+      .expect(409);
+    await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/feedback`)
+      .send({ ...feedbackInput, rating: 0 })
+      .expect(400);
+    await expect(
+      prisma.takeawayFeedback.update({
+        where: { invoiceId: ids.invoice },
+        data: { rating: 6 },
+      }),
+    ).rejects.toThrow();
+    const feedbackList = await orders.getTakeawayFeedback({
+      from: undefined,
+      to: undefined,
+      page: 1,
+      itemPerPage: 20,
+      rating: 5,
+    });
+    expect(feedbackList.list).toContainEqual(
+      expect.objectContaining({
+        id: firstFeedback.body.data.id,
+        invoice: { invoiceNumber: `HANDOFF-${suffix}` },
+      }),
+    );
     const after = await orders.getHandoffItems({ page: 1, itemPerPage: 20 });
     expect(after.list.some((item) => item.id === ids.orderItem)).toBe(false);
     const persisted = await prisma.orderItem.findUniqueOrThrow({

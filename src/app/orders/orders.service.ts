@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -8,7 +8,10 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
+  type Invoice,
+  PaymentStatus,
   Prisma,
   ReservationStatus,
   ServeStatus,
@@ -19,8 +22,11 @@ import {
   AddOrderItemsDto,
   CancelOrderItemDto,
   GetHandoffItemsDto,
+  GetTakeawayFeedbackDto,
+  GetTakeawayFeedbackSummaryDto,
   MergeDiningTableDto,
   SplitOrderSessionDto,
+  SubmitTakeawayFeedbackDto,
   TransferDiningTableDto,
   UpdateOrderItemStatusDto,
 } from './dto';
@@ -47,9 +53,39 @@ import { runSerializableTransaction as executeSerializableTransaction } from '..
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 
+const PICKUP_CODE_TTL_MS = 72 * 60 * 60 * 1000;
+const MAX_PICKUP_CODE_VERSION = 2_147_483_647;
+
+const PICKUP_INVOICE_SELECT = {
+  createdAt: true,
+  paymentStatus: true,
+  pickupCodeVersion: true,
+  pickupCodeIssuedAt: true,
+  orderSession: { select: { tableId: true, sessionStatus: true } },
+  orderItems: {
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: {
+      id: true,
+      quantity: true,
+      serveStatus: true,
+      isPaid: true,
+      menuItem: { select: { name: true } },
+    },
+  },
+} satisfies Prisma.InvoiceSelect;
+
+type PickupInvoice = Prisma.InvoiceGetPayload<{
+  select: typeof PICKUP_INVOICE_SELECT;
+}>;
+type PickupCodeState = Pick<
+  Invoice,
+  'createdAt' | 'pickupCodeVersion' | 'pickupCodeIssuedAt'
+>;
+
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
+  private readonly pickupCodeKey: Buffer;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -60,7 +96,15 @@ export class OrdersService {
     private readonly cashierShiftLedger: CashierShiftLedgerService,
     private readonly kitchenRouting: KitchenRoutingService,
     private readonly pagination: PaginationUtilService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.pickupCodeKey = createHmac(
+      'sha256',
+      config.getOrThrow<string>('JWT_SECRET'),
+    )
+      .update('takeaway-pickup-code:v1')
+      .digest();
+  }
 
   private readonly orderSessionInclude = {
     table: true,
@@ -358,6 +402,331 @@ export class OrdersService {
     );
   }
 
+  issuePickupCode(invoiceId: string, employeeId: string) {
+    return this.provisionPickupCode(invoiceId, employeeId);
+  }
+
+  rotatePickupCode(invoiceId: string, currentCode: string, employeeId: string) {
+    return this.provisionPickupCode(invoiceId, employeeId, currentCode);
+  }
+
+  async revokePickupCode(
+    invoiceId: string,
+    currentCode: string,
+    employeeId: string,
+  ) {
+    return this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const invoice = await tx.invoice.findUnique({
+        where: { id: invoiceId },
+        select: PICKUP_INVOICE_SELECT,
+      });
+      this.assertPickupInvoice(invoice);
+      if (!this.verifyPickupCode(invoiceId, currentCode, invoice)) {
+        throw new ConflictException('Pickup code changed or expired.');
+      }
+      const nextVersion = this.nextPickupCodeVersion(invoice.pickupCodeVersion);
+      const updated = await tx.invoice.updateMany({
+        where: {
+          id: invoiceId,
+          paymentStatus: PaymentStatus.PAID,
+          pickupCodeVersion: invoice.pickupCodeVersion,
+          pickupCodeIssuedAt: invoice.pickupCodeIssuedAt,
+        },
+        data: { pickupCodeVersion: nextVersion, pickupCodeIssuedAt: null },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('Pickup code changed. Please retry.');
+      }
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'PICKUP_CODE_REVOKED',
+          details: { invoiceId },
+        },
+      });
+      return { revoked: true };
+    });
+  }
+
+  async getPickupStatus(invoiceId: string, code: string) {
+    const invoice = await this.getPickupInvoice(invoiceId);
+    const expiresAt = this.verifyPickupCode(invoiceId, code, invoice);
+    if (!expiresAt) {
+      throw new NotFoundException('Pickup code is not available.');
+    }
+    const statuses = invoice.orderItems.map((item) => item.serveStatus);
+    const available = (status: ServeStatus) =>
+      status === ServeStatus.READY || status === ServeStatus.SERVED;
+    let status = 'PREPARING';
+    if (statuses.every((value) => value === ServeStatus.SERVED)) {
+      status = 'COLLECTED';
+    } else if (statuses.every(available)) {
+      status = 'READY';
+    } else if (statuses.some(available)) {
+      status = 'PARTIALLY_READY';
+    }
+    return {
+      invoiceId,
+      status,
+      expiresAt,
+      items: invoice.orderItems.map((item) => ({
+        id: item.id,
+        name: item.menuItem.name,
+        quantity: item.quantity,
+        serveStatus: item.serveStatus,
+      })),
+    };
+  }
+
+  submitTakeawayFeedback({
+    invoiceId,
+    code,
+    rating,
+    comment,
+  }: SubmitTakeawayFeedbackDto) {
+    const normalizedComment = comment?.trim() || null;
+    return this.runSerializableTransaction(async (tx) => {
+      const invoice = await tx.invoice.findUnique({
+        where: { id: invoiceId },
+        select: PICKUP_INVOICE_SELECT,
+      });
+      this.assertPickupInvoice(invoice);
+      if (!this.verifyPickupCode(invoiceId, code, invoice)) {
+        throw new NotFoundException('Pickup code is not available.');
+      }
+      if (
+        !invoice.orderItems.every(
+          (item) => item.serveStatus === ServeStatus.SERVED,
+        )
+      ) {
+        throw new ConflictException('Order is not collected yet.');
+      }
+
+      await tx.takeawayFeedback.createMany({
+        data: { invoiceId, rating, comment: normalizedComment },
+        skipDuplicates: true,
+      });
+      const feedback = await tx.takeawayFeedback.findUniqueOrThrow({
+        where: { invoiceId },
+        select: { id: true, rating: true, comment: true, createdAt: true },
+      });
+      if (
+        feedback.rating !== rating ||
+        feedback.comment !== normalizedComment
+      ) {
+        throw new ConflictException(
+          'Feedback already exists for this invoice.',
+        );
+      }
+      return feedback;
+    });
+  }
+
+  async getTakeawayFeedbackSummary(query: GetTakeawayFeedbackSummaryDto) {
+    const period = this.feedbackPeriod(query);
+    const groups = await this.prisma.takeawayFeedback.groupBy({
+      by: ['rating'],
+      where: { createdAt: { gte: period.from, lte: period.to } },
+      _count: { _all: true },
+    });
+    const ratings = [1, 2, 3, 4, 5].map((rating) => ({ rating, count: 0 }));
+    for (const group of groups) {
+      ratings[group.rating - 1].count = group._count._all;
+    }
+    const total = ratings.reduce((sum, item) => sum + item.count, 0);
+    const weighted = ratings.reduce(
+      (sum, item) => sum + item.rating * item.count,
+      0,
+    );
+    return {
+      ...period,
+      total,
+      averageRating: total ? Math.round((weighted / total) * 100) / 100 : null,
+      ratings,
+    };
+  }
+
+  async getTakeawayFeedback(query: GetTakeawayFeedbackDto) {
+    const period = this.feedbackPeriod(query);
+    const where: Prisma.TakeawayFeedbackWhereInput = {
+      createdAt: { gte: period.from, lte: period.to },
+      ...(query.rating ? { rating: query.rating } : {}),
+    };
+    const totalItems = await this.prisma.takeawayFeedback.count({ where });
+    const paging = this.pagination.paging({ ...query, totalItems });
+    const list = await this.prisma.takeawayFeedback.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        rating: true,
+        comment: true,
+        createdAt: true,
+        invoice: { select: { invoiceNumber: true } },
+      },
+    });
+    return paging.format(list);
+  }
+
+  private feedbackPeriod({ from, to }: { from?: Date; to?: Date }) {
+    const end = to ?? new Date();
+    const start = from ?? new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+    if (start > end) {
+      throw new BadRequestException('from must not be after to.');
+    }
+    return { from: start, to: end };
+  }
+
+  handoffWithPickupCode(
+    invoiceId: string,
+    code: string,
+    itemId: string,
+    employeeId: string,
+  ) {
+    return this.changeItemStatus(itemId, employeeId, ServeStatus.SERVED, true, {
+      invoiceId,
+      code,
+    });
+  }
+
+  private provisionPickupCode(
+    invoiceId: string,
+    employeeId: string,
+    currentCode?: string,
+  ) {
+    return this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const invoice = await tx.invoice.findUnique({
+        where: { id: invoiceId },
+        select: PICKUP_INVOICE_SELECT,
+      });
+      this.assertPickupInvoice(invoice);
+      const currentExpiry = this.getPickupCodeExpiry(invoice);
+      if (
+        currentCode !== undefined &&
+        !this.verifyPickupCode(invoiceId, currentCode, invoice)
+      ) {
+        throw new ConflictException('Pickup code changed or expired.');
+      }
+      if (
+        currentCode === undefined &&
+        currentExpiry &&
+        currentExpiry.getTime() > Date.now()
+      ) {
+        return {
+          invoiceId,
+          code: this.signPickupCode(invoiceId, invoice.pickupCodeVersion),
+          expiresAt: currentExpiry,
+        };
+      }
+
+      const nextVersion = this.nextPickupCodeVersion(invoice.pickupCodeVersion);
+      const issuedAt = new Date();
+      const updated = await tx.invoice.updateMany({
+        where: {
+          id: invoiceId,
+          paymentStatus: PaymentStatus.PAID,
+          pickupCodeVersion: invoice.pickupCodeVersion,
+          pickupCodeIssuedAt: invoice.pickupCodeIssuedAt,
+        },
+        data: {
+          pickupCodeVersion: nextVersion,
+          pickupCodeIssuedAt: issuedAt,
+        },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('Pickup code changed. Please retry.');
+      }
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType:
+            currentCode !== undefined
+              ? 'PICKUP_CODE_ROTATED'
+              : 'PICKUP_CODE_ISSUED',
+          details: { invoiceId },
+        },
+      });
+      return {
+        invoiceId,
+        code: this.signPickupCode(invoiceId, nextVersion),
+        expiresAt: new Date(issuedAt.getTime() + PICKUP_CODE_TTL_MS),
+      };
+    });
+  }
+
+  private async getPickupInvoice(invoiceId: string) {
+    const invoice = await this.prisma.invoice.findUnique({
+      where: { id: invoiceId },
+      select: PICKUP_INVOICE_SELECT,
+    });
+    this.assertPickupInvoice(invoice);
+    return invoice;
+  }
+
+  private assertPickupInvoice(
+    invoice: PickupInvoice | null,
+  ): asserts invoice is PickupInvoice {
+    if (
+      !invoice ||
+      invoice.paymentStatus !== PaymentStatus.PAID ||
+      invoice.orderSession.tableId !== null ||
+      invoice.orderSession.sessionStatus === SessionStatus.CANCELLED ||
+      invoice.orderItems.length === 0 ||
+      invoice.orderItems.some(
+        (item) => !item.isPaid || item.serveStatus === ServeStatus.CANCELLED,
+      )
+    ) {
+      throw new NotFoundException('Pickup code is not available.');
+    }
+  }
+
+  private nextPickupCodeVersion(version: number | null) {
+    if (version === MAX_PICKUP_CODE_VERSION) {
+      throw new ConflictException('Pickup code can no longer be rotated.');
+    }
+    return (version ?? 0) + 1;
+  }
+
+  private getPickupCodeExpiry(invoice: PickupCodeState) {
+    const issuedAt =
+      invoice.pickupCodeVersion === null
+        ? invoice.createdAt
+        : invoice.pickupCodeIssuedAt;
+    return issuedAt ? new Date(issuedAt.getTime() + PICKUP_CODE_TTL_MS) : null;
+  }
+
+  private signPickupCode(invoiceId: string, version: number | null) {
+    return createHmac('sha256', this.pickupCodeKey)
+      .update(version === null ? invoiceId : `${invoiceId}:${version}`)
+      .digest('base64url');
+  }
+
+  private verifyPickupCode(
+    invoiceId: string,
+    code: string,
+    invoice: PickupCodeState,
+  ) {
+    const expiresAt = this.getPickupCodeExpiry(invoice);
+    if (!expiresAt || expiresAt.getTime() <= Date.now()) {
+      return null;
+    }
+    const expected = Buffer.from(
+      this.signPickupCode(invoiceId, invoice.pickupCodeVersion),
+    );
+    const actual = Buffer.from(code);
+    if (
+      actual.length !== expected.length ||
+      !timingSafeEqual(actual, expected)
+    ) {
+      return null;
+    }
+    return expiresAt;
+  }
+
   async getSessionById(id: string) {
     const session = await this.prisma.orderSession.findUnique({
       where: { id },
@@ -512,6 +881,7 @@ export class OrdersService {
     employeeId: string,
     serveStatus: ServeStatus,
     handoffOnly: boolean,
+    pickup?: { invoiceId: string; code: string },
   ) {
     const result = await this.runSerializableTransaction(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
@@ -520,6 +890,14 @@ export class OrdersService {
         include: {
           orderSession: true,
           menuItem: true,
+          invoice: {
+            select: {
+              paymentStatus: true,
+              createdAt: true,
+              pickupCodeVersion: true,
+              pickupCodeIssuedAt: true,
+            },
+          },
         },
       });
 
@@ -538,6 +916,15 @@ export class OrdersService {
       }
       if (item.serveStatus === ServeStatus.CANCELLED) {
         throw new BadRequestException('Cannot change a cancelled order item.');
+      }
+      if (
+        pickup &&
+        (item.invoiceId !== pickup.invoiceId ||
+          !item.isPaid ||
+          item.invoice?.paymentStatus !== PaymentStatus.PAID ||
+          !this.verifyPickupCode(pickup.invoiceId, pickup.code, item.invoice))
+      ) {
+        throw new ConflictException('Pickup is no longer available.');
       }
       if (
         handoffOnly &&
@@ -579,6 +966,19 @@ export class OrdersService {
               sessionStatus: item.orderSession.sessionStatus,
             },
           },
+          ...(pickup && item.invoice
+            ? {
+                invoiceId: pickup.invoiceId,
+                isPaid: true,
+                invoice: {
+                  is: {
+                    paymentStatus: PaymentStatus.PAID,
+                    pickupCodeVersion: item.invoice.pickupCodeVersion,
+                    pickupCodeIssuedAt: item.invoice.pickupCodeIssuedAt,
+                  },
+                },
+              }
+            : {}),
         },
         data: {
           serveStatus,
@@ -605,6 +1005,7 @@ export class OrdersService {
             orderItemId: id,
             previousStatus: item.serveStatus,
             currentStatus: serveStatus,
+            ...(pickup ? { pickupCodeVerified: true } : {}),
             inventoryMovements: inventoryMovements.map((movement) => ({
               inventoryItemId: movement.inventoryItemId,
               transactionId: movement.transactionId,

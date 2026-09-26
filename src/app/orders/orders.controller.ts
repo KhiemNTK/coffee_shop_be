@@ -1,6 +1,9 @@
 import {
   Controller,
   Get,
+  Header,
+  HttpCode,
+  HttpStatus,
   Post,
   Body,
   Patch,
@@ -8,13 +11,20 @@ import {
   Delete,
   Query,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
   GetHandoffItemsDto,
+  GetTakeawayFeedbackDto,
+  GetTakeawayFeedbackSummaryDto,
   MergeDiningTableDto,
   OpenSessionDto,
+  PickupCodeDto,
+  PickupCurrentCodeDto,
+  PickupHandoffDto,
   SplitOrderSessionDto,
+  SubmitTakeawayFeedbackDto,
   TransferDiningTableDto,
   UpdateOrderItemStatusDto,
 } from './dto';
@@ -23,6 +33,7 @@ import { IDDto } from '../../common/dto/param.dto';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import { SkipAuth } from '../auth/auth.decorator';
 
 @Controller('orders')
 export class OrdersController {
@@ -50,6 +61,85 @@ export class OrdersController {
   @RequirePermissions(PermissionKeys.ORDERS_SESSIONS_READ)
   getHandoffItems(@Query() query: GetHandoffItemsDto) {
     return this.ordersService.getHandoffItems(query);
+  }
+
+  @Post('takeaway/invoices/:id/pickup-code')
+  @RequirePermissions(PermissionKeys.INVOICES_READ)
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  issuePickupCode(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.issuePickupCode(id, employeeId);
+  }
+
+  @Post('takeaway/invoices/:id/pickup-code/rotate')
+  @RequirePermissions(PermissionKeys.INVOICES_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  rotatePickupCode(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() { code }: PickupCurrentCodeDto,
+  ) {
+    return this.ordersService.rotatePickupCode(id, code, employeeId);
+  }
+
+  @Post('takeaway/invoices/:id/pickup-code/revoke')
+  @RequirePermissions(PermissionKeys.INVOICES_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  revokePickupCode(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() { code }: PickupCurrentCodeDto,
+  ) {
+    return this.ordersService.revokePickupCode(id, code, employeeId);
+  }
+
+  @Post('takeaway/pickup/status')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  getPickupStatus(@Body() { invoiceId, code }: PickupCodeDto) {
+    return this.ordersService.getPickupStatus(invoiceId, code);
+  }
+
+  @Post('takeaway/pickup/collect')
+  @RequirePermissions(PermissionKeys.ORDERS_ITEMS_HANDOFF)
+  @HttpCode(HttpStatus.OK)
+  handoffWithPickupCode(
+    @Employee('employeeId') employeeId: string,
+    @Body() { invoiceId, code, itemId }: PickupHandoffDto,
+  ) {
+    return this.ordersService.handoffWithPickupCode(
+      invoiceId,
+      code,
+      itemId,
+      employeeId,
+    );
+  }
+
+  @Post('takeaway/pickup/feedback')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  submitTakeawayFeedback(@Body() dto: SubmitTakeawayFeedbackDto) {
+    return this.ordersService.submitTakeawayFeedback(dto);
+  }
+
+  @Get('takeaway/feedback/summary')
+  @RequirePermissions(PermissionKeys.REPORTS_READ)
+  getTakeawayFeedbackSummary(@Query() query: GetTakeawayFeedbackSummaryDto) {
+    return this.ordersService.getTakeawayFeedbackSummary(query);
+  }
+
+  @Get('takeaway/feedback')
+  @RequirePermissions(PermissionKeys.REPORTS_READ)
+  getTakeawayFeedback(@Query() query: GetTakeawayFeedbackDto) {
+    return this.ordersService.getTakeawayFeedback(query);
   }
 
   @Get('sessions/:id')

@@ -68,6 +68,33 @@ separate staging rehearsal before go-live.
   `readyAt` is persisted when the item becomes ready. Dine-in
   keeps the existing `COOKING -> SERVED` path until prepaid table lifecycle is
   addressed; the direct path remains valid for older takeaway clients too.
+- For paid takeaway invoices, staff with `/invoices_read` can call
+  `POST /api/v1/orders/takeaway/invoices/:id/pickup-code`. The customer sends
+  `{invoiceId, code}` in the body of `POST /api/v1/orders/takeaway/pickup/status`;
+  staff with `/orders_items_handoff` sends `{invoiceId, code, itemId}` to
+  `POST /api/v1/orders/takeaway/pickup/collect`. Never put the code in a URL or
+  log. The code expires 72 hours after issuance; a repeated issue returns the
+  same active code. Staff with `/invoices_update` can rotate it using
+  `POST /api/v1/orders/takeaway/invoices/:id/pickup-code/rotate` or revoke it
+  using `POST /api/v1/orders/takeaway/invoices/:id/pickup-code/revoke`.
+  Both mutations require `{code}` in the body and return 409 for a stale code;
+  a retry cannot invalidate a newly rotated code.
+  Refunded or voided invoices cannot use a code. Codes issued before the
+  pickup-code lifecycle migration remain valid until 72 hours after invoice
+  creation unless rotated or revoked. Rotating `JWT_SECRET` invalidates all
+  codes; a staff member can issue a new one. Only code version and issuance
+  time are stored, never the code itself.
+- After every item is collected, the customer may send
+  `{invoiceId, code, rating, comment?}` to
+  `POST /api/v1/orders/takeaway/pickup/feedback`. The rating is 1-5 and the
+  optional comment is limited to 500 characters. One invoice has one immutable
+  feedback record; retrying the same payload returns it, while changing the
+  rating or comment returns 409. Staff with `/reports_read` can use
+  `GET /api/v1/orders/takeaway/feedback/summary` and
+  `GET /api/v1/orders/takeaway/feedback` to review 30 days by default, with
+  optional ISO-8601 `from`/`to` filters with timezone offsets. No customer
+  profile or phone field is collected; free-text comments may still contain
+  information typed by the customer and are staff-only.
 
 Deploy the new migrations before calling the reservation-request API. Apply
 permission seed changes to the intended database in a controlled release; code

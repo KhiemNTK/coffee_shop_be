@@ -2,6 +2,8 @@ export * from './add-order-items.dto';
 export * from './open-session.dto';
 export * from './update-item-status.dto';
 export * from './get-handoff-items.dto';
+export * from './pickup-code.dto';
+export * from './takeaway-feedback.dto';
 export * from './cancel-item.dto';
 export * from './transfer-dining-table.dto';
 export * from './merge-dining-table.dto';
