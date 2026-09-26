@@ -9,7 +9,11 @@ import {
   OnApplicationShutdown,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, ReservationStatus } from '@prisma/client';
+import {
+  Prisma,
+  ReservationRequestStatus,
+  ReservationStatus,
+} from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -22,14 +26,19 @@ import {
   RESERVATION_NO_SHOW_SCAN_INTERVAL_MS,
 } from '../../common/consts/reservation';
 import {
+  ApproveReservationRequestDto,
   CancelReservationDto,
+  CreatePublicReservationRequestDto,
   CreateReservationDto,
+  GetReservationRequestsDto,
   GetReservationsDto,
+  RejectReservationRequestDto,
   UpdateReservationDto,
 } from './dto';
 
 const MIN_RESERVATION_DURATION_MS = 15 * 60 * 1000;
 const MAX_RESERVATION_DURATION_MS = 8 * 60 * 60 * 1000;
+const MAX_PUBLIC_BOOKING_ADVANCE_MS = 30 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class ReservationsService
@@ -56,6 +65,136 @@ export class ReservationsService
 
   onApplicationShutdown() {
     if (this.noShowTimer) clearInterval(this.noShowTimer);
+  }
+
+  async createPublicRequest(dto: CreatePublicReservationRequestDto) {
+    this.assertValidWindow(dto.startsAt, dto.endsAt, true);
+    if (dto.startsAt.getTime() > Date.now() + MAX_PUBLIC_BOOKING_ADVANCE_MS) {
+      throw new BadRequestException(
+        'Reservations are limited to 30 days ahead.',
+      );
+    }
+    const request = await this.prisma.reservationRequest.create({
+      data: {
+        customerName: dto.customerName,
+        phoneNumber: dto.phoneNumber,
+        startsAt: dto.startsAt,
+        endsAt: dto.endsAt,
+        guestCount: dto.guestCount,
+        notes: dto.notes,
+      },
+      select: { id: true, status: true },
+    });
+    return { requestId: request.id, status: request.status };
+  }
+
+  async findRequests(query: GetReservationRequestsDto) {
+    const where: Prisma.ReservationRequestWhereInput = query.status
+      ? { status: query.status }
+      : {
+          status: ReservationRequestStatus.PENDING,
+          startsAt: { gt: new Date() },
+        };
+    const totalItems = await this.prisma.reservationRequest.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const list = await this.prisma.reservationRequest.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    return paging.format(list);
+  }
+
+  async approveRequest(
+    id: string,
+    employeeId: string,
+    { tableId }: ApproveReservationRequestDto,
+  ) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await this.assertActiveEmployee(tx, employeeId);
+        const request = await tx.reservationRequest.findUnique({
+          where: { id },
+        });
+        if (!request) throw new NotFoundException('Request not found.');
+        if (request.status !== ReservationRequestStatus.PENDING) {
+          throw new ConflictException('Request has already been reviewed.');
+        }
+        this.assertValidWindow(request.startsAt, request.endsAt, true);
+        await this.assertActiveTable(tx, tableId);
+
+        const claimed = await tx.reservationRequest.updateMany({
+          where: { id, status: ReservationRequestStatus.PENDING },
+          data: {
+            status: ReservationRequestStatus.APPROVED,
+            reviewedAt: new Date(),
+            reviewedById: employeeId,
+          },
+        });
+        if (claimed.count !== 1) {
+          throw new ConflictException('Request has already been reviewed.');
+        }
+
+        const reservation = await tx.reservation.create({
+          data: {
+            customerName: request.customerName,
+            phoneNumber: request.phoneNumber,
+            startsAt: request.startsAt,
+            endsAt: request.endsAt,
+            guestCount: request.guestCount,
+            notes: request.notes,
+            tableId,
+            employeeId,
+          },
+          include: this.reservationInclude,
+        });
+        await tx.reservationRequest.update({
+          where: { id },
+          data: { reservationId: reservation.id },
+        });
+        await this.logAction(tx, employeeId, 'RESERVATION_REQUEST_APPROVED', {
+          requestId: id,
+          reservationId: reservation.id,
+          tableId,
+        });
+        return reservation;
+      });
+    } catch (error) {
+      this.rethrowScheduleConflict(error);
+    }
+  }
+
+  async rejectRequest(
+    id: string,
+    employeeId: string,
+    { reason }: RejectReservationRequestDto,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const request = await tx.reservationRequest.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!request) throw new NotFoundException('Request not found.');
+      const rejected = await tx.reservationRequest.updateMany({
+        where: { id, status: ReservationRequestStatus.PENDING },
+        data: {
+          status: ReservationRequestStatus.REJECTED,
+          rejectionReason: reason,
+          reviewedAt: new Date(),
+          reviewedById: employeeId,
+        },
+      });
+      if (rejected.count !== 1) {
+        throw new ConflictException('Request has already been reviewed.');
+      }
+      await this.logAction(tx, employeeId, 'RESERVATION_REQUEST_REJECTED', {
+        requestId: id,
+        reason,
+      });
+      return { requestId: id, status: ReservationRequestStatus.REJECTED };
+    });
   }
 
   async create(employeeId: string, dto: CreateReservationDto) {
@@ -230,6 +369,20 @@ export class ReservationsService
     return result.count;
   }
 
+  async markExpiredPublicRequests(now = new Date()) {
+    const result = await this.prisma.reservationRequest.updateMany({
+      where: {
+        status: ReservationRequestStatus.PENDING,
+        startsAt: { lte: now },
+      },
+      data: {
+        status: ReservationRequestStatus.EXPIRED,
+        reviewedAt: now,
+      },
+    });
+    return result.count;
+  }
+
   private readonly reservationInclude = {
     table: { select: { id: true, name: true, status: true } },
     employee: { select: { id: true, fullName: true } },
@@ -322,9 +475,15 @@ export class ReservationsService
 
   private async refreshNoShows() {
     try {
-      const count = await this.markOverdueNoShows();
+      const [count, expired] = await Promise.all([
+        this.markOverdueNoShows(),
+        this.markExpiredPublicRequests(),
+      ]);
       if (count > 0) {
         this.logger.log(`Marked ${count} overdue reservations as no-show.`);
+      }
+      if (expired > 0) {
+        this.logger.log(`Expired ${expired} public reservation requests.`);
       }
     } catch (error) {
       this.logger.error(

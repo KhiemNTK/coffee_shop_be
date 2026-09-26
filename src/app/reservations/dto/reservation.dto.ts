@@ -1,4 +1,4 @@
-import { ReservationStatus } from '@prisma/client';
+import { ReservationRequestStatus, ReservationStatus } from '@prisma/client';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
@@ -82,5 +82,38 @@ export class ReservationIdDto extends createZodDto(
 ) {}
 
 export class CancelReservationDto extends createZodDto(
+  z.object({ reason: z.string().trim().min(1).max(500) }),
+) {}
+
+export class CreatePublicReservationRequestDto extends createZodDto(
+  z
+    .object({
+      customerName: z.string().trim().min(1).max(120),
+      phoneNumber: ReservationFields.phoneNumber,
+      startsAt: ReservationFields.startsAt,
+      endsAt: ReservationFields.endsAt,
+      guestCount: ReservationFields.guestCount,
+      notes: ReservationFields.notes,
+    })
+    .superRefine(validateWindow),
+) {}
+
+export class GetReservationRequestsDto extends createZodDto(
+  z.object({
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    page: z.coerce.number().int().min(1).default(1),
+    status: z.enum(ReservationRequestStatus).optional(),
+  }),
+) {}
+
+export class ReservationRequestIdDto extends createZodDto(
+  z.object({ id: z.uuid() }),
+) {}
+
+export class ApproveReservationRequestDto extends createZodDto(
+  z.object({ tableId: ReservationFields.tableId }),
+) {}
+
+export class RejectReservationRequestDto extends createZodDto(
   z.object({ reason: z.string().trim().min(1).max(500) }),
 ) {}

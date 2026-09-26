@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { ReservationStatus } from '@prisma/client';
+import { ReservationRequestStatus, ReservationStatus } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { ReservationsService } from './reservations.service';
 import type { OrdersService } from '../orders/orders.service';
@@ -24,6 +24,11 @@ describe('ReservationsService', () => {
       findUniqueOrThrow: jest.fn(),
       updateMany: jest.fn(),
     },
+    reservationRequest: {
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+      update: jest.fn(),
+    },
     actionLog: { create: jest.fn() },
   };
   const prisma = {
@@ -32,6 +37,12 @@ describe('ReservationsService', () => {
       count: jest.fn(),
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    reservationRequest: {
+      create: jest.fn(),
+      count: jest.fn(),
+      findMany: jest.fn(),
       updateMany: jest.fn(),
     },
   };
@@ -49,6 +60,18 @@ describe('ReservationsService', () => {
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
     tx.diningTable.findFirst.mockResolvedValue({ id: 'table-id' });
     tx.reservation.create.mockResolvedValue(includeResult);
+    tx.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      customerName: 'Guest',
+      phoneNumber: '0900000000',
+      startsAt,
+      endsAt,
+      guestCount: 2,
+      notes: null,
+      status: ReservationRequestStatus.PENDING,
+    });
+    tx.reservationRequest.updateMany.mockResolvedValue({ count: 1 });
+    tx.reservationRequest.update.mockResolvedValue({});
     tx.actionLog.create.mockResolvedValue({ id: 'log-id' });
 
     service = new ReservationsService(
@@ -74,6 +97,58 @@ describe('ReservationsService', () => {
       }),
     );
     expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts an anonymous request without assigning a table', async () => {
+    prisma.reservationRequest.create.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.PENDING,
+    });
+
+    await expect(
+      service.createPublicRequest({
+        customerName: 'Guest',
+        phoneNumber: '0900000000',
+        startsAt,
+        endsAt,
+        guestCount: 2,
+      }),
+    ).resolves.toEqual({
+      requestId: 'request-id',
+      status: ReservationRequestStatus.PENDING,
+    });
+    expect(tx.reservation.create).not.toHaveBeenCalled();
+  });
+
+  it('assigns a table once when approving a public request', async () => {
+    tx.reservation.create.mockResolvedValue(includeResult);
+
+    await expect(
+      service.approveRequest('request-id', 'employee-id', {
+        tableId: 'table-id',
+      }),
+    ).resolves.toBe(includeResult);
+    expect(tx.reservationRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'request-id', status: ReservationRequestStatus.PENDING },
+      }),
+    );
+    expect(tx.reservationRequest.update).toHaveBeenCalledWith({
+      where: { id: 'request-id' },
+      data: { reservationId: 1 },
+    });
+    expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not create a reservation when the request was already claimed', async () => {
+    tx.reservationRequest.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.approveRequest('request-id', 'employee-id', {
+        tableId: 'table-id',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.reservation.create).not.toHaveBeenCalled();
   });
 
   it('rejects reservation windows shorter than 15 minutes', async () => {
@@ -139,6 +214,23 @@ describe('ReservationsService', () => {
       data: {
         status: ReservationStatus.NO_SHOW,
         noShowAt: now,
+      },
+    });
+  });
+
+  it('expires only public requests whose requested start time passed', async () => {
+    const now = new Date('2026-09-25T10:00:00.000Z');
+    prisma.reservationRequest.updateMany.mockResolvedValue({ count: 2 });
+
+    await expect(service.markExpiredPublicRequests(now)).resolves.toBe(2);
+    expect(prisma.reservationRequest.updateMany).toHaveBeenCalledWith({
+      where: {
+        status: ReservationRequestStatus.PENDING,
+        startsAt: { lte: now },
+      },
+      data: {
+        status: ReservationRequestStatus.EXPIRED,
+        reviewedAt: now,
       },
     });
   });
