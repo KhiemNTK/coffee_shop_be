@@ -21,7 +21,7 @@ import {
 } from './dto';
 import { PromotionsService } from './promotions.service';
 
-@ApiTags('promotions')
+@ApiTags('Promotions')
 @Controller('promotions')
 export class PromotionsController {
   constructor(private readonly promotionsService: PromotionsService) {}

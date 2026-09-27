@@ -1,19 +1,13 @@
-import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DiscountType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import type {
-  ExtendedPrismaTransactionClient,
-  PromotionEventBase,
-} from '../../common/types';
+import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import {
   CreatePromotionDto,
   GetActivePromotionsDto,
   SearchPromotionsDto,
   UpdatePromotionDto,
 } from './dto';
-import { PROMOTION_EVENTS } from './events/promotion.events';
-import { PromotionEventsPublisher } from './events/promotion-events.publisher';
 import { PromotionPolicyService } from './policies/promotion-policy.service';
 import { PromotionsRepository } from './repositories/promotions.repository';
 import { PromotionAuditService } from './services/promotion-audit.service';
@@ -28,7 +22,6 @@ export class PromotionsService {
     private readonly promotionTransactionService: PromotionTransactionService,
     private readonly promotionAuditService: PromotionAuditService,
     private readonly promotionQueryService: PromotionQueryService,
-    private readonly promotionEventsPublisher: PromotionEventsPublisher,
   ) {}
 
   async create(employeeId: string, dto: CreatePromotionDto) {
@@ -57,7 +50,6 @@ export class PromotionsService {
       },
     );
 
-    this.emitPromotionEvent(PROMOTION_EVENTS.CREATED, promotion);
     return promotion;
   }
 
@@ -120,7 +112,6 @@ export class PromotionsService {
       },
     );
 
-    this.emitPromotionEvent(PROMOTION_EVENTS.UPDATED, promotion);
     return promotion;
   }
 
@@ -145,7 +136,6 @@ export class PromotionsService {
       },
     );
 
-    this.emitPromotionEvent(PROMOTION_EVENTS.DELETED, promotion);
     return {
       success: true,
       message: `Promotion #${id} has been deleted successfully`,
@@ -182,7 +172,6 @@ export class PromotionsService {
       },
     );
 
-    this.emitPromotionEvent(PROMOTION_EVENTS.RESTORED, promotion);
     return promotion;
   }
 
@@ -271,28 +260,6 @@ export class PromotionsService {
       discountValue: promotion.discountValue.toString(),
       maxDiscount: promotion.maxDiscount?.toString() ?? null,
       deletedAt: promotion.deletedAt?.toISOString() ?? null,
-    };
-  }
-
-  private emitPromotionEvent(
-    eventName:
-      | typeof PROMOTION_EVENTS.CREATED
-      | typeof PROMOTION_EVENTS.UPDATED
-      | typeof PROMOTION_EVENTS.DELETED
-      | typeof PROMOTION_EVENTS.RESTORED,
-    promotion: { id: string; name: string },
-  ) {
-    this.promotionEventsPublisher.emit(eventName, {
-      ...this.createEventBase(promotion.id),
-      name: promotion.name,
-    });
-  }
-
-  private createEventBase(promotionId: string): PromotionEventBase {
-    return {
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-      promotionId,
     };
   }
 }

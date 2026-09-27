@@ -74,9 +74,6 @@ importers:
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
-      decimal.js:
-        specifier: ^10.6.0
-        version: 10.6.0
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -98,9 +95,6 @@ importers:
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1
-      lodash:
-        specifier: ^4.18.1
-        version: 4.18.1
       ms:
         specifier: ^2.1.3
         version: 2.1.3
@@ -116,9 +110,6 @@ importers:
       passport-jwt:
         specifier: ^4.0.1
         version: 4.0.1
-      prisma-json-types-generator:
-        specifier: 3.6.0
-        version: 3.6.0(@prisma/client@6.19.0(prisma@6.19.0(typescript@5.9.3))(typescript@5.9.3))(prisma@6.19.0(typescript@5.9.3))(typescript@5.9.3)
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -147,9 +138,6 @@ importers:
       '@eslint/js':
         specifier: ^9.39.4
         version: 9.39.4
-      '@faker-js/faker':
-        specifier: ^10.4.0
-        version: 10.4.0
       '@nestjs/cli':
         specifier: ^11.0.0
         version: 11.0.21(@swc/cli@0.8.1(@swc/core@1.15.33)(chokidar@4.0.3))(@swc/core@1.15.33)(@types/node@22.19.19)(cssnano@7.1.9(postcss@8.5.15))(postcss@8.5.15)(prettier@3.8.3)
@@ -177,9 +165,6 @@ importers:
       '@types/jest':
         specifier: ^30.0.0
         version: 30.0.0
-      '@types/lodash':
-        specifier: ^4.17.25
-        version: 4.17.25
       '@types/multer':
         specifier: ^2.1.0
         version: 2.1.0
@@ -231,6 +216,9 @@ importers:
       prisma:
         specifier: ^6.19.0
         version: 6.19.0(typescript@5.9.3)
+      prisma-json-types-generator:
+        specifier: 3.6.0
+        version: 3.6.0(@prisma/client@6.19.0(prisma@6.19.0(typescript@5.9.3))(typescript@5.9.3))(prisma@6.19.0(typescript@5.9.3))(typescript@5.9.3)
       source-map-support:
         specifier: ^0.5.21
         version: 0.5.21

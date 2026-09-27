@@ -1,5 +1,4 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PromotionEventsPublisher } from './events/promotion-events.publisher';
 import { PromotionPolicyService } from './policies/promotion-policy.service';
 import { PromotionsService } from './promotions.service';
 import { PromotionsRepository } from './repositories/promotions.repository';
@@ -19,7 +18,6 @@ describe('PromotionsService', () => {
         { provide: PromotionTransactionService, useValue: {} },
         { provide: PromotionAuditService, useValue: {} },
         { provide: PromotionQueryService, useValue: {} },
-        { provide: PromotionEventsPublisher, useValue: {} },
       ],
     }).compile();
 
