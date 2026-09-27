@@ -74,8 +74,10 @@ export class LoggingInterceptor implements NestInterceptor {
             : {}),
       };
 
-      if (requestFailed) {
+      if (requestFailed && Number(statusCode) >= 500) {
         this.logger.error(logContext);
+      } else if (requestFailed) {
+        this.logger.warn(logContext);
       } else if (!ignoredRequest) {
         this.logger.log(logContext);
       }

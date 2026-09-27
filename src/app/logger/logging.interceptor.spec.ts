@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { CallHandler, ExecutionContext } from '@nestjs/common';
 import type { Response } from 'express';
-import { firstValueFrom, of } from 'rxjs';
+import { firstValueFrom, of, throwError } from 'rxjs';
 import {
   httpRequestsInFlight,
   httpRequestsTotal,
@@ -80,5 +80,27 @@ describe('LoggingInterceptor', () => {
     expect(inFlightIncrement).not.toHaveBeenCalled();
     expect(requestIncrement).not.toHaveBeenCalled();
     expect(logger.log).not.toHaveBeenCalled();
+  });
+
+  it('logs expected client failures below server failures', async () => {
+    const interceptor = new LoggingInterceptor();
+    const logger = { log: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    Object.assign(interceptor, { logger });
+    const { context, response } = createRequest(
+      '/api/v1/online-orders/requests',
+    );
+    response.statusCode = 404;
+
+    await expect(
+      firstValueFrom(
+        interceptor.intercept(context, {
+          handle: () => throwError(() => new Error('Not found')),
+        } as CallHandler),
+      ),
+    ).rejects.toThrow('Not found');
+    response.emit('finish');
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

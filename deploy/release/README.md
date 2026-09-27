@@ -98,14 +98,16 @@ then deploy the application. Never print old or new values in CI output.
 
 - Logical backups are not PITR or automated off-site retention. The operator
   must configure both and pass a timed restore drill.
-- The current Nest throttler uses process-local storage. If multiple API
-  replicas are deployed, rate limits are not shared across replicas; replace
-  its storage with Redis before treating limits as cluster-wide.
+- The Nest throttler uses Redis when `REDIS_URL` is configured, and rejects
+  requests if that configured Redis is unavailable. Run a multi-replica
+  rate-limit check before go-live; without `REDIS_URL`, dev/test use memory.
+  Confirm that the per-IP limit fits the real POS network topology, including
+  clients sharing one public IP. An edge abuse limit remains necessary.
 - The read-only k6 profile in `test/load` has not demonstrated 250 RPS steady
   or 500 RPS burst until run on production-sized staging with saved results.
   Financial and inventory concurrency tests need disposable fixtures and
   distinct idempotency keys; do not point mutation load at live data.
-- The production dependency audit on 2026-09-25 reported 33 high, 18 moderate
+- The production dependency audit on 2026-09-27 reported 33 high, 18 moderate
   and 5 low advisories, including paths through `multer` and Prisma/`effect`.
   The current lockfile is **not** security-cleared for go-live. Remediate and
   re-run the audit; do not suppress findings by adding an always-failing CI
