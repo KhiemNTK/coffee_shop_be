@@ -13,7 +13,7 @@ import { CurrentPrintDevice } from './print-device.decorator';
 import { PrintDeviceGuard } from './print-device.guard';
 import { PrintingService } from './printing.service';
 
-@ApiTags('print-agent')
+@ApiTags('Print Agent')
 @ApiHeader({ name: 'X-Print-Device-Id', required: true })
 @ApiHeader({ name: 'X-Print-Device-Key', required: true })
 @Controller('print-agent')

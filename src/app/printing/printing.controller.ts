@@ -23,7 +23,7 @@ import {
 } from './dto';
 import { PrintingService } from './printing.service';
 
-@ApiTags('printing')
+@ApiTags('Printing')
 @Controller('printing')
 export class PrintingController {
   constructor(private readonly printing: PrintingService) {}

@@ -8,7 +8,7 @@ import { BusinessDateDto, GetDashboardReportDto } from './dto';
 import { DailySalesCloseService } from './daily-sales-close.service';
 import { ReportsService } from './reports.service';
 
-@ApiTags('reports')
+@ApiTags('Reports')
 @Controller('reports')
 export class ReportsController {
   constructor(

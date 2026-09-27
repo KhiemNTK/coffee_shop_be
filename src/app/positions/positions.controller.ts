@@ -17,7 +17,9 @@ import {
   GetPositionsPaginationDto,
   UpdatePositionDto,
 } from './dto';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Positions')
 @Controller('positions')
 export class PositionsController {
   constructor(private readonly positionsService: PositionsService) {}

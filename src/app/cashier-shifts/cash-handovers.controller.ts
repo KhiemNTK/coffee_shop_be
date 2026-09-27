@@ -15,7 +15,7 @@ import {
   SettleCashHandoverDto,
 } from './dto';
 
-@ApiTags('cash-handovers')
+@ApiTags('Cash Handovers')
 @Controller('cash-handovers')
 export class CashHandoversController {
   constructor(private readonly cashHandoversService: CashHandoversService) {}

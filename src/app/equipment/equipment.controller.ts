@@ -19,7 +19,9 @@ import {
   UpdateEquipmentDto,
 } from './dto';
 import { EquipmentService } from './equipment.service';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Equipment')
 @Controller('equipment')
 export class EquipmentController {
   constructor(private readonly equipmentService: EquipmentService) {}

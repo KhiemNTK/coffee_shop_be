@@ -47,7 +47,7 @@ import {
 } from './dto';
 import { InventoryService } from './inventory.service';
 
-@ApiTags('inventory')
+@ApiTags('Inventory')
 @Controller('inventory')
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}

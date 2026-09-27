@@ -16,7 +16,7 @@ import { RequirePermissions } from '../authorization/authorization.decorator';
 import { CreateFundDto, GetFundsDto, UpdateFundDto } from './dto';
 import { FundsService } from './funds.service';
 
-@ApiTags('funds')
+@ApiTags('Funds')
 @Controller('funds')
 export class FundsController {
   constructor(private readonly fundsService: FundsService) {}

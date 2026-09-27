@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Post, Req, Res } from '@nestjs/common';
-import { ApiCookieAuth, ApiResponse } from '@nestjs/swagger';
+import { ApiCookieAuth, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import ms from 'ms';
 import { RequirePermissions } from '../authorization/authorization.decorator';
@@ -24,6 +24,7 @@ import {
   SignUpDto,
 } from './dto';
 
+@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}

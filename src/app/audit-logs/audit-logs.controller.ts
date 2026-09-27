@@ -5,7 +5,7 @@ import { RequirePermissions } from '../authorization/authorization.decorator';
 import { AuditLogsService } from './audit-logs.service';
 import { GetAuditLogsDto } from './dto/get-audit-logs.dto';
 
-@ApiTags('audit-logs')
+@ApiTags('Audit Logs')
 @Controller('audit-logs')
 export class AuditLogsController {
   constructor(private readonly auditLogs: AuditLogsService) {}

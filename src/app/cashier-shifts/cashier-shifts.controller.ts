@@ -15,7 +15,7 @@ import {
   RejectCashExpenseRequestDto,
 } from './dto';
 
-@ApiTags('cashier-shifts')
+@ApiTags('Cashier Shifts')
 @Controller('cashier-shifts')
 export class CashierShiftsController {
   constructor(private readonly cashierShiftsService: CashierShiftsService) {}

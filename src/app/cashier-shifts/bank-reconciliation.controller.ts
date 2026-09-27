@@ -12,7 +12,7 @@ import {
   IgnoreBankStatementEntryDto,
 } from './dto';
 
-@ApiTags('bank-reconciliation')
+@ApiTags('Bank Reconciliation')
 @Controller('bank-reconciliation')
 export class BankReconciliationController {
   constructor(

@@ -20,7 +20,9 @@ import {
   UpdateSystemSettingDto,
 } from './dto';
 import { SystemSettingsService } from './system-settings.service';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('System Settings')
 @Controller('system-settings')
 export class SystemSettingsController {
   constructor(private readonly systemSettingsService: SystemSettingsService) {}

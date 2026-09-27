@@ -23,7 +23,7 @@ import {
 import { KitchenRealtimeService } from './kitchen-realtime.service';
 import { KitchenService } from './kitchen.service';
 
-@ApiTags('kitchen')
+@ApiTags('Kitchen')
 @Controller('kitchen')
 export class KitchenController {
   constructor(

@@ -20,7 +20,7 @@ import {
 } from './dto';
 import { InvoicesService } from './invoices.service';
 
-@ApiTags('invoices')
+@ApiTags('Invoices')
 @Controller('invoices')
 export class InvoicesController {
   constructor(private readonly invoicesService: InvoicesService) {}

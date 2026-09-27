@@ -29,7 +29,9 @@ import {
   UpdateReservationDto,
 } from './dto';
 import { ReservationsService } from './reservations.service';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Reservations')
 @Controller('reservations')
 export class ReservationsController {
   constructor(private readonly reservationsService: ReservationsService) {}

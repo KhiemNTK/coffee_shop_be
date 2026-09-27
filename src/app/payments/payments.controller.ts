@@ -28,7 +28,7 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentRefundsService } from './payment-refunds.service';
 import { PaymentsService } from './payments.service';
 
-@ApiTags('payments')
+@ApiTags('Payments')
 @Controller()
 export class PaymentsController {
   constructor(

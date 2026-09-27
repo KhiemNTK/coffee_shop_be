@@ -19,7 +19,7 @@ import {
 } from './dto';
 import { PermissionsService } from './permissions.service';
 
-@ApiTags('permissions')
+@ApiTags('Permissions')
 @Controller('permissions')
 export class PermissionsController {
   constructor(private readonly permissionsService: PermissionsService) {}
