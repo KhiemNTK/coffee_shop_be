@@ -27,7 +27,7 @@ import {
 } from './dto';
 import { MenuService } from './menu.service';
 
-@ApiTags('menu')
+@ApiTags('Menu')
 @Controller('menu')
 export class MenuController {
   constructor(private readonly menuService: MenuService) {}

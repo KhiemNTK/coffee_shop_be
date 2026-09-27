@@ -82,7 +82,9 @@ describe('OrdersService', () => {
       },
       takeawayFeedback: {
         createMany: jest.fn(),
+        findUnique: jest.fn(),
         findUniqueOrThrow: jest.fn(),
+        updateMany: jest.fn(),
       },
     };
 
@@ -850,6 +852,109 @@ describe('OrdersService', () => {
           }),
         }),
       );
+    });
+
+    it('lists only unresolved low ratings oldest first', async () => {
+      prisma.takeawayFeedback.count.mockResolvedValue(1);
+      prisma.takeawayFeedback.findMany.mockResolvedValue([
+        { id: 'feedback-id' },
+      ]);
+      const page = await service.getOpenTakeawayFeedbackCases({
+        page: 1,
+        itemPerPage: 20,
+      });
+      expect(page).toMatchObject({
+        totalItems: 1,
+        list: [{ id: 'feedback-id' }],
+      });
+      expect(prisma.takeawayFeedback.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { rating: { lte: 2 }, resolvedAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        }),
+      );
+    });
+
+    it('resolves low feedback once with an audit entry and idempotent retry', async () => {
+      const stored = {
+        id: 'feedback-id',
+        invoiceId: 'invoice-id',
+        rating: 1,
+        resolvedAt: null as Date | null,
+        resolutionNote: null as string | null,
+        resolvedById: null as string | null,
+      };
+      tx.takeawayFeedback.findUnique.mockImplementation(() => ({ ...stored }));
+      tx.takeawayFeedback.updateMany.mockImplementation(({ data }: any) => {
+        Object.assign(stored, data);
+        return { count: 1 };
+      });
+      const input = { resolutionNote: 'Discussed at closing shift' };
+      const resolved = await service.resolveTakeawayFeedback(
+        stored.id,
+        'employee-id',
+        input,
+      );
+      expect(resolved).toMatchObject({
+        id: stored.id,
+        resolvedById: 'employee-id',
+        resolutionNote: input.resolutionNote,
+      });
+      expect(tx.actionLog.create).toHaveBeenCalledWith({
+        data: {
+          employeeId: 'employee-id',
+          actionType: 'TAKEAWAY_FEEDBACK_RESOLVED',
+          details: { feedbackId: stored.id, invoiceId: stored.invoiceId },
+        },
+      });
+      await expect(
+        service.resolveTakeawayFeedback(stored.id, 'employee-id', input),
+      ).resolves.toEqual(resolved);
+      expect(tx.takeawayFeedback.updateMany).toHaveBeenCalledTimes(1);
+      expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+      await expect(
+        service.resolveTakeawayFeedback(stored.id, 'employee-id', {
+          resolutionNote: 'Different reason',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rejects missing, high-rated, inactive, and concurrently resolved feedback', async () => {
+      tx.takeawayFeedback.findUnique.mockResolvedValue(null);
+      await expect(
+        service.resolveTakeawayFeedback('missing', 'employee-id', {
+          resolutionNote: 'Checked',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      tx.takeawayFeedback.findUnique.mockResolvedValue({
+        id: 'feedback-id',
+        rating: 5,
+        resolvedAt: null,
+      });
+      await expect(
+        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+          resolutionNote: 'Checked',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      tx.takeawayFeedback.findUnique.mockResolvedValue({
+        id: 'feedback-id',
+        invoiceId: 'invoice-id',
+        rating: 1,
+        resolvedAt: null,
+      });
+      tx.takeawayFeedback.updateMany.mockResolvedValue({ count: 0 });
+      await expect(
+        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+          resolutionNote: 'Checked',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.actionLog.create).not.toHaveBeenCalled();
+      tx.employee.findFirst.mockResolvedValue(null);
+      await expect(
+        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+          resolutionNote: 'Checked',
+        }),
+      ).rejects.toThrow('Employee is inactive or not found.');
     });
   });
 

@@ -16,6 +16,7 @@ import {
   AddOrderItemsDto,
   CancelOrderItemDto,
   GetHandoffItemsDto,
+  GetOpenTakeawayFeedbackCasesDto,
   GetTakeawayFeedbackDto,
   GetTakeawayFeedbackSummaryDto,
   MergeDiningTableDto,
@@ -23,6 +24,7 @@ import {
   PickupCodeDto,
   PickupCurrentCodeDto,
   PickupHandoffDto,
+  ResolveTakeawayFeedbackDto,
   SplitOrderSessionDto,
   SubmitTakeawayFeedbackDto,
   TransferDiningTableDto,
@@ -34,7 +36,9 @@ import { Employee } from '../../common/decorators/employee.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import { SkipAuth } from '../auth/auth.decorator';
+import { ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Orders')
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
@@ -134,6 +138,25 @@ export class OrdersController {
   @RequirePermissions(PermissionKeys.REPORTS_READ)
   getTakeawayFeedbackSummary(@Query() query: GetTakeawayFeedbackSummaryDto) {
     return this.ordersService.getTakeawayFeedbackSummary(query);
+  }
+
+  @Get('takeaway/feedback/cases')
+  @RequirePermissions(PermissionKeys.REPORTS_READ)
+  getOpenTakeawayFeedbackCases(
+    @Query() query: GetOpenTakeawayFeedbackCasesDto,
+  ) {
+    return this.ordersService.getOpenTakeawayFeedbackCases(query);
+  }
+
+  @Post('takeaway/feedback/:id/resolve')
+  @RequirePermissions(PermissionKeys.FEEDBACK_RESOLVE)
+  @HttpCode(HttpStatus.OK)
+  resolveTakeawayFeedback(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: ResolveTakeawayFeedbackDto,
+  ) {
+    return this.ordersService.resolveTakeawayFeedback(id, employeeId, dto);
   }
 
   @Get('takeaway/feedback')

@@ -36,3 +36,14 @@ export class GetTakeawayFeedbackDto extends createZodDto(
     rating: z.coerce.number().int().min(1).max(5).optional(),
   }),
 ) {}
+
+export class GetOpenTakeawayFeedbackCasesDto extends createZodDto(
+  z.object({
+    page: z.coerce.number().int().min(1).default(1),
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+  }),
+) {}
+
+export class ResolveTakeawayFeedbackDto extends createZodDto(
+  z.object({ resolutionNote: z.string().trim().min(1).max(500) }),
+) {}

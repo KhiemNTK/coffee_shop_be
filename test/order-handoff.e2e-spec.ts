@@ -327,8 +327,8 @@ describe('Paid order handoff (e2e)', () => {
     const feedbackInput = {
       invoiceId: ids.invoice,
       code: currentCode.code,
-      rating: 5,
-      comment: 'Quick pickup',
+      rating: 1,
+      comment: 'Pickup was delayed',
     };
     const [firstFeedback, repeatedFeedback] = await Promise.all([
       request(app.getHttpServer())
@@ -348,7 +348,7 @@ describe('Paid order handoff (e2e)', () => {
     ).toBe(1);
     await request(app.getHttpServer())
       .post(`${prefix}/orders/takeaway/pickup/feedback`)
-      .send({ ...feedbackInput, rating: 1 })
+      .send({ ...feedbackInput, rating: 5 })
       .expect(409);
     await request(app.getHttpServer())
       .post(`${prefix}/orders/takeaway/pickup/feedback`)
@@ -365,7 +365,7 @@ describe('Paid order handoff (e2e)', () => {
       to: undefined,
       page: 1,
       itemPerPage: 20,
-      rating: 5,
+      rating: 1,
     });
     expect(feedbackList.list).toContainEqual(
       expect.objectContaining({
@@ -373,6 +373,68 @@ describe('Paid order handoff (e2e)', () => {
         invoice: { invoiceNumber: `HANDOFF-${suffix}` },
       }),
     );
+    const { id: feedbackId } = await prisma.takeawayFeedback.findUniqueOrThrow({
+      where: { invoiceId: ids.invoice },
+      select: { id: true },
+    });
+    const openCases = await orders.getOpenTakeawayFeedbackCases({
+      page: 1,
+      itemPerPage: 20,
+    });
+    expect(openCases.list).toContainEqual(
+      expect.objectContaining({ id: feedbackId }),
+    );
+    const notes = ['Reviewed with bar staff', 'Reviewed with shift lead'];
+    const resolutions = await Promise.allSettled(
+      notes.map((resolutionNote) =>
+        orders.resolveTakeawayFeedback(feedbackId, ids.employee, {
+          resolutionNote,
+        }),
+      ),
+    );
+    expect(
+      resolutions.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      resolutions.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    for (const result of resolutions) {
+      if (result.status === 'rejected') {
+        expect(result.reason).toBeInstanceOf(ConflictException);
+      }
+    }
+    const savedFeedback = await prisma.takeawayFeedback.findUniqueOrThrow({
+      where: { invoiceId: ids.invoice },
+    });
+    expect(savedFeedback.resolvedAt).toBeInstanceOf(Date);
+    expect(savedFeedback.resolvedById).toBe(ids.employee);
+    expect(notes).toContain(savedFeedback.resolutionNote);
+    await expect(
+      orders.resolveTakeawayFeedback(savedFeedback.id, ids.employee, {
+        resolutionNote: savedFeedback.resolutionNote!,
+      }),
+    ).resolves.toMatchObject({ id: savedFeedback.id });
+    expect(
+      await prisma.actionLog.count({
+        where: {
+          employeeId: ids.employee,
+          actionType: 'TAKEAWAY_FEEDBACK_RESOLVED',
+        },
+      }),
+    ).toBe(1);
+    const remainingCases = await orders.getOpenTakeawayFeedbackCases({
+      page: 1,
+      itemPerPage: 20,
+    });
+    expect(
+      remainingCases.list.some((item) => item.id === savedFeedback.id),
+    ).toBe(false);
+    await expect(
+      prisma.takeawayFeedback.update({
+        where: { id: savedFeedback.id },
+        data: { resolvedById: null },
+      }),
+    ).rejects.toThrow();
     const after = await orders.getHandoffItems({ page: 1, itemPerPage: 20 });
     expect(after.list.some((item) => item.id === ids.orderItem)).toBe(false);
     const persisted = await prisma.orderItem.findUniqueOrThrow({

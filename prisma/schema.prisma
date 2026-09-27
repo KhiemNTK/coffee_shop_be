@@ -38,6 +38,13 @@ enum SessionStatus {
   CANCELLED
 }
 
+enum OnlineOrderStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
 enum ServeStatus {
   PENDING
   COOKING
@@ -388,8 +395,9 @@ model MenuItem {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  orderItems  OrderItem[]
-  ingredients MenuItemIngredient[]
+  orderItems              OrderItem[]
+  ingredients             MenuItemIngredient[]
+  onlineOrderRequestItems OnlineOrderRequestItem[]
 
   @@index([deletedAt, categoryId, isAvailable])
   @@index([kitchenStationId, deletedAt, isAvailable])
@@ -540,6 +548,8 @@ model Employee {
   idempotencyRequests         IdempotencyRequest[]
   requestedPrintJobs          PrintJob[]                      @relation("PrintJobRequestedBy")
   dailySalesCloses            DailySalesClose[]
+  resolvedTakeawayFeedbacks   TakeawayFeedback[]              @relation("TakeawayFeedbackResolvedBy")
+  reviewedOnlineOrders        OnlineOrderRequest[]            @relation("OnlineOrderReviewedBy")
 }
 
 model AuthSession {
@@ -992,6 +1002,7 @@ model OrderSession {
 
   reservation    Reservation?
   kitchenTickets KitchenTicket[]
+  onlineOrderRequest OnlineOrderRequest?
 
   @@index([sessionStatus, createdAt])
   @@index([tableId, sessionStatus])
@@ -1000,6 +1011,51 @@ model OrderSession {
 }
 
 //Chi tiết món ăn khách gọi trong phiên
+model OnlineOrderRequest {
+  id               String            @id @default(uuid())
+  clientRequestId  String            @unique
+  requestHash      String            @db.VarChar(64)
+  pickupName       String            @db.VarChar(80)
+  phoneNumber      String            @db.VarChar(20)
+  quotedSubtotal   Decimal           @db.Decimal(18, 2)
+  status           OnlineOrderStatus @default(PENDING)
+  rejectionReason  String?           @db.VarChar(200)
+  createdAt        DateTime          @default(now())
+  expiresAt        DateTime
+  reviewedAt       DateTime?
+  cancelledAt      DateTime?
+
+  reviewedById String?
+  reviewedBy   Employee? @relation("OnlineOrderReviewedBy", fields: [reviewedById], references: [id], onDelete: Restrict)
+
+  orderSessionId String?       @unique
+  orderSession   OrderSession? @relation(fields: [orderSessionId], references: [id], onDelete: Restrict)
+
+  items OnlineOrderRequestItem[]
+
+  @@index([status, expiresAt, id])
+  @@index([createdAt])
+  @@index([reviewedById])
+}
+
+model OnlineOrderRequestItem {
+  id                   String  @id @default(uuid())
+  lineNumber           Int
+  quantity             Int
+  note                 String? @db.VarChar(255)
+  quotedName           String
+  quotedUnitPrice      Decimal @db.Decimal(18, 2)
+
+  onlineOrderRequestId String
+  onlineOrderRequest   OnlineOrderRequest @relation(fields: [onlineOrderRequestId], references: [id], onDelete: Cascade)
+
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+
+  @@unique([onlineOrderRequestId, lineNumber])
+  @@index([menuItemId])
+}
+
 model OrderItem {
   id          String  @id @default(uuid())
   quantity    Int
@@ -1078,15 +1134,20 @@ model Invoice {
 }
 
 model TakeawayFeedback {
-  id        String   @id @default(uuid())
-  invoiceId String   @unique
-  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
-  rating    Int
-  comment   String?  @db.VarChar(500)
-  createdAt DateTime @default(now())
+  id             String    @id @default(uuid())
+  invoiceId      String    @unique
+  invoice        Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  rating         Int
+  comment        String?   @db.VarChar(500)
+  createdAt      DateTime  @default(now())
+  resolvedAt     DateTime?
+  resolutionNote String? @db.VarChar(500)
+  resolvedById   String?
+  resolvedBy     Employee? @relation("TakeawayFeedbackResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
 
   @@index([createdAt, id])
   @@index([rating, createdAt, id])
+  @@index([resolvedById])
 }
 
 model DailySalesClose {

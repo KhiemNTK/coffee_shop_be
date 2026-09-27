@@ -17,7 +17,9 @@ import { InventoryController } from '../inventory/inventory.controller';
 import { InvoicesController } from '../invoices/invoices.controller';
 import { MenuController } from '../menu/menu.controller';
 import { KitchenController } from '../kitchen/kitchen.controller';
+import { ManagementExceptionsController } from '../management-exceptions/management-exceptions.controller';
 import { MetricsController } from '../observability/metrics.controller';
+import { OnlineOrdersController } from '../online-orders/online-orders.controller';
 import { OrdersController } from '../orders/orders.controller';
 import { PaymentsController } from '../payments/payments.controller';
 import { PermissionsController } from '../permissions/permissions.controller';
@@ -46,8 +48,10 @@ const controllers = [
   InventoryController,
   InvoicesController,
   KitchenController,
+  ManagementExceptionsController,
   MenuController,
   MetricsController,
+  OnlineOrdersController,
   OrdersController,
   PaymentsController,
   PermissionsController,

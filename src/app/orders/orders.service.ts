@@ -22,9 +22,11 @@ import {
   AddOrderItemsDto,
   CancelOrderItemDto,
   GetHandoffItemsDto,
+  GetOpenTakeawayFeedbackCasesDto,
   GetTakeawayFeedbackDto,
   GetTakeawayFeedbackSummaryDto,
   MergeDiningTableDto,
+  ResolveTakeawayFeedbackDto,
   SplitOrderSessionDto,
   SubmitTakeawayFeedbackDto,
   TransferDiningTableDto,
@@ -571,6 +573,96 @@ export class OrdersService {
     return paging.format(list);
   }
 
+  async getOpenTakeawayFeedbackCases(query: GetOpenTakeawayFeedbackCasesDto) {
+    const where: Prisma.TakeawayFeedbackWhereInput = {
+      rating: { lte: 2 },
+      resolvedAt: null,
+    };
+    const totalItems = await this.prisma.takeawayFeedback.count({ where });
+    const paging = this.pagination.paging({ ...query, totalItems });
+    const list = await this.prisma.takeawayFeedback.findMany({
+      where,
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        rating: true,
+        comment: true,
+        createdAt: true,
+        invoice: { select: { invoiceNumber: true } },
+      },
+    });
+    return paging.format(list);
+  }
+
+  resolveTakeawayFeedback(
+    id: string,
+    employeeId: string,
+    { resolutionNote }: ResolveTakeawayFeedbackDto,
+  ) {
+    return this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const feedback = await tx.takeawayFeedback.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          invoiceId: true,
+          rating: true,
+          resolvedAt: true,
+          resolutionNote: true,
+          resolvedById: true,
+        },
+      });
+      if (!feedback) {
+        throw new NotFoundException('Takeaway feedback not found.');
+      }
+      if (feedback.rating > 2) {
+        throw new BadRequestException(
+          'Only low-rated feedback can be resolved.',
+        );
+      }
+      if (feedback.resolvedAt) {
+        if (
+          feedback.resolutionNote === resolutionNote &&
+          feedback.resolvedById === employeeId
+        ) {
+          return {
+            id: feedback.id,
+            rating: feedback.rating,
+            resolvedAt: feedback.resolvedAt,
+            resolutionNote: feedback.resolutionNote,
+            resolvedById: feedback.resolvedById,
+          };
+        }
+        throw new ConflictException('Takeaway feedback is already resolved.');
+      }
+
+      const resolvedAt = new Date();
+      const updated = await tx.takeawayFeedback.updateMany({
+        where: { id, rating: { lte: 2 }, resolvedAt: null },
+        data: { resolvedAt, resolutionNote, resolvedById: employeeId },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('Takeaway feedback is already resolved.');
+      }
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'TAKEAWAY_FEEDBACK_RESOLVED',
+          details: { feedbackId: id, invoiceId: feedback.invoiceId },
+        },
+      });
+      return {
+        id,
+        rating: feedback.rating,
+        resolvedAt,
+        resolutionNote,
+        resolvedById: employeeId,
+      };
+    });
+  }
+
   private feedbackPeriod({ from, to }: { from?: Date; to?: Date }) {
     const end = to ?? new Date();
     const start = from ?? new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -741,30 +833,42 @@ export class OrdersService {
   }
 
   async addOrderItems(orderSessionId: string, { items }: AddOrderItemsDto) {
-    const result = await this.runSerializableTransaction(async (tx) => {
-      const session = await tx.orderSession.findUnique({
+    const result = await this.runSerializableTransaction((tx) =>
+      this.addOrderItemsInTransaction(tx, orderSessionId, items),
+    );
+    return result.session;
+  }
+
+  async createOnlineTakeawaySession(
+    tx: ExtendedPrismaTransactionClient,
+    employeeId: string,
+    items: AddOrderItemsDto['items'],
+    quotedPrices: Map<string, Prisma.Decimal>,
+  ) {
+    const session = await this.createOrderSession(tx, { employeeId });
+    await this.addOrderItemsInTransaction(tx, session.id, items, quotedPrices);
+    return session.id;
+  }
+
+  private async addOrderItemsInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    orderSessionId: string,
+    items: AddOrderItemsDto['items'],
+    quotedPrices?: Map<string, Prisma.Decimal>,
+  ) {
+    const menuItemIds = [...new Set(items.map((item) => item.menuItemId))];
+    const [session, menuItems] = await Promise.all([
+      tx.orderSession.findUnique({
         where: { id: orderSessionId },
-      });
-
-      if (!session) {
-        throw new NotFoundException(
-          `Order session with ID ${orderSessionId} not found.`,
-        );
-      }
-
-      this.orderPolicy.assertActiveSession(
-        session.sessionStatus,
-        'Cannot add items to an inactive order session.',
-      );
-
-      const menuItemIds = [...new Set(items.map((item) => item.menuItemId))];
-      const menuItems = await tx.menuItem.findMany({
+      }),
+      tx.menuItem.findMany({
         where: {
           id: {
             in: menuItemIds,
           },
           deletedAt: null,
           isAvailable: true,
+          category: { deletedAt: null },
           OR: [
             { kitchenStationId: null },
             {
@@ -790,78 +894,98 @@ export class OrdersService {
             },
           },
         },
-      });
+      }),
+    ]);
 
-      if (menuItems.length !== menuItemIds.length) {
-        throw new NotFoundException(
-          'One or more menu items were not found or are unavailable.',
-        );
-      }
-
-      const menuItemsById = new Map(
-        menuItems.map((menuItem) => [menuItem.id, menuItem]),
+    if (!session) {
+      throw new NotFoundException(
+        `Order session with ID ${orderSessionId} not found.`,
       );
+    }
 
-      const createdItems = await tx.orderItem.createManyAndReturn({
-        data: items.map((item) => {
-          const menuItem = menuItemsById.get(item.menuItemId);
+    this.orderPolicy.assertActiveSession(
+      session.sessionStatus,
+      'Cannot add items to an inactive order session.',
+    );
 
-          if (!menuItem) {
-            throw new NotFoundException(
-              `Menu item with ID ${item.menuItemId} not found.`,
-            );
-          }
+    if (menuItems.length !== menuItemIds.length) {
+      throw new NotFoundException(
+        'One or more menu items were not found or are unavailable.',
+      );
+    }
 
-          return {
-            orderSessionId,
-            menuItemId: item.menuItemId,
-            quantity: item.quantity,
-            priceAtTime: menuItem.price,
-            note: item.note,
-          };
-        }),
-        select: {
-          id: true,
-          menuItemId: true,
-          quantity: true,
-          note: true,
-        },
-      });
+    if (
+      quotedPrices &&
+      menuItems.some(
+        (menuItem) => !quotedPrices.get(menuItem.id)?.equals(menuItem.price),
+      )
+    ) {
+      throw new ConflictException(
+        'Menu prices changed since the order was placed.',
+      );
+    }
 
-      const kitchenTickets = await this.kitchenRouting.createTickets(tx, {
-        orderSessionId,
-        menuItems,
-        orderItems: createdItems,
-      });
+    const menuItemsById = new Map(
+      menuItems.map((menuItem) => [menuItem.id, menuItem]),
+    );
 
-      const updatedSession = await tx.orderSession.findUnique({
-        where: { id: orderSessionId },
-        include: this.orderSessionInclude,
-      });
+    const createdItems = await tx.orderItem.createManyAndReturn({
+      data: items.map((item) => {
+        const menuItem = menuItemsById.get(item.menuItemId);
 
-      if (updatedSession) {
-        await this.enqueueOrderEvent(
-          tx,
-          ORDER_EVENTS.ITEMS_ADDED,
-          'OrderSession',
-          updatedSession.id,
-          {
-            ...this.createEventBase([updatedSession.tableId]),
-            sessionId: updatedSession.id,
-            tableId: updatedSession.tableId,
-            orderItemIds: createdItems.map((item) => item.id),
-            kitchenTicketIds: kitchenTickets.map((ticket) => ticket.id),
-          },
-        );
-      }
+        if (!menuItem) {
+          throw new NotFoundException(
+            `Menu item with ID ${item.menuItemId} not found.`,
+          );
+        }
 
-      return {
-        session: updatedSession,
-        orderItemIds: createdItems.map((item) => item.id),
-      };
+        return {
+          orderSessionId,
+          menuItemId: item.menuItemId,
+          quantity: item.quantity,
+          priceAtTime: menuItem.price,
+          note: item.note,
+        };
+      }),
+      select: {
+        id: true,
+        menuItemId: true,
+        quantity: true,
+        note: true,
+      },
     });
 
-    return result.session;
+    const kitchenTickets = await this.kitchenRouting.createTickets(tx, {
+      orderSessionId,
+      menuItems,
+      orderItems: createdItems,
+    });
+
+    const updatedSession = await tx.orderSession.findUnique({
+      where: { id: orderSessionId },
+      include: this.orderSessionInclude,
+    });
+
+    if (updatedSession) {
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.ITEMS_ADDED,
+        'OrderSession',
+        updatedSession.id,
+        {
+          ...this.createEventBase([updatedSession.tableId]),
+          sessionId: updatedSession.id,
+          tableId: updatedSession.tableId,
+          orderItemIds: createdItems.map((item) => item.id),
+          kitchenTicketIds: kitchenTickets.map((ticket) => ticket.id),
+        },
+      );
+    }
+
+    return {
+      session: updatedSession,
+      orderItemIds: createdItems.map((item) => item.id),
+    };
   }
 
   updateItemStatus(

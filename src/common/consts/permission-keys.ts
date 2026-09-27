@@ -118,8 +118,12 @@ export const PermissionKeys = {
   REPORTS_READ: '/reports_read',
   REPORTS_EXPORT: '/reports_export',
   REPORTS_CLOSE: '/reports_close',
+  FEEDBACK_RESOLVE: '/feedback_resolve',
 
   AUDIT_LOGS_READ: '/audit-logs_read',
+  MANAGEMENT_EXCEPTIONS_READ: '/management-exceptions_read',
+  ONLINE_ORDERS_READ: '/online-orders_read',
+  ONLINE_ORDERS_REVIEW: '/online-orders_review',
 
   FUNDS_READ: '/funds_read',
   FUNDS_MANAGE: '/funds_manage',

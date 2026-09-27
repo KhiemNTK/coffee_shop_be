@@ -71,26 +71,25 @@ export class MenuService {
           }
         : {}),
     };
-    const totalItems = await this.prisma.menuCategory.count({ where });
-    const paging = this.paginationUtil.paging({
-      ...query,
-      totalItems,
-    });
-    const list = await this.prisma.menuCategory.findMany({
-      where,
-      skip: paging.skip,
-      take: paging.itemPerPage,
-      orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      include: {
-        _count: {
-          select: {
-            menuItems: { where: { deletedAt: null } },
+    const paging = this.paginationUtil.paging(query);
+    const [totalItems, list] = await Promise.all([
+      this.prisma.menuCategory.count({ where }),
+      this.prisma.menuCategory.findMany({
+        where,
+        skip: paging.skip,
+        take: paging.itemPerPage,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        include: {
+          _count: {
+            select: {
+              menuItems: { where: { deletedAt: null } },
+            },
           },
         },
-      },
-    });
+      }),
+    ]);
 
-    return paging.format(list);
+    return this.paginationUtil.paging({ ...query, totalItems }).format(list);
   }
 
   async getCategoryById(id: string) {
@@ -212,27 +211,35 @@ export class MenuService {
           }
         : {}),
     };
-    const totalItems = await this.prisma.menuItem.count({ where });
-    const paging = this.paginationUtil.paging({
-      ...query,
-      totalItems,
-    });
-    const list = await this.prisma.menuItem.findMany({
-      where,
-      skip: paging.skip,
-      take: paging.itemPerPage,
-      orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      include: this.itemInclude,
-    });
+    const paging = this.paginationUtil.paging(query);
+    const [totalItems, list] = await Promise.all([
+      this.prisma.menuItem.count({ where }),
+      this.prisma.menuItem.findMany({
+        where,
+        skip: paging.skip,
+        take: paging.itemPerPage,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        include: this.itemInclude,
+      }),
+    ]);
 
-    return paging.format(list);
+    return this.paginationUtil.paging({ ...query, totalItems }).format(list);
   }
 
   getPublicCategories() {
     return this.prisma.menuCategory.findMany({
       where: {
         deletedAt: null,
-        menuItems: { some: { deletedAt: null, isAvailable: true } },
+        menuItems: {
+          some: {
+            deletedAt: null,
+            isAvailable: true,
+            OR: [
+              { kitchenStationId: null },
+              { kitchenStation: { is: { isActive: true, deletedAt: null } } },
+            ],
+          },
+        },
       },
       select: { id: true, name: true },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
@@ -244,6 +251,10 @@ export class MenuService {
       deletedAt: null,
       isAvailable: true,
       category: { deletedAt: null },
+      OR: [
+        { kitchenStationId: null },
+        { kitchenStation: { is: { isActive: true, deletedAt: null } } },
+      ],
       ...(query.categoryId ? { categoryId: query.categoryId } : {}),
       ...(query.keyword
         ? {
@@ -254,21 +265,23 @@ export class MenuService {
           }
         : {}),
     };
-    const totalItems = await this.prisma.menuItem.count({ where });
-    const paging = this.paginationUtil.paging({ ...query, totalItems });
-    const list = await this.prisma.menuItem.findMany({
-      where,
-      skip: paging.skip,
-      take: paging.itemPerPage,
-      orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      select: {
-        id: true,
-        name: true,
-        price: true,
-        category: { select: { id: true, name: true } },
-      },
-    });
-    return paging.format(list);
+    const paging = this.paginationUtil.paging(query);
+    const [totalItems, list] = await Promise.all([
+      this.prisma.menuItem.count({ where }),
+      this.prisma.menuItem.findMany({
+        where,
+        skip: paging.skip,
+        take: paging.itemPerPage,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          category: { select: { id: true, name: true } },
+        },
+      }),
+    ]);
+    return this.paginationUtil.paging({ ...query, totalItems }).format(list);
   }
 
   async getItemStockStatus(query: GetMenuItemsDto) {
@@ -288,33 +301,35 @@ export class MenuService {
           }
         : {}),
     };
-    const totalItems = await this.prisma.menuItem.count({ where });
-    const paging = this.paginationUtil.paging({ ...query, totalItems });
-    const items = await this.prisma.menuItem.findMany({
-      where,
-      skip: paging.skip,
-      take: paging.itemPerPage,
-      orderBy: [{ name: 'asc' }, { id: 'asc' }],
-      select: {
-        id: true,
-        name: true,
-        isAvailable: true,
-        ingredients: {
-          select: {
-            quantity: true,
-            inventoryItem: {
-              select: {
-                id: true,
-                name: true,
-                stock: true,
-                reorderPoint: true,
-                deletedAt: true,
+    const paging = this.paginationUtil.paging(query);
+    const [totalItems, items] = await Promise.all([
+      this.prisma.menuItem.count({ where }),
+      this.prisma.menuItem.findMany({
+        where,
+        skip: paging.skip,
+        take: paging.itemPerPage,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          isAvailable: true,
+          ingredients: {
+            select: {
+              quantity: true,
+              inventoryItem: {
+                select: {
+                  id: true,
+                  name: true,
+                  stock: true,
+                  reorderPoint: true,
+                  deletedAt: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      }),
+    ]);
 
     return paging.format(
       items.map((item) => {

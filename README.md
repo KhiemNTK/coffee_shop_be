@@ -42,6 +42,24 @@ separate staging rehearsal before go-live.
 - `GET /api/v1/menu/public/categories` and `/menu/public/items` expose only
   active categories and saleable item names/prices. Availability is manually
   controlled; this is not a promise that ingredients are reserved.
+- Remote takeaway uses `POST /api/v1/online-orders/requests` with
+  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?}]}`.
+  `clientRequestId` is a fresh UUID per checkout attempt; retry with the same
+  ID and payload returns the same request and `accessToken`, while a changed
+  payload returns 409. The server quotes current menu prices; no stock or
+  payment is reserved. Requests wait up to 30 minutes for staff review.
+- Customers send `{requestId, accessToken}` in the body of
+  `POST /api/v1/online-orders/requests/status` to track review, kitchen
+  readiness, and payment, or `/requests/cancel` to withdraw a pending request.
+  The token works for 72 hours from creation. Keep it out of URLs and logs;
+  rotating `JWT_SECRET` invalidates existing tokens. Staff use
+  `GET /api/v1/online-orders/requests` and `GET /requests/:id` with
+  `/online-orders_read`, then `POST /requests/:id/accept` or `/reject` with
+  `/online-orders_review`. Rejection requires `{reason}`. Acceptance creates
+  one takeaway order session and kitchen ticket atomically; changed menu prices
+  or unavailable items require staff to reject and ask the customer to reorder.
+  Checkout and payment happen at pickup through the existing invoice/POS flow;
+  online acceptance does not mark the order paid.
 - `POST /api/v1/reservations/public/requests` accepts a request up to 30 days
   ahead. It does **not** reserve a table or confirm the booking. Staff review
   requests through `GET /api/v1/reservations/requests` and approve with
@@ -95,6 +113,17 @@ separate staging rehearsal before go-live.
   optional ISO-8601 `from`/`to` filters with timezone offsets. No customer
   profile or phone field is collected; free-text comments may still contain
   information typed by the customer and are staff-only.
+- Ratings 1-2 remain in `GET /api/v1/orders/takeaway/feedback/cases` until
+  resolved. Staff with `/feedback_resolve` can send `{resolutionNote}` to
+  `POST /api/v1/orders/takeaway/feedback/:id/resolve`. The action records an
+  employee and audit entry; the note is internal and is not sent to customers.
+- Managers with `/management-exceptions_read` can use
+  `GET /api/v1/management/exceptions/summary` and
+  `GET /api/v1/management/exceptions?kind=PAYMENT&page=1&itemPerPage=20`.
+  Other kinds are `CASH_EXPENSE`, `CASH_HANDOVER`, and `FEEDBACK`. Each kind is
+  paginated independently, oldest first; the inbox is read-only and reflects
+  source records immediately. Resolve cases through their payment, cashier,
+  handover, or feedback APIs so existing checks and audit logs remain in force.
 
 Deploy the new migrations before calling the reservation-request API. Apply
 permission seed changes to the intended database in a controlled release; code

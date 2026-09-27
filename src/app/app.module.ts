@@ -43,6 +43,8 @@ import { ObservabilityModule } from './observability/observability.module';
 import { PrintingModule } from './printing/printing.module';
 import { KitchenModule } from './kitchen/kitchen.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
+import { ManagementExceptionsModule } from './management-exceptions/management-exceptions.module';
+import { OnlineOrdersModule } from './online-orders/online-orders.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -79,6 +81,8 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module';
     PrintingModule,
     KitchenModule,
     AuditLogsModule,
+    ManagementExceptionsModule,
+    OnlineOrdersModule,
   ],
   controllers: [AppController],
   providers: [
