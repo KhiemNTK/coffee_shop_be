@@ -19,6 +19,7 @@ export class CreateOnlineOrderDto extends createZodDto(
   z
     .object({
       clientRequestId: z.uuid(),
+      turnstileToken: z.string().min(1).max(2048).optional(),
       pickupName: z.string().trim().min(2).max(80),
       phoneNumber: z
         .string()

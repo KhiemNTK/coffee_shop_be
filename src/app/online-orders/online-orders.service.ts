@@ -28,6 +28,7 @@ import {
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import { TurnstileService } from '../auth/turnstile.service';
 import { OrdersService } from '../orders/orders.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
@@ -108,6 +109,7 @@ export class OnlineOrdersService {
     private readonly outbox: OutboxService,
     private readonly pagination: PaginationUtilService,
     config: ConfigService,
+    private readonly turnstile: TurnstileService,
   ) {
     this.pickupSchedule = readPickupSchedule(config);
     this.telegramBotUsername = config.get<string>('TELEGRAM_BOT_USERNAME');
@@ -126,7 +128,7 @@ export class OnlineOrdersService {
       .digest();
   }
 
-  async createPublicRequest(dto: CreateOnlineOrderDto) {
+  async createPublicRequest(dto: CreateOnlineOrderDto, ipAddress?: string) {
     const maxSubtotal = dto.maxSubtotal
       ? new Prisma.Decimal(dto.maxSubtotal).toFixed(2)
       : undefined;
@@ -146,6 +148,7 @@ export class OnlineOrdersService {
       select: publicRequestSelect,
     });
     if (existing) return this.replay(existing, requestHash);
+    await this.turnstile.verify(dto.turnstileToken, ipAddress, 'online_order');
     if (dto.pickupAt)
       assertPickupAt(dto.pickupAt, this.pickupSchedule, new Date());
 

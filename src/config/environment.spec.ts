@@ -7,6 +7,7 @@ const productionEnvironment = {
   FE_URL: 'https://coffee.example.com',
   JWT_SECRET: 'strong-access-secret-with-more-than-32-characters',
   JWT_REFRESH_SECRET: 'strong-refresh-secret-with-more-than-32-characters',
+  TURNSTILE_SECRET_KEY: 'strong-turnstile-secret-with-more-than-32-characters',
   ONLINE_REORDER_SECRET: 'strong-reorder-secret-with-more-than-32-characters',
   PASSWORD_RESET_URL: 'https://coffee.example.com/reset-password',
   AUTH_SIGNUP_ENABLED: 'false',
@@ -39,6 +40,55 @@ describe('validateEnvironment', () => {
     expect(environment.HOST).toBe('0.0.0.0');
     expect(environment.SWAGGER_ENABLED).toBe(true);
     expect(environment.METRICS_ENABLED).toBe(true);
+  });
+
+  it('treats blank optional identity credentials as unconfigured locally', () => {
+    const environment = validateEnvironment({
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+      GOOGLE_CLIENT_ID: '',
+      TURNSTILE_SECRET_KEY: '  ',
+    });
+    expect(environment.GOOGLE_CLIENT_ID).toBeUndefined();
+    expect(environment.TURNSTILE_SECRET_KEY).toBeUndefined();
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        TURNSTILE_SECRET_KEY: '',
+      }),
+    ).toThrow('Missing required production environment variables');
+  });
+
+  it('treats blank MoMo credentials as disabled and rejects partial setup', () => {
+    const base = {
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+    };
+    const blank = validateEnvironment({
+      ...base,
+      MOMO_PARTNER_CODE: '',
+      MOMO_ACCESS_KEY: ' ',
+      MOMO_SECRET_KEY: '',
+      MOMO_REDIRECT_URL: '',
+      MOMO_IPN_URL: '',
+    });
+    expect(blank.MOMO_PARTNER_CODE).toBeUndefined();
+    expect(() =>
+      validateEnvironment({ ...base, MOMO_PARTNER_CODE: 'TESTSHOP' }),
+    ).toThrow('MoMo requires partner code');
+  });
+
+  it('rejects sandbox MoMo gateway when MoMo is enabled in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        MOMO_PARTNER_CODE: 'PRODSHOP',
+        MOMO_ACCESS_KEY: 'prod-access-key',
+        MOMO_SECRET_KEY: 'strong-momo-secret-with-more-than-32-characters',
+        MOMO_REDIRECT_URL: 'https://coffee.example.com/payment/momo/return',
+        MOMO_IPN_URL: 'https://api.example.com/api/v1/payments/momo/ipn',
+      }),
+    ).toThrow('MoMo production endpoints');
   });
 
   it('rejects invalid boolean values instead of silently disabling security', () => {
@@ -111,6 +161,15 @@ describe('validateEnvironment', () => {
         ONLINE_REORDER_SECRET: productionEnvironment.JWT_SECRET,
       }),
     ).toThrow('ONLINE_REORDER_SECRET must be a distinct strong secret');
+  });
+
+  it('rejects Cloudflare testing secrets in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        TURNSTILE_SECRET_KEY: '1x0000000000000000000000000000000AA',
+      }),
+    ).toThrow('TURNSTILE_SECRET_KEY must be a production secret');
   });
 
   it('rejects public sign-up in production', () => {

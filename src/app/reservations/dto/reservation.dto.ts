@@ -89,6 +89,11 @@ export class CreatePublicReservationRequestDto extends createZodDto(
   z
     .object({
       customerName: z.string().trim().min(1).max(120),
+      clientRequestToken: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{43}$/)
+        .optional(),
+      turnstileToken: z.string().min(1).max(2048).optional(),
       phoneNumber: ReservationFields.phoneNumber,
       startsAt: ReservationFields.startsAt,
       endsAt: ReservationFields.endsAt,

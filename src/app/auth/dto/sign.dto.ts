@@ -17,6 +17,7 @@ import {
 export const SignInSchema = z.object({
   email: EmployeeEmailSchema,
   password: ExistingPasswordSchema,
+  turnstileToken: z.string().min(1).max(2048).optional(),
 });
 
 const AdditionalSchema = z.object({
@@ -26,7 +27,7 @@ const AdditionalSchema = z.object({
   phoneNumber: EmployeePhoneNumberSchema.optional().nullable(),
 });
 
-export const SignUpSchema = SignInSchema.extend({
+export const SignUpSchema = SignInSchema.omit({ turnstileToken: true }).extend({
   ...AdditionalSchema.shape,
   password: NewPasswordSchema,
 });
@@ -44,4 +45,29 @@ class SignInResponseDto extends createZodDto(SignInResponseSchema) {}
 
 class SignUpDto extends createZodDto(SignUpSchema) {}
 
-export { SignInDto, SignInResponseDto, SignUpDto };
+class GoogleSignInDto extends createZodDto(
+  z.object({
+    idToken: z.string().min(100).max(8192),
+    turnstileToken: z.string().min(1).max(2048).optional(),
+  }),
+) {}
+
+class GoogleLinkDto extends createZodDto(
+  z.object({
+    idToken: z.string().min(100).max(8192),
+    password: ExistingPasswordSchema,
+  }),
+) {}
+
+class GoogleUnlinkDto extends createZodDto(
+  z.object({ password: ExistingPasswordSchema }),
+) {}
+
+export {
+  SignInDto,
+  SignInResponseDto,
+  SignUpDto,
+  GoogleSignInDto,
+  GoogleLinkDto,
+  GoogleUnlinkDto,
+};

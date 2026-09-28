@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Post, Req, Res } from '@nestjs/common';
 import { ApiCookieAuth, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import ms from 'ms';
 import { RequirePermissions } from '../authorization/authorization.decorator';
@@ -18,6 +19,9 @@ import { SkipCsrf } from './csrf.decorator';
 import { TokenKeys } from './consts/jwt.const';
 import {
   ForgotPasswordDto,
+  GoogleLinkDto,
+  GoogleSignInDto,
+  GoogleUnlinkDto,
   ResetPasswordDto,
   SignInDto,
   SignInResponseDto,
@@ -48,6 +52,7 @@ export class AuthController {
   @Post('sign-in')
   @SkipAuth()
   @SkipCsrf()
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @ApiResponse({ type: SignInResponseDto })
   async signIn(
     @Body() dto: SignInDto,
@@ -60,6 +65,47 @@ export class AuthController {
     );
     this.setAuthCookies(res, tokens);
     return tokens;
+  }
+
+  @Post('google')
+  @SkipAuth()
+  @SkipCsrf()
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @ApiResponse({ type: SignInResponseDto })
+  async signInWithGoogle(
+    @Body() dto: GoogleSignInDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const tokens = await this.authService.signInWithGoogle(
+      dto,
+      this.getRequestMetadata(req),
+    );
+    this.setAuthCookies(res, tokens);
+    return tokens;
+  }
+
+  @Post('google/link')
+  @RequirePermissions()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  linkGoogle(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: GoogleLinkDto,
+  ) {
+    return this.authService.linkGoogle(employeeId, dto);
+  }
+
+  @Post('google/unlink')
+  @RequirePermissions()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async unlinkGoogle(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: GoogleUnlinkDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.unlinkGoogle(employeeId, dto);
+    this.clearAuthCookies(res);
+    return result;
   }
 
   @Get('me')
@@ -105,8 +151,9 @@ export class AuthController {
   @Post('forgot-password')
   @SkipAuth()
   @SkipCsrf()
-  forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.authService.forgotPassword(dto);
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
+    return this.authService.forgotPassword(dto, this.getRequestMetadata(req));
   }
 
   @Post('reset-password')

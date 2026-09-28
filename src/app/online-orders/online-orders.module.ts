@@ -3,6 +3,7 @@ import { PaginationUtilModule } from '../../common/utils/pagination-util/paginat
 import { OrdersModule } from '../orders/orders.module';
 import { InvoicesModule } from '../invoices/invoices.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { TurnstileModule } from '../auth/turnstile.module';
 import { OnlineOrdersController } from './online-orders.controller';
 import { OnlineOrdersService } from './online-orders.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
@@ -12,6 +13,7 @@ import { TelegramNotificationsService } from './telegram-notifications.service';
     OrdersModule,
     InvoicesModule,
     InventoryModule,
+    TurnstileModule,
     PaginationUtilModule,
   ],
   controllers: [OnlineOrdersController],

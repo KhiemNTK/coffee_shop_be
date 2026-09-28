@@ -16,6 +16,9 @@ export class EmployeeEntity implements EmployeePrisma {
   @ApiProperty({ example: 'nguyenvana@example.com' })
   email!: string;
 
+  @ApiHideProperty()
+  googleSubject!: string | null;
+
   @ApiPropertyOptional({ example: 'https://avatar.com/user.png' })
   avatarUrl!: string | null;
 

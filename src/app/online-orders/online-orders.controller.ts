@@ -9,9 +9,11 @@ import {
   Param,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
@@ -62,8 +64,8 @@ export class OnlineOrdersController {
   @SkipAuth()
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  createRequest(@Body() dto: CreateOnlineOrderDto) {
-    return this.onlineOrders.createPublicRequest(dto);
+  createRequest(@Body() dto: CreateOnlineOrderDto, @Req() req: Request) {
+    return this.onlineOrders.createPublicRequest(dto, req.ip);
   }
 
   @Post('requests/status')

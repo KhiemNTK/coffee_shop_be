@@ -18,6 +18,7 @@ const SESSION_REVOKE_REASONS = {
   REFRESH_REUSE: 'REFRESH_REUSE',
   PASSWORD_RESET: 'PASSWORD_RESET',
   EMPLOYEE_DISABLED: 'EMPLOYEE_DISABLED',
+  GOOGLE_UNLINKED: 'GOOGLE_UNLINKED',
 } as const;
 
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -33,6 +34,7 @@ export class AuthSessionService {
   async createSession(
     employee: { id: string; email: string },
     metadata: AuthRequestMetadata,
+    googleSubject?: string,
   ) {
     const sessionId = randomUUID();
     const familyId = randomUUID();
@@ -43,16 +45,30 @@ export class AuthSessionService {
       familyId,
     });
 
-    await this.prisma.authSession.create({
-      data: {
-        id: sessionId,
-        familyId,
-        employeeId: employee.id,
-        refreshTokenHash: this.authTokenService.hashToken(tokens.refreshToken),
-        expiresAt: this.getRefreshExpiry(),
-        ...this.normalizeMetadata(metadata),
-      },
-    });
+    const data = {
+      id: sessionId,
+      familyId,
+      employeeId: employee.id,
+      refreshTokenHash: this.authTokenService.hashToken(tokens.refreshToken),
+      expiresAt: this.getRefreshExpiry(),
+      ...this.normalizeMetadata(metadata),
+    };
+    if (googleSubject) {
+      await this.prisma.$transaction(async (tx) => {
+        const linked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "Employee"
+          WHERE id = ${employee.id} AND "googleSubject" = ${googleSubject}
+            AND "isActive" = true AND "deletedAt" IS NULL
+          FOR SHARE
+        `;
+        if (!linked.length) {
+          throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+        }
+        await tx.authSession.create({ data });
+      });
+    } else {
+      await this.prisma.authSession.create({ data });
+    }
 
     return tokens;
   }

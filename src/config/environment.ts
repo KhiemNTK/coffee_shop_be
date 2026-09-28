@@ -19,6 +19,19 @@ const CorsOriginsSchema = z.string().refine(
   'FE_URL must contain comma-separated absolute URLs',
 );
 
+const OptionalCredentialSchema = z.preprocess(
+  (value) =>
+    typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.string().trim().min(20).optional(),
+);
+
+const optionalBlank = <T extends z.ZodType>(schema: T) =>
+  z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim() === '' ? undefined : value,
+    schema.optional(),
+  );
+
 const EnvironmentSchema = z
   .object({
     NODE_ENV: z
@@ -39,6 +52,8 @@ const EnvironmentSchema = z
       .default('development-refresh-secret-change-before-production'),
     PASSWORD_RESET_URL: z.url().default('http://localhost:3001/reset-password'),
     AUTH_SIGNUP_ENABLED: BooleanEnvSchema.default(false),
+    GOOGLE_CLIENT_ID: OptionalCredentialSchema,
+    TURNSTILE_SECRET_KEY: OptionalCredentialSchema,
     CSRF_ENABLED: BooleanEnvSchema.default(true),
     COOKIE_SECURE: BooleanEnvSchema.default(false),
     COOKIE_SAME_SITE: z.enum(['strict', 'lax', 'none']).default('strict'),
@@ -128,6 +143,24 @@ const EnvironmentSchema = z
       .min(5)
       .max(60)
       .default(15),
+    MOMO_PARTNER_CODE: optionalBlank(z.string().trim().min(1).max(50)),
+    MOMO_ACCESS_KEY: optionalBlank(z.string().trim().min(1)),
+    MOMO_SECRET_KEY: optionalBlank(z.string().min(16)),
+    MOMO_API_URL: z.url().default('https://test-payment.momo.vn'),
+    MOMO_REDIRECT_URL: optionalBlank(z.url()),
+    MOMO_IPN_URL: optionalBlank(z.url()),
+    MOMO_API_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(30_000)
+      .max(60_000)
+      .default(30_000),
+    MOMO_ATTEMPT_TTL_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(60)
+      .default(15),
   })
   .passthrough();
 
@@ -172,6 +205,18 @@ export function validateEnvironment(raw: Record<string, unknown>) {
       'Telegram requires bot token, username and webhook secret.',
     );
   }
+  const momo = [
+    environment.MOMO_PARTNER_CODE,
+    environment.MOMO_ACCESS_KEY,
+    environment.MOMO_SECRET_KEY,
+    environment.MOMO_REDIRECT_URL,
+    environment.MOMO_IPN_URL,
+  ];
+  if (momo.some(Boolean) && momo.some((value) => !value)) {
+    throw new Error(
+      'MoMo requires partner code, access key, secret key, redirect URL and IPN URL.',
+    );
+  }
   if (environment.NODE_ENV !== 'production') return environment;
 
   const required = [
@@ -180,6 +225,7 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     'FE_URL',
     'JWT_SECRET',
     'JWT_REFRESH_SECRET',
+    'TURNSTILE_SECRET_KEY',
     'ONLINE_REORDER_SECRET',
     'PASSWORD_RESET_URL',
     'MAIL_HOST',
@@ -217,6 +263,15 @@ export function validateEnvironment(raw: Record<string, unknown>) {
 
   if (environment.JWT_SECRET === environment.JWT_REFRESH_SECRET) {
     throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+  if (
+    !environment.TURNSTILE_SECRET_KEY ||
+    /^[123]x0{31}AA$/.test(environment.TURNSTILE_SECRET_KEY) ||
+    WEAK_SECRET_MARKERS.some((marker) =>
+      environment.TURNSTILE_SECRET_KEY?.toLowerCase().includes(marker),
+    )
+  ) {
+    throw new Error('TURNSTILE_SECRET_KEY must be a production secret');
   }
   if (
     !environment.ONLINE_REORDER_SECRET ||
@@ -292,6 +347,27 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     )
   ) {
     throw new Error('VNPAY_HASH_SECRET must not use a placeholder value');
+  }
+
+  if (environment.MOMO_PARTNER_CODE) {
+    if (
+      !environment.MOMO_API_URL.startsWith('https://') ||
+      new URL(environment.MOMO_API_URL).hostname !== 'payment.momo.vn' ||
+      !environment.MOMO_REDIRECT_URL?.startsWith('https://') ||
+      !environment.MOMO_IPN_URL?.startsWith('https://')
+    ) {
+      throw new Error(
+        'MoMo production endpoints must use HTTPS and production gateway',
+      );
+    }
+    if (
+      (environment.MOMO_SECRET_KEY?.length ?? 0) < 32 ||
+      WEAK_SECRET_MARKERS.some((marker) =>
+        environment.MOMO_SECRET_KEY?.toLowerCase().includes(marker),
+      )
+    ) {
+      throw new Error('MOMO_SECRET_KEY must be a strong production secret');
+    }
   }
 
   return environment;

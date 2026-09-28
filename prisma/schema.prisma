@@ -93,6 +93,7 @@ enum PaymentStatus {
 
 enum PaymentProvider {
   VNPAY
+  MOMO
 }
 
 enum PaymentAttemptStatus {
@@ -539,8 +540,9 @@ model EquipmentLifecycleEvent {
 // =============================================
 
 model Employee {
-  id          String   @id @default(uuid()) // MaNhanVien
-  email       String   @unique /// @zod.string.email()
+  id            String   @id @default(uuid()) // MaNhanVien
+  email         String   @unique /// @zod.string.email()
+  googleSubject String? @unique @db.VarChar(255)
   avatarUrl   String?
   fullName    String // HoTen
   address     String? // DiaChi
@@ -1396,7 +1398,7 @@ model PaymentAttempt {
   merchantReference        String               @unique
   idempotencyKey           String
   requestHash              String
-  providerTransactionNo    String?              @unique
+  providerTransactionNo    String?
   failureCode              String?
   closeSessionAfterPayment Boolean              @default(true)
   providerCreatedAt        DateTime             @default(now())
@@ -1424,6 +1426,7 @@ model PaymentAttempt {
   reconciliationIncidents PaymentReconciliationIncident[]
 
   @@unique([createdById, idempotencyKey])
+  @@unique([provider, providerTransactionNo])
   @@index([invoiceId, status, createdAt])
   @@index([status, expiresAt])
   @@index([status, nextReconcileAt])

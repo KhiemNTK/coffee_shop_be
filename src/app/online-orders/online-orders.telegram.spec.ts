@@ -9,6 +9,7 @@ import type { OutboxService } from '../durable/outbox.service';
 import type { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import type { InvoicesService } from '../invoices/invoices.service';
 import type { OrdersService } from '../orders/orders.service';
+import type { TurnstileService } from '../auth/turnstile.service';
 import { OnlineOrdersService } from './online-orders.service';
 
 describe('OnlineOrdersService Telegram link', () => {
@@ -43,6 +44,7 @@ describe('OnlineOrdersService Telegram link', () => {
     {} as OutboxService,
     {} as PaginationUtilService,
     config as unknown as ConfigService,
+    {} as TurnstileService,
   );
 
   beforeEach(() => jest.clearAllMocks());

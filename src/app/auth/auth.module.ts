@@ -11,8 +11,12 @@ import { AuthorizationModule } from '../authorization/authorization.module';
 import { AuthTokenService } from './auth-token.service';
 import { AuthSessionService } from './auth-session.service';
 import { PasswordResetService } from './password-reset.service';
+import { GoogleIdentityService } from './google-identity.service';
+import { TurnstileModule } from './turnstile.module';
+
 @Module({
   imports: [
+    TurnstileModule,
     AuthorizationModule,
     EmployeesModule,
     MailUtilModule,
@@ -29,6 +33,7 @@ import { PasswordResetService } from './password-reset.service';
     AuthTokenService,
     AuthSessionService,
     PasswordResetService,
+    GoogleIdentityService,
     StringUtilService,
   ],
   exports: [AuthService, AuthSessionService],

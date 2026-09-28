@@ -18,6 +18,30 @@ a shared database without reviewing the target URL and backup first.
 `pnpm prisma:seed` is an explicit development bootstrap step, not part of
 application startup or deployment. Review its target database before running.
 
+## Employee Google Sign-In and Turnstile
+
+- Set `GOOGLE_CLIENT_ID` to a Google web OAuth client ID to enable Google
+  sign-in. The frontend obtains a Google ID token and sends
+  `{idToken,turnstileToken}` to `POST /api/v1/auth/google`. This does not create
+  or automatically match employees by email. An active employee first signs in
+  with a password, then calls `POST /api/v1/auth/google/link` with
+  `{idToken,password}`. The verified Google email must match the employee email.
+  `POST /api/v1/auth/google/unlink` takes `{password}` and revokes all sessions;
+  the employee can still sign in with a password. `GET /api/v1/auth/me` returns
+  `googleLinked`, never the Google subject.
+- Configure the frontend Turnstile widget for `login` on password and Google
+  sign-in, `password_reset` on forgot-password, `online_order` on takeaway
+  checkout, and `reservation_request` on public reservations. Send the widget token as
+  `turnstileToken` in the JSON request body. The backend verifies it with
+  Cloudflare Siteverify and checks the action and hostname against `FE_URL`.
+  The public sitekey belongs in the frontend; keep `TURNSTILE_SECRET_KEY` only
+  on the backend. Production requires a real secret and HTTPS `FE_URL`.
+  Development/test may omit the secret to bypass verification locally.
+- Authenticated link/unlink requests using cookies require the existing
+  `X-CSRF-Token` header. Configure the frontend origin in `FE_URL`; do not put
+  Google ID tokens or Turnstile tokens in URLs or logs. These Google endpoints
+  authenticate staff, not customers placing remote takeaway orders.
+
 ## Verification
 
 `pnpm verify` validates Prisma, lints, type-checks, builds and runs unit tests.
@@ -49,10 +73,12 @@ separate staging rehearsal before go-live.
   choices must be resubmitted; accepted orders retain their price, choice and
   recipe snapshots. Ingredients are additive to the base recipe, not substitutes.
 - Remote takeaway uses `POST /api/v1/online-orders/requests` with
-  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?,optionIds?}], maxSubtotal?}`.
+  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?,optionIds?}], maxSubtotal?, turnstileToken?}`.
   `clientRequestId` is a fresh UUID per checkout attempt; retry with the same
   ID and payload returns the same request and `accessToken`, while a changed
-  payload returns 409. Set `maxSubtotal` to the current quote when confirming
+  payload returns 409. The first submission requires a valid Turnstile token
+  in production; an exact retry of a stored request does not need a fresh
+  token. Set `maxSubtotal` to the current quote when confirming
   a reordered cart; a higher server quote returns 409 without creating an
   order. The server quotes base price plus selected choices;
   `POST /api/v1/orders/sessions/:id/items` accepts the same `optionIds` per
@@ -182,12 +208,21 @@ separate staging rehearsal before go-live.
   should refresh periodically as well as on `kitchen.refresh` events. This is
   an operational queue snapshot, not a historical backlog or staffing forecast.
 - `POST /api/v1/reservations/public/requests` accepts a request up to 30 days
-  ahead. It does **not** reserve a table or confirm the booking. Staff review
+  ahead. Include `turnstileToken` from the `reservation_request` widget in
+  production. For safe retries, generate 32 random bytes with Web Crypto,
+  base64url-encode them as `clientRequestToken` (43 characters), and keep the
+  same token and payload across retries. The server stores only its hash and
+  returns it as the booking `accessToken`; a changed payload with the same
+  token returns 409. A stored exact retry does not need a new Turnstile token.
+  Treat `clientRequestToken` as a secret: never put it in URLs or logs. Older
+  clients may omit it and continue to receive a server-generated token, but
+  their creation requests are not idempotent. This request does **not** reserve
+  a table or confirm the booking. Staff review
   requests through `GET /api/v1/reservations/requests` and approve with
   `POST /api/v1/reservations/requests/:id/approve` plus a table ID, or reject with
   `POST /api/v1/reservations/requests/:id/reject`. Pending requests expire after their
-  requested start time. Public writes have a process-local rate limit; put a
-  shared edge rate limit or abuse control in front of multiple API replicas.
+  requested start time. Redis-backed rate limiting is shared between replicas
+  when `REDIS_URL` is configured.
 - Creation returns a one-time `accessToken`. The client uses it in the body of
   `POST /api/v1/reservations/public/requests/status` to check the outcome, or
   `POST /api/v1/reservations/public/requests/cancel` to withdraw while still

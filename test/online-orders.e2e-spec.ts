@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { INestApplication } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -15,6 +15,7 @@ import {
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
+import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { OnlineOrdersService } from '../src/app/online-orders/online-orders.service';
 import { vietnamDate } from '../src/app/online-orders/pickup-schedule';
 import { MenuService } from '../src/app/menu/menu.service';
@@ -28,6 +29,7 @@ describe('Remote takeaway orders (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
   let onlineOrders: OnlineOrdersService;
+  let turnstile: TurnstileService;
   let orders: OrdersService;
   let menu: MenuService;
   let shifts: CashierShiftsService;
@@ -57,6 +59,7 @@ describe('Remote takeaway orders (e2e)', () => {
     app = expressApp;
     prisma = module.get(PrismaService);
     onlineOrders = module.get(OnlineOrdersService);
+    turnstile = module.get(TurnstileService);
     orders = module.get(OrdersService);
     menu = module.get(MenuService);
     shifts = module.get(CashierShiftsService);
@@ -205,6 +208,41 @@ describe('Remote takeaway orders (e2e)', () => {
     } finally {
       await app?.close();
       throttleSpy?.mockRestore();
+    }
+  });
+
+  it('verifies new requests but preserves idempotent retries without a fresh challenge', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const verify = jest
+      .spyOn(turnstile, 'verify')
+      .mockImplementation((token, _ip, action) =>
+        token === 'challenge' && action === 'online_order'
+          ? Promise.resolve()
+          : Promise.reject(new ForbiddenException()),
+      );
+    try {
+      await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests`)
+        .send(dto)
+        .expect(403);
+      const created = await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests`)
+        .send({ ...dto, turnstileToken: 'challenge' })
+        .expect(201);
+      const replay = await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests`)
+        .send(dto)
+        .expect(201);
+      expect(replay.body.data).toEqual(created.body.data);
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledWith(
+        'challenge',
+        expect.any(String),
+        'online_order',
+      );
+    } finally {
+      verify.mockRestore();
     }
   });
 

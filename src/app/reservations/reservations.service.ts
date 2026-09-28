@@ -22,6 +22,7 @@ import {
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { OrdersService } from '../orders/orders.service';
+import { TurnstileService } from '../auth/turnstile.service';
 import {
   RESERVATION_NO_SHOW_GRACE_MS,
   RESERVATION_NO_SHOW_SCAN_INTERVAL_MS,
@@ -53,6 +54,7 @@ export class ReservationsService
     private readonly prisma: ExtendedPrismaClient,
     private readonly paginationUtil: PaginationUtilService,
     private readonly ordersService: OrdersService,
+    private readonly turnstile: TurnstileService,
   ) {}
 
   onApplicationBootstrap() {
@@ -68,27 +70,81 @@ export class ReservationsService
     if (this.noShowTimer) clearInterval(this.noShowTimer);
   }
 
-  async createPublicRequest(dto: CreatePublicReservationRequestDto) {
+  async createPublicRequest(
+    dto: CreatePublicReservationRequestDto,
+    ipAddress?: string,
+  ) {
+    const accessToken =
+      dto.clientRequestToken ?? randomBytes(32).toString('base64url');
+    const accessTokenHash = this.hashAccessToken(accessToken);
+    const replay = async () => {
+      const existing = await this.prisma.reservationRequest.findUnique({
+        where: { accessTokenHash },
+        select: {
+          id: true,
+          status: true,
+          customerName: true,
+          phoneNumber: true,
+          startsAt: true,
+          endsAt: true,
+          guestCount: true,
+          notes: true,
+        },
+      });
+      if (!existing) return null;
+      if (
+        existing.customerName !== dto.customerName ||
+        existing.phoneNumber !== dto.phoneNumber ||
+        existing.startsAt.getTime() !== dto.startsAt.getTime() ||
+        existing.endsAt.getTime() !== dto.endsAt.getTime() ||
+        existing.guestCount !== dto.guestCount ||
+        existing.notes !== (dto.notes ?? null)
+      ) {
+        throw new ConflictException('Reservation request token was reused.');
+      }
+      return { requestId: existing.id, status: existing.status, accessToken };
+    };
+    if (dto.clientRequestToken) {
+      const existing = await replay();
+      if (existing) return existing;
+    }
+    await this.turnstile.verify(
+      dto.turnstileToken,
+      ipAddress,
+      'reservation_request',
+    );
     this.assertValidWindow(dto.startsAt, dto.endsAt, true);
     if (dto.startsAt.getTime() > Date.now() + MAX_PUBLIC_BOOKING_ADVANCE_MS) {
       throw new BadRequestException(
         'Reservations are limited to 30 days ahead.',
       );
     }
-    const accessToken = randomBytes(32).toString('base64url');
-    const request = await this.prisma.reservationRequest.create({
-      data: {
-        accessTokenHash: this.hashAccessToken(accessToken),
-        customerName: dto.customerName,
-        phoneNumber: dto.phoneNumber,
-        startsAt: dto.startsAt,
-        endsAt: dto.endsAt,
-        guestCount: dto.guestCount,
-        notes: dto.notes,
-      },
-      select: { id: true, status: true },
-    });
-    return { requestId: request.id, status: request.status, accessToken };
+    try {
+      const request = await this.prisma.reservationRequest.create({
+        data: {
+          accessTokenHash,
+          customerName: dto.customerName,
+          phoneNumber: dto.phoneNumber,
+          startsAt: dto.startsAt,
+          endsAt: dto.endsAt,
+          guestCount: dto.guestCount,
+          notes: dto.notes,
+        },
+        select: { id: true, status: true },
+      });
+      return { requestId: request.id, status: request.status, accessToken };
+    } catch (error) {
+      if (
+        !dto.clientRequestToken ||
+        !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+        error.code !== 'P2002'
+      ) {
+        throw error;
+      }
+      const existing = await replay();
+      if (!existing) throw error;
+      return existing;
+    }
   }
 
   async trackPublicRequest(accessToken: string) {

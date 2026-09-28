@@ -8,6 +8,7 @@ import { ReservationRequestStatus, ReservationStatus } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { ReservationsService } from './reservations.service';
 import type { OrdersService } from '../orders/orders.service';
+import type { TurnstileService } from '../auth/turnstile.service';
 
 describe('ReservationsService', () => {
   const startsAt = new Date(Date.now() + 60 * 60 * 1000);
@@ -56,6 +57,7 @@ describe('ReservationsService', () => {
     paging: jest.fn(),
   };
   const ordersService = { checkInReservation: jest.fn() };
+  const turnstile = { verify: jest.fn() };
   let service: ReservationsService;
 
   beforeEach(() => {
@@ -79,11 +81,14 @@ describe('ReservationsService', () => {
     tx.reservationRequest.updateMany.mockResolvedValue({ count: 1 });
     tx.reservationRequest.update.mockResolvedValue({});
     tx.actionLog.create.mockResolvedValue({ id: 'log-id' });
+    prisma.reservationRequest.findUnique.mockResolvedValue(null);
+    turnstile.verify.mockResolvedValue(undefined);
 
     service = new ReservationsService(
       prisma as unknown as ExtendedPrismaClient,
       paginationUtil,
       ordersService as unknown as OrdersService,
+      turnstile as unknown as TurnstileService,
     );
   });
 

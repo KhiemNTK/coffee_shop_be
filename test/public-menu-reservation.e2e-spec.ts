@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto';
-import { INestApplication } from '@nestjs/common';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
+import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { ReservationsService } from '../src/app/reservations/reservations.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
@@ -14,6 +16,8 @@ describe('Public menu and reservation request (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
   let reservations: ReservationsService;
+  let turnstile: TurnstileService;
+  let throttleSpy: jest.SpyInstance;
   let prefix: string;
   let positionId: string;
   let employeeId: string;
@@ -23,6 +27,9 @@ describe('Public menu and reservation request (e2e)', () => {
   const suffix = randomUUID();
 
   beforeAll(async () => {
+    throttleSpy = jest
+      .spyOn(ThrottlerGuard.prototype, 'canActivate')
+      .mockResolvedValue(true);
     const module = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -31,6 +38,7 @@ describe('Public menu and reservation request (e2e)', () => {
     app = expressApp;
     prisma = module.get(PrismaService);
     reservations = module.get(ReservationsService);
+    turnstile = module.get(TurnstileService);
     prefix = module.get(ConfigService).get<string>('APP_PREFIX', '/api/v1');
     await app.init();
 
@@ -95,6 +103,7 @@ describe('Public menu and reservation request (e2e)', () => {
         await prisma.position.deleteMany({ where: { id: positionId } });
     } finally {
       await app?.close();
+      throttleSpy?.mockRestore();
     }
   });
 
@@ -109,6 +118,125 @@ describe('Public menu and reservation request (e2e)', () => {
     });
     expect(response.body.data.list[0]).not.toHaveProperty('ingredients');
     expect(response.body.data.list[0]).not.toHaveProperty('kitchenStationId');
+  });
+
+  it('requires human verification before creating a public reservation', async () => {
+    const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const dto = {
+      customerName: 'Verified guest',
+      phoneNumber: '0900000099',
+      startsAt: startsAt.toISOString(),
+      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000).toISOString(),
+      guestCount: 2,
+    };
+    const verify = jest
+      .spyOn(turnstile, 'verify')
+      .mockImplementation((token, _ip, action) =>
+        token === 'challenge' && action === 'reservation_request'
+          ? Promise.resolve()
+          : Promise.reject(new ForbiddenException()),
+      );
+    try {
+      await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests`)
+        .send(dto)
+        .expect(403);
+      const created = await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests`)
+        .send({ ...dto, turnstileToken: 'challenge' })
+        .expect(201);
+      publicRequestIds.push(created.body.data.requestId as string);
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledWith(
+        'challenge',
+        expect.any(String),
+        'reservation_request',
+      );
+    } finally {
+      verify.mockRestore();
+    }
+  });
+
+  it('replays the same reservation without a second challenge and rejects changed details', async () => {
+    const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const dto = {
+      clientRequestToken: randomBytes(32).toString('base64url'),
+      customerName: 'Idempotent guest',
+      phoneNumber: '0900000098',
+      startsAt: startsAt.toISOString(),
+      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000).toISOString(),
+      guestCount: 2,
+    };
+    const verify = jest
+      .spyOn(turnstile, 'verify')
+      .mockImplementation((token, _ip, action) =>
+        token === 'challenge' && action === 'reservation_request'
+          ? Promise.resolve()
+          : Promise.reject(new ForbiddenException()),
+      );
+    try {
+      const created = await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests`)
+        .send({ ...dto, turnstileToken: 'challenge' })
+        .expect(201);
+      publicRequestIds.push(created.body.data.requestId as string);
+      const replay = await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests`)
+        .send(dto)
+        .expect(201);
+      expect(replay.body.data).toEqual(created.body.data);
+      await request(app.getHttpServer())
+        .post(`${prefix}/reservations/public/requests`)
+        .send({ ...dto, guestCount: 3 })
+        .expect(409);
+      expect(verify).toHaveBeenCalledTimes(1);
+    } finally {
+      verify.mockRestore();
+    }
+  });
+
+  it('creates only one reservation request for concurrent retries', async () => {
+    const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const dto = {
+      clientRequestToken: randomBytes(32).toString('base64url'),
+      customerName: 'Concurrent guest',
+      phoneNumber: '0900000097',
+      startsAt: startsAt.toISOString(),
+      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000).toISOString(),
+      guestCount: 2,
+    };
+    const verify = jest
+      .spyOn(turnstile, 'verify')
+      .mockImplementation((token, _ip, action) =>
+        token?.startsWith('challenge-') && action === 'reservation_request'
+          ? Promise.resolve()
+          : Promise.reject(new ForbiddenException()),
+      );
+    try {
+      const [first, second] = await Promise.all([
+        request(app.getHttpServer())
+          .post(`${prefix}/reservations/public/requests`)
+          .send({ ...dto, turnstileToken: 'challenge-1' }),
+        request(app.getHttpServer())
+          .post(`${prefix}/reservations/public/requests`)
+          .send({ ...dto, turnstileToken: 'challenge-2' }),
+      ]);
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(first.body.data).toEqual(second.body.data);
+      publicRequestIds.push(first.body.data.requestId as string);
+      expect(
+        await prisma.reservationRequest.count({
+          where: {
+            accessTokenHash: createHash('sha256')
+              .update(dto.clientRequestToken)
+              .digest('hex'),
+          },
+        }),
+      ).toBe(1);
+    } finally {
+      verify.mockRestore();
+    }
   });
 
   it('keeps public requests unconfirmed until a staff member assigns a table', async () => {

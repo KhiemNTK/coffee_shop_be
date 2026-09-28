@@ -20,6 +20,7 @@ export class AutoMockingModule {
             return {
               get: jest.fn(),
               getOrThrow: jest.fn((key: string) => {
+                if (key === 'FE_URL') return 'http://localhost:3001';
                 if (key !== 'JWT_SECRET') {
                   throw new Error(`Unmocked config key: ${key}`);
                 }

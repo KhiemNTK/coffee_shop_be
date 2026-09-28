@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import { AUTH_ERRORS, SYSTEM_ERRORS } from '../../common/consts/message';
 import { DEFAULT_EMPLOYEE_ROLE_NAME } from '../../common/consts/permission-keys';
 import {
@@ -17,15 +18,23 @@ import type { AuthRequestMetadata, EmployeeInfo } from '../../common/types';
 import { StringUtilService } from '../../common/utils/string-util/string-util.service';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { EmployeesService } from '../employees/employees.service';
-import { AuthSessionService } from './auth-session.service';
+import {
+  AuthSessionService,
+  SESSION_REVOKE_REASONS,
+} from './auth-session.service';
 import { AuthTokenService } from './auth-token.service';
 import {
   ForgotPasswordDto,
+  GoogleLinkDto,
+  GoogleSignInDto,
+  GoogleUnlinkDto,
   ResetPasswordDto,
   SignInDto,
   SignUpDto,
 } from './dto';
 import { PasswordResetService } from './password-reset.service';
+import { GoogleIdentityService } from './google-identity.service';
+import { TurnstileService } from './turnstile.service';
 
 @Injectable()
 export class AuthService {
@@ -39,6 +48,8 @@ export class AuthService {
     private readonly authTokenService: AuthTokenService,
     private readonly authSessionService: AuthSessionService,
     private readonly passwordResetService: PasswordResetService,
+    private readonly googleIdentity: GoogleIdentityService,
+    private readonly turnstile: TurnstileService,
   ) {}
 
   verifyAccessToken(token: string) {
@@ -131,6 +142,7 @@ export class AuthService {
   }
 
   async signIn(signInDto: SignInDto, metadata: AuthRequestMetadata) {
+    await this.turnstile.verify(signInDto.turnstileToken, metadata.ipAddress);
     const employee = await this.employeesService.getEmployee({
       email: signInDto.email,
     });
@@ -147,6 +159,130 @@ export class AuthService {
     return this.authSessionService.createSession(employee, metadata);
   }
 
+  async signInWithGoogle(dto: GoogleSignInDto, metadata: AuthRequestMetadata) {
+    await this.turnstile.verify(dto.turnstileToken, metadata.ipAddress);
+    const identity = await this.googleIdentity.verify(dto.idToken);
+    const employee = await this.prisma.employee.findFirst({
+      where: { googleSubject: identity.subject, isActive: true },
+      select: { id: true, email: true },
+    });
+    if (!employee) {
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+    }
+    return this.authSessionService.createSession(
+      employee,
+      metadata,
+      identity.subject,
+    );
+  }
+
+  async linkGoogle(employeeId: string, dto: GoogleLinkDto) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        email: true,
+        password: true,
+        isActive: true,
+        googleSubject: true,
+      },
+    });
+    if (
+      !employee?.isActive ||
+      !(await this.stringUtilService.compare(dto.password, employee.password))
+    ) {
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+    }
+    const identity = await this.googleIdentity.verify(dto.idToken);
+    if (identity.email.toLowerCase() !== employee.email.toLowerCase()) {
+      throw new BadRequestException('Google email must match employee email.');
+    }
+    if (employee.googleSubject === identity.subject) return { linked: true };
+    if (employee.googleSubject) {
+      throw new BadRequestException('A Google account is already linked.');
+    }
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.employee.updateMany({
+          where: {
+            id: employeeId,
+            googleSubject: null,
+            isActive: true,
+            deletedAt: null,
+            email: employee.email,
+            password: employee.password,
+          },
+          data: { googleSubject: identity.subject },
+        });
+        if (updated.count !== 1) {
+          throw new BadRequestException('Google account link changed.');
+        }
+        await tx.actionLog.create({
+          data: {
+            employeeId,
+            actionType: 'GOOGLE_ACCOUNT_LINKED',
+            details: { provider: 'GOOGLE' },
+          },
+        });
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new BadRequestException('Google account is already linked.');
+      }
+      throw error;
+    }
+    return { linked: true };
+  }
+
+  async unlinkGoogle(employeeId: string, dto: GoogleUnlinkDto) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { password: true, isActive: true, googleSubject: true },
+    });
+    if (
+      !employee?.isActive ||
+      !(await this.stringUtilService.compare(dto.password, employee.password))
+    ) {
+      throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+    }
+    if (!employee.googleSubject) return { unlinked: true };
+
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.employee.updateMany({
+        where: {
+          id: employeeId,
+          googleSubject: employee.googleSubject,
+          isActive: true,
+          deletedAt: null,
+          password: employee.password,
+        },
+        data: { googleSubject: null },
+      });
+      if (updated.count !== 1) {
+        throw new BadRequestException('Google account link changed.');
+      }
+      await tx.authSession.updateMany({
+        where: { employeeId, revokedAt: null },
+        data: {
+          revokedAt: new Date(),
+          revokeReason: SESSION_REVOKE_REASONS.GOOGLE_UNLINKED,
+        },
+      });
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'GOOGLE_ACCOUNT_UNLINKED',
+          details: { provider: 'GOOGLE' },
+        },
+      });
+    });
+    return { unlinked: true };
+  }
+
   refreshToken(refreshToken: string, metadata: AuthRequestMetadata) {
     if (!refreshToken) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
@@ -159,7 +295,7 @@ export class AuthService {
   }
 
   async getMe(employeeId: string) {
-    return this.prisma.employee.findUnique({
+    const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
       select: {
         id: true,
@@ -169,6 +305,7 @@ export class AuthService {
         avatarUrl: true,
         phoneNumber: true,
         isActive: true,
+        googleSubject: true,
         position: { select: { id: true, name: true } },
         employeeRoles: {
           where: { role: { deletedAt: null } },
@@ -180,13 +317,21 @@ export class AuthService {
         },
       },
     });
+    if (!employee) return null;
+    const { googleSubject, ...profile } = employee;
+    return { ...profile, googleLinked: Boolean(googleSubject) };
   }
 
   getMyPermissions(employeeId: string) {
     return this.authorizationService.getAuthorizationContext(employeeId);
   }
 
-  forgotPassword(dto: ForgotPasswordDto) {
+  async forgotPassword(dto: ForgotPasswordDto, metadata: AuthRequestMetadata) {
+    await this.turnstile.verify(
+      dto.turnstileToken,
+      metadata.ipAddress,
+      'password_reset',
+    );
     return this.passwordResetService.requestReset(dto);
   }
 

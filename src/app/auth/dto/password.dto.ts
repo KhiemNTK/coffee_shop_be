@@ -10,6 +10,7 @@ const ForgotPasswordInputSchema = z
   .object({
     email: EmployeeEmailSchema.optional(),
     phoneNumber: EmployeePhoneNumberSchema.optional().nullable(),
+    turnstileToken: z.string().min(1).max(2048).optional(),
   })
   .refine((data) => data.email || data.phoneNumber, {
     message: 'Email or phone number is required',

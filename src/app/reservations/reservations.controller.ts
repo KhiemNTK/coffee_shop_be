@@ -9,8 +9,10 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
@@ -40,8 +42,11 @@ export class ReservationsController {
   @SkipAuth()
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
-  createPublicRequest(@Body() dto: CreatePublicReservationRequestDto) {
-    return this.reservationsService.createPublicRequest(dto);
+  createPublicRequest(
+    @Body() dto: CreatePublicReservationRequestDto,
+    @Req() req: Request,
+  ) {
+    return this.reservationsService.createPublicRequest(dto, req.ip);
   }
 
   @Post('public/requests/status')
