@@ -3,6 +3,8 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   InventoryTxType,
   PurchaseReceiptStatus,
+  ServeStatus,
+  SessionStatus,
   StocktakeStatus,
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
@@ -216,24 +218,36 @@ export class InventoryItemService {
         id,
         tx,
       );
-      const [activeRecipeLinks, draftReceiptLinks, draftStocktakeLinks] =
-        await Promise.all([
-          tx.menuItemIngredient.count({ where: { inventoryItemId: id } }),
-          tx.purchaseReceiptItem.count({
-            where: {
-              inventoryItemId: id,
-              purchaseReceipt: { status: PurchaseReceiptStatus.DRAFT },
-            },
-          }),
-          tx.stocktakeItem.count({
-            where: {
-              inventoryItemId: id,
-              stocktake: { status: StocktakeStatus.DRAFT },
-            },
-          }),
-        ]);
+      const baseRecipeLinks = await tx.menuItemIngredient.count({
+        where: { inventoryItemId: id },
+      });
+      const optionRecipeLinks = await tx.menuItemOptionIngredient.count({
+        where: { inventoryItemId: id },
+      });
+      const pendingOrderLinks = await tx.orderItemRecipeIngredient.count({
+        where: {
+          inventoryItemId: id,
+          orderItem: {
+            serveStatus: ServeStatus.PENDING,
+            orderSession: { sessionStatus: SessionStatus.ACTIVE },
+          },
+        },
+      });
+      const draftReceiptLinks = await tx.purchaseReceiptItem.count({
+        where: {
+          inventoryItemId: id,
+          purchaseReceipt: { status: PurchaseReceiptStatus.DRAFT },
+        },
+      });
+      const draftStocktakeLinks = await tx.stocktakeItem.count({
+        where: {
+          inventoryItemId: id,
+          stocktake: { status: StocktakeStatus.DRAFT },
+        },
+      });
       this.inventoryPolicy.assertCanDeleteItem({
-        activeRecipeLinks,
+        activeRecipeLinks:
+          baseRecipeLinks + optionRecipeLinks + pendingOrderLinks,
         draftDocumentLinks: draftReceiptLinks + draftStocktakeLinks,
         stock: item.stock,
       });

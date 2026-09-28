@@ -56,6 +56,40 @@ const EnvironmentSchema = z
       .min(0)
       .max(60_000)
       .default(1_000),
+    ONLINE_PICKUP_SLOT_CAPACITY: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional(),
+    ONLINE_PICKUP_OPEN_LOCAL: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+      .optional(),
+    ONLINE_PICKUP_CLOSE_LOCAL: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+      .optional(),
+    ONLINE_PICKUP_MIN_LEAD_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(15)
+      .max(180)
+      .default(45),
+    ONLINE_PICKUP_DAYS_AHEAD: z.coerce.number().int().min(1).max(14).default(7),
+    ONLINE_REORDER_SECRET: z.string().min(32).optional(),
+    TELEGRAM_BOT_TOKEN: z.string().trim().min(20).optional(),
+    TELEGRAM_BOT_USERNAME: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9_]{5,32}$/)
+      .optional(),
+    TELEGRAM_WEBHOOK_SECRET: z
+      .string()
+      .min(32)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/)
+      .optional(),
     SHUTDOWN_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -111,6 +145,33 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     ...parsed,
     SWAGGER_ENABLED: parsed.SWAGGER_ENABLED ?? parsed.NODE_ENV !== 'production',
   };
+  if (environment.ONLINE_PICKUP_SLOT_CAPACITY) {
+    const open = environment.ONLINE_PICKUP_OPEN_LOCAL;
+    const close = environment.ONLINE_PICKUP_CLOSE_LOCAL;
+    const minute = (time: string) =>
+      Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+    if (
+      !open ||
+      !close ||
+      minute(open) >= minute(close) ||
+      minute(open) % 15 ||
+      minute(close) % 15
+    ) {
+      throw new Error(
+        'Online pickup requires aligned opening and closing times.',
+      );
+    }
+  }
+  const telegram = [
+    environment.TELEGRAM_BOT_TOKEN,
+    environment.TELEGRAM_BOT_USERNAME,
+    environment.TELEGRAM_WEBHOOK_SECRET,
+  ];
+  if (telegram.some(Boolean) && telegram.some((value) => !value)) {
+    throw new Error(
+      'Telegram requires bot token, username and webhook secret.',
+    );
+  }
   if (environment.NODE_ENV !== 'production') return environment;
 
   const required = [
@@ -119,6 +180,7 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     'FE_URL',
     'JWT_SECRET',
     'JWT_REFRESH_SECRET',
+    'ONLINE_REORDER_SECRET',
     'PASSWORD_RESET_URL',
     'MAIL_HOST',
     'MAIL_PORT',
@@ -155,6 +217,16 @@ export function validateEnvironment(raw: Record<string, unknown>) {
 
   if (environment.JWT_SECRET === environment.JWT_REFRESH_SECRET) {
     throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+  if (
+    !environment.ONLINE_REORDER_SECRET ||
+    WEAK_SECRET_MARKERS.some((marker) =>
+      environment.ONLINE_REORDER_SECRET?.toLowerCase().includes(marker),
+    ) ||
+    environment.ONLINE_REORDER_SECRET === environment.JWT_SECRET ||
+    environment.ONLINE_REORDER_SECRET === environment.JWT_REFRESH_SECRET
+  ) {
+    throw new Error('ONLINE_REORDER_SECRET must be a distinct strong secret');
   }
   if (environment.AUTH_SIGNUP_ENABLED) {
     throw new Error('AUTH_SIGNUP_ENABLED cannot be enabled in production');

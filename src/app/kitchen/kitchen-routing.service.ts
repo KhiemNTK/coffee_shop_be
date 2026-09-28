@@ -5,6 +5,7 @@ import type {
   KitchenRoutableOrderItem,
 } from '../../common/types';
 import { PrintingService } from '../printing/printing.service';
+import { readSelectedOptions } from '../menu/menu-option-selection';
 
 @Injectable()
 export class KitchenRoutingService {
@@ -55,6 +56,7 @@ export class KitchenRoutingService {
               itemName: menuItems.get(item.menuItemId)!.name,
               quantity: item.quantity,
               note: item.note,
+              selectedOptions: readSelectedOptions(item.selectedOptions),
             })),
           },
         },
@@ -78,6 +80,7 @@ export class KitchenRoutingService {
               name: item.itemName,
               quantity: item.quantity,
               note: item.note,
+              selectedOptions: readSelectedOptions(item.selectedOptions),
             })),
           },
         });

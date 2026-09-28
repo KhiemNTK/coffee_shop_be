@@ -9,6 +9,8 @@ export class OrderItemEntity implements PrismaOrderItem {
   quantity!: number;
   priceAtTime!: Prisma.Decimal;
   note!: string | null;
+  selectedOptions!: unknown;
+  recipeSnapshottedAt!: Date | null;
   serveStatus!: ServeStatus;
   isPaid!: boolean;
   readyAt!: Date | null;

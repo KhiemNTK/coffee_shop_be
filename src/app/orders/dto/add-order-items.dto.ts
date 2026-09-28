@@ -8,6 +8,14 @@ const OrderItemPayloadSchema = z.object({
     .int()
     .positive({ message: 'Quantity must be at least 1' }),
   note: z.string().max(255, { message: 'Note is too long' }).optional(),
+  optionIds: z
+    .array(z.uuid())
+    .max(20)
+    .refine(
+      (ids) => new Set(ids).size === ids.length,
+      'Duplicate menu options are not allowed',
+    )
+    .optional(),
 });
 
 export const AddOrderItemsSchema = z.object({

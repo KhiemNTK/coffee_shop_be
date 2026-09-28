@@ -3,7 +3,10 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import { KitchenService } from './kitchen.service';
 
 describe('KitchenService ticket state', () => {
-  const prisma = { kitchenTicket: { findUnique: jest.fn() } };
+  const prisma = {
+    kitchenTicket: { findUnique: jest.fn() },
+    $queryRaw: jest.fn(),
+  };
   const service = new KitchenService(
     prisma as never,
     new PaginationUtilService(),
@@ -48,5 +51,36 @@ describe('KitchenService ticket state', () => {
     await expect(service.getTicket('ticket-id')).resolves.toMatchObject({
       state: 'IN_PROGRESS',
     });
+  });
+
+  it('returns one bounded workload snapshot with numeric counts', async () => {
+    prisma.$queryRaw.mockResolvedValueOnce([
+      {
+        stationId: 'station-id',
+        stationCode: 'BAR',
+        stationName: 'Bar',
+        isActive: true,
+        openTicketCount: 2n,
+        openUnitCount: 5n,
+        overdueTicketCount: 1n,
+        dueSoonTicketCount: 1n,
+        oldestOpenAt: new Date('2026-01-01T00:00:00.000Z'),
+        nextDueAt: new Date('2026-01-01T00:05:00.000Z'),
+      },
+    ]);
+    const snapshot = await service.getWorkload();
+    expect(snapshot).toMatchObject({
+      dueSoonWindowSeconds: 300,
+      stations: [
+        {
+          stationId: 'station-id',
+          openTicketCount: 2,
+          openUnitCount: 5,
+          overdueTicketCount: 1,
+          dueSoonTicketCount: 1,
+        },
+      ],
+    });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
   });
 });

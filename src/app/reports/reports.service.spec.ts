@@ -9,7 +9,7 @@ describe('ReportsService', () => {
     $queryRaw: jest.fn(),
     inventoryItem: { findMany: jest.fn() },
   };
-  const prisma = { $transaction: jest.fn() };
+  const prisma = { $transaction: jest.fn(), $queryRaw: jest.fn() };
   const excelUtil = { generateExcel: jest.fn() };
   const query = {
     from: new Date('2026-01-01T00:00:00.000Z'),
@@ -334,6 +334,153 @@ describe('ReportsService', () => {
         granularity: 'hour',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('reports cohort conversion, weighted timing and refund-adjusted receipts', async () => {
+    const row = {
+      bucket: null,
+      submittedCount: 3n,
+      pendingCount: 0n,
+      expiredCount: 0n,
+      acceptedCount: 2n,
+      scheduledAcceptedCount: 2n,
+      scheduledCollectedCount: 1n,
+      noShowCount: 1n,
+      rejectedCount: 1n,
+      cancelledBeforeReviewCount: 0n,
+      cancelledAfterAcceptanceCount: 1n,
+      readyCount: 1n,
+      paidCount: 1n,
+      collectedCount: 1n,
+      quotedDemand: new Prisma.Decimal(150000),
+      netReceipts: new Prisma.Decimal(45000),
+      collectedNetReceipts: new Prisma.Decimal(45000),
+      reviewedCount: 3n,
+      reviewSeconds: new Prisma.Decimal(600),
+      prepSampleCount: 1n,
+      prepSeconds: new Prisma.Decimal(180),
+    };
+    prisma.$queryRaw.mockResolvedValue([row, { ...row, bucket: '2026-01-01' }]);
+
+    const report = await service.getOnlineOrderJourney(query);
+
+    expect(report.summary).toMatchObject({
+      submittedCount: 3,
+      acceptedCount: 2,
+      scheduledAcceptedCount: 2,
+      scheduledCollectedCount: 1,
+      noShowCount: 1,
+      noShowRatePercent: '50.00',
+      rejectedCount: 1,
+      cancelledAfterAcceptanceCount: 1,
+      netReceipts: '45000.00',
+      reviewAcceptanceRatePercent: '66.67',
+      requestToCollectionRatePercent: '33.33',
+      acceptanceToCollectionRatePercent: '50.00',
+      averageReviewSeconds: 200,
+      averagePrepSeconds: 180,
+    });
+    expect(report.trend).toHaveLength(1);
+    expect(report.trend[0].bucket).toBe('2026-01-01');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+
+    await expect(
+      service.getOnlineOrderJourney({
+        from: query.to,
+        to: query.from,
+        timeZone: query.timeZone,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('bounds kitchen SLA queries and reports completed ticket timing', async () => {
+    prisma.$queryRaw.mockResolvedValueOnce([
+      {
+        stationId: 'station-id',
+        stationCode: 'BAR',
+        stationName: 'Bar',
+        ticketCount: 5n,
+        completedCount: 4n,
+        lateCompletedCount: 1n,
+        overdueOpenCount: 1n,
+        averageTicketToReadySeconds: 180.6,
+        p95TicketToReadySeconds: 290.4,
+      },
+    ]);
+
+    const result = await service.getKitchenSla(query);
+    expect(result.stations).toEqual([
+      {
+        stationId: 'station-id',
+        stationCode: 'BAR',
+        stationName: 'Bar',
+        ticketCount: 5,
+        completedCount: 4,
+        lateCompletedCount: 1,
+        overdueOpenCount: 1,
+        lateRatePercent: '25.00',
+        averageTicketToReadySeconds: 181,
+        p95TicketToReadySeconds: 290,
+      },
+    ]);
+    await expect(
+      service.getKitchenSla({
+        ...query,
+        to: new Date('2026-02-03T00:00:00.000Z'),
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports bounded hourly kitchen load without treating cancelled tickets as completed', async () => {
+    prisma.$queryRaw.mockResolvedValueOnce([
+      {
+        bucketStartAt: new Date('2026-01-01T03:00:00.000Z'),
+        stationId: 'station-id',
+        stationCode: 'BAR',
+        stationName: 'Bar',
+        ticketCount: 5n,
+        orderedUnitCount: 9n,
+        completedCount: 2n,
+        lateCompletedCount: 1n,
+        openNowCount: 2n,
+        overdueOpenCount: 1n,
+        cancelledTicketCount: 1n,
+        averageTicketToReadySeconds: 210.5,
+        p95TicketToReadySeconds: 330.6,
+      },
+    ]);
+    const result = await service.getKitchenBottlenecks(query);
+    expect(result.period).toMatchObject({
+      timeZone: query.timeZone,
+      granularity: 'hour',
+      cohort: 'ticketCreatedAt',
+    });
+    expect(result.slots).toEqual([
+      {
+        bucketStartAt: '2026-01-01T03:00:00.000Z',
+        stationId: 'station-id',
+        stationCode: 'BAR',
+        stationName: 'Bar',
+        ticketCount: 5,
+        orderedUnitCount: 9,
+        completedCount: 2,
+        lateCompletedCount: 1,
+        openNowCount: 2,
+        overdueOpenCount: 1,
+        cancelledTicketCount: 1,
+        lateRatePercent: '50.00',
+        averageTicketToReadySeconds: 211,
+        p95TicketToReadySeconds: 331,
+      },
+    ]);
+    await expect(
+      service.getKitchenBottlenecks({
+        ...query,
+        to: new Date('2026-01-09T00:00:00.000Z'),
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('reuses the bounded dashboard result for Excel export', async () => {

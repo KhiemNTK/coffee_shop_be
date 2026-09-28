@@ -7,11 +7,22 @@ const OptionalReportDateSchema = z
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 
+const ReportPeriodSchema = z.object({
+  from: OptionalReportDateSchema,
+  to: OptionalReportDateSchema,
+  timeZone: z.string().trim().min(1).max(64).default('Asia/Ho_Chi_Minh'),
+});
+
+export class GetOnlineOrderJourneyDto extends createZodDto(
+  ReportPeriodSchema,
+) {}
+
+export class GetKitchenSlaDto extends createZodDto(
+  ReportPeriodSchema.extend({ stationId: z.uuid().optional() }),
+) {}
+
 export class GetDashboardReportDto extends createZodDto(
-  z.object({
-    from: OptionalReportDateSchema,
-    to: OptionalReportDateSchema,
-    timeZone: z.string().trim().min(1).max(64).default('Asia/Ho_Chi_Minh'),
+  ReportPeriodSchema.extend({
     granularity: z.enum(['hour', 'day']).default('day'),
     topLimit: z.coerce.number().int().min(1).max(50).default(10),
     lowStockThreshold: z.coerce.number().min(0).max(1_000_000).default(5),

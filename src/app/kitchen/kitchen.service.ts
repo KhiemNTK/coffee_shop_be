@@ -14,6 +14,7 @@ import { runSerializableTransaction } from '../../common/prisma/transaction.util
 import type {
   ExtendedPrismaTransactionClient,
   KitchenTicketState,
+  KitchenWorkloadRow,
 } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
@@ -44,6 +45,8 @@ const KITCHEN_TICKET_INCLUDE = {
 type KitchenTicketDetails = Prisma.KitchenTicketGetPayload<{
   include: typeof KITCHEN_TICKET_INCLUDE;
 }>;
+
+const DUE_SOON_WINDOW_MS = 5 * 60_000;
 
 @Injectable()
 export class KitchenService {
@@ -181,6 +184,51 @@ export class KitchenService {
     return paging.format(tickets.map((ticket) => this.ticketView(ticket)));
   }
 
+  async getWorkload() {
+    const asOf = new Date();
+    const dueSoonAt = new Date(asOf.getTime() + DUE_SOON_WINDOW_MS);
+    const rows = await this.prisma.$queryRaw<KitchenWorkloadRow[]>(Prisma.sql`
+      WITH active_tickets AS (
+        SELECT kt."id", kt."stationId", kt."createdAt", kt."dueAt",
+               SUM(ti."quantity")::bigint AS "openUnits"
+        FROM "OrderItem" oi
+        JOIN "KitchenTicketItem" ti ON ti."orderItemId" = oi."id"
+        JOIN "KitchenTicket" kt ON kt."id" = ti."ticketId"
+        WHERE oi."serveStatus" IN ('PENDING', 'COOKING')
+        GROUP BY kt."id", kt."stationId", kt."createdAt", kt."dueAt"
+      )
+      SELECT s."id" AS "stationId", s."code" AS "stationCode",
+             s."name" AS "stationName", s."isActive",
+             COUNT(a."id")::bigint AS "openTicketCount",
+             COALESCE(SUM(a."openUnits"), 0)::bigint AS "openUnitCount",
+             COUNT(a."id") FILTER (WHERE a."dueAt" < ${asOf})::bigint AS "overdueTicketCount",
+             COUNT(a."id") FILTER (WHERE a."dueAt" >= ${asOf} AND a."dueAt" < ${dueSoonAt})::bigint AS "dueSoonTicketCount",
+             MIN(a."createdAt") AS "oldestOpenAt", MIN(a."dueAt") AS "nextDueAt"
+      FROM "KitchenStation" s
+      LEFT JOIN active_tickets a ON a."stationId" = s."id"
+      WHERE s."deletedAt" IS NULL
+      GROUP BY s."id", s."code", s."name", s."isActive"
+      ORDER BY "overdueTicketCount" DESC, "dueSoonTicketCount" DESC,
+               "nextDueAt" ASC NULLS LAST, s."code", s."id"
+    `);
+    return {
+      asOf: asOf.toISOString(),
+      dueSoonWindowSeconds: DUE_SOON_WINDOW_MS / 1_000,
+      stations: rows.map((row) => ({
+        stationId: row.stationId,
+        stationCode: row.stationCode,
+        stationName: row.stationName,
+        isActive: row.isActive,
+        openTicketCount: Number(row.openTicketCount),
+        openUnitCount: Number(row.openUnitCount),
+        overdueTicketCount: Number(row.overdueTicketCount),
+        dueSoonTicketCount: Number(row.dueSoonTicketCount),
+        oldestOpenAt: row.oldestOpenAt,
+        nextDueAt: row.nextDueAt,
+      })),
+    };
+  }
+
   async getTicket(id: string) {
     const ticket = await this.prisma.kitchenTicket.findUnique({
       where: { id },
@@ -233,6 +281,7 @@ export class KitchenService {
         itemName: item.itemName,
         quantity: item.quantity,
         note: item.note,
+        selectedOptions: item.selectedOptions,
         serveStatus: item.orderItem.serveStatus,
         currentTable: item.orderItem.orderSession.table,
       })),

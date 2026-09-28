@@ -74,18 +74,21 @@ describe('KitchenRoutingService', () => {
           menuItemId: 'coffee',
           quantity: 2,
           note: null,
+          selectedOptions: [],
         },
         {
           id: 'order-cake',
           menuItemId: 'cake',
           quantity: 1,
           note: 'Warm',
+          selectedOptions: [],
         },
         {
           id: 'order-water',
           menuItemId: 'bottle',
           quantity: 1,
           note: null,
+          selectedOptions: [],
         },
       ],
     });
