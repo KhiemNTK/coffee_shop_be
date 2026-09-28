@@ -86,12 +86,13 @@ describe('MenuService', () => {
     expect(prisma.menuItem.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ isAvailable: true, deletedAt: null }),
-        select: {
+        select: expect.objectContaining({
           id: true,
           name: true,
           price: true,
           category: { select: { id: true, name: true } },
-        },
+          optionGroups: expect.any(Object),
+        }),
       }),
     );
   });

@@ -20,6 +20,7 @@ import {
   CreateMenuItemDto,
   GetMenuCategoriesDto,
   GetMenuItemsDto,
+  ReplaceMenuOptionsDto,
   ReplaceMenuRecipeDto,
   UpdateMenuCategoryDto,
   UpdateMenuItemAvailabilityDto,
@@ -145,6 +146,22 @@ export class MenuController {
     @Body() dto: ReplaceMenuRecipeDto,
   ) {
     return this.menuService.replaceItemRecipe(id, employeeId, dto);
+  }
+
+  @Get('items/:id/options')
+  @RequirePermissions(PermissionKeys.MENU_READ)
+  getItemOptions(@Param() { id }: IDDto) {
+    return this.menuService.getItemOptions(id);
+  }
+
+  @Put('items/:id/options')
+  @RequirePermissions(PermissionKeys.MENU_UPDATE)
+  replaceItemOptions(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: ReplaceMenuOptionsDto,
+  ) {
+    return this.menuService.replaceItemOptions(id, employeeId, dto);
   }
 
   @Delete('items/:id')

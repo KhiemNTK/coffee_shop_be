@@ -27,6 +27,7 @@ import type {
 } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { IdempotencyService } from '../durable/idempotency.service';
+import { readSelectedOptions } from '../menu/menu-option-selection';
 import {
   ClaimPrintJobsDto,
   CreatePrintDeviceDto,
@@ -50,6 +51,7 @@ const RECEIPT_INVOICE_INCLUDE = {
       id: true,
       quantity: true,
       priceAtTime: true,
+      selectedOptions: true,
       menuItem: { select: { name: true } },
     },
   },
@@ -753,6 +755,7 @@ export class PrintingService {
         quantity: item.quantity,
         unitPrice: item.priceAtTime.toString(),
         lineTotal: item.priceAtTime.mul(item.quantity).toString(),
+        selectedOptions: readSelectedOptions(item.selectedOptions),
       })),
     };
   }

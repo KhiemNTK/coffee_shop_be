@@ -28,10 +28,24 @@ export interface KitchenRoutableOrderItem {
   menuItemId: string;
   quantity: number;
   note: string | null;
+  selectedOptions: unknown;
 }
 
 export interface KitchenRealtimeEvent {
   eventId: string;
   eventName: string;
   occurredAt: string;
+}
+
+export interface KitchenWorkloadRow {
+  stationId: string;
+  stationCode: string;
+  stationName: string;
+  isActive: boolean;
+  openTicketCount: bigint;
+  openUnitCount: bigint;
+  overdueTicketCount: bigint;
+  dueSoonTicketCount: bigint;
+  oldestOpenAt: Date | null;
+  nextDueAt: Date | null;
 }

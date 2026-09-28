@@ -398,9 +398,53 @@ model MenuItem {
   orderItems              OrderItem[]
   ingredients             MenuItemIngredient[]
   onlineOrderRequestItems OnlineOrderRequestItem[]
+  optionGroups            MenuItemOptionGroup[]
+  recommendationAnchors   MenuItemRecommendationPair[] @relation("RecommendationAnchor")
+  recommendationCandidates MenuItemRecommendationPair[] @relation("RecommendationCandidate")
 
   @@index([deletedAt, categoryId, isAvailable])
   @@index([kitchenStationId, deletedAt, isAvailable])
+}
+
+model MenuItemOptionGroup {
+  id          String @id @default(uuid())
+  menuItemId  String
+  name        String @db.VarChar(80)
+  minSelected Int    @default(0)
+  maxSelected Int    @default(1)
+  sortOrder   Int    @default(0)
+
+  menuItem MenuItem         @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  options  MenuItemOption[]
+
+  @@unique([menuItemId, name])
+  @@index([menuItemId, sortOrder])
+}
+
+model MenuItemOption {
+  id         String  @id @default(uuid())
+  groupId    String
+  name       String  @db.VarChar(80)
+  priceDelta Decimal @db.Decimal(18, 2)
+  sortOrder  Int     @default(0)
+
+  group       MenuItemOptionGroup        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  ingredients MenuItemOptionIngredient[]
+
+  @@unique([groupId, name])
+  @@index([groupId, sortOrder])
+}
+
+model MenuItemOptionIngredient {
+  optionId        String
+  inventoryItemId String
+  quantity        Decimal @db.Decimal(18, 4)
+
+  option        MenuItemOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  inventoryItem InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@id([optionId, inventoryItemId])
+  @@index([inventoryItemId])
 }
 
 model Promotion {
@@ -619,6 +663,8 @@ model InventoryItem {
   unit   Unit   @relation(fields: [unitId], references: [id])
 
   ingredients    MenuItemIngredient[]
+  optionIngredients MenuItemOptionIngredient[]
+  orderRecipes  OrderItemRecipeIngredient[]
   transactions   InventoryTransaction[]
   snapshots      OrderItemIngredientSnapshot[]
   receiptItems   PurchaseReceiptItem[]
@@ -1015,15 +1061,23 @@ model OnlineOrderRequest {
   id               String            @id @default(uuid())
   clientRequestId  String            @unique
   requestHash      String            @db.VarChar(64)
+  reorderNonce     String?           @db.VarChar(64)
   pickupName       String            @db.VarChar(80)
   phoneNumber      String            @db.VarChar(20)
   quotedSubtotal   Decimal           @db.Decimal(18, 2)
+  pickupAt         DateTime?
+  telegramChatId   String?           @db.VarChar(32)
+  telegramLinkTokenHash String?       @unique @db.VarChar(64)
+  telegramLinkExpiresAt DateTime?
+  telegramReadyQueuedAt DateTime?
   status           OnlineOrderStatus @default(PENDING)
   rejectionReason  String?           @db.VarChar(200)
+  cancellationReason String?         @db.VarChar(200)
   createdAt        DateTime          @default(now())
   expiresAt        DateTime
   reviewedAt       DateTime?
   cancelledAt      DateTime?
+  noShowAt         DateTime?
 
   reviewedById String?
   reviewedBy   Employee? @relation("OnlineOrderReviewedBy", fields: [reviewedById], references: [id], onDelete: Restrict)
@@ -1034,8 +1088,23 @@ model OnlineOrderRequest {
   items OnlineOrderRequestItem[]
 
   @@index([status, expiresAt, id])
+  @@index([status, createdAt, id])
+  @@index([status, pickupAt, id])
+  @@index([telegramChatId])
   @@index([createdAt])
   @@index([reviewedById])
+}
+
+model OrderItemRecipeIngredient {
+  orderItemId     String
+  inventoryItemId String
+  quantityPerItem Decimal @db.Decimal(18, 4)
+
+  orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@id([orderItemId, inventoryItemId])
+  @@index([inventoryItemId])
 }
 
 model OnlineOrderRequestItem {
@@ -1045,6 +1114,7 @@ model OnlineOrderRequestItem {
   note                 String? @db.VarChar(255)
   quotedName           String
   quotedUnitPrice      Decimal @db.Decimal(18, 2)
+  quotedOptions        Json    @default("[]")
 
   onlineOrderRequestId String
   onlineOrderRequest   OnlineOrderRequest @relation(fields: [onlineOrderRequestId], references: [id], onDelete: Cascade)
@@ -1056,11 +1126,38 @@ model OnlineOrderRequestItem {
   @@index([menuItemId])
 }
 
+model MenuItemRecommendationPair {
+  anchorId    String
+  candidateId String
+  support     Int
+  refreshedAt DateTime
+
+  anchor    MenuItem @relation("RecommendationAnchor", fields: [anchorId], references: [id], onDelete: Cascade)
+  candidate MenuItem @relation("RecommendationCandidate", fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@id([anchorId, candidateId])
+  @@index([candidateId])
+  @@index([refreshedAt])
+}
+
+model RecommendationExposure {
+  id              String   @id @default(uuid())
+  clientRequestId String   @unique
+  basketHash      String   @db.VarChar(64)
+  variant         String   @db.VarChar(16)
+  candidateIds    Json     @default("[]")
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model OrderItem {
   id          String  @id @default(uuid())
   quantity    Int
   priceAtTime Decimal @db.Decimal(18, 2) // GiaTien tai thoi diem goi
   note        String? // Ghi chu (VD: Khong hanh)
+  selectedOptions Json @default("[]")
+  recipeSnapshottedAt DateTime?
 
   serveStatus ServeStatus @default(PENDING) // PENDING, COOKING, READY, SERVED, CANCELLED
   isPaid      Boolean     @default(false) // Danh dau mon da duoc thanh toan chua
@@ -1079,6 +1176,7 @@ model OrderItem {
   invoice   Invoice? @relation(fields: [invoiceId], references: [id])
 
   ingredientSnapshots   OrderItemIngredientSnapshot[]
+  recipeIngredients     OrderItemRecipeIngredient[]
   inventoryTransactions InventoryTransaction[]
   kitchenTicketItem     KitchenTicketItem?
 
@@ -1202,6 +1300,7 @@ model KitchenTicket {
   printJobs PrintJob[]
 
   @@index([stationId, dueAt, createdAt])
+  @@index([createdAt, stationId])
   @@index([orderSessionId, createdAt])
 }
 
@@ -1210,6 +1309,7 @@ model KitchenTicketItem {
   itemName  String
   quantity  Int
   note      String?
+  selectedOptions Json @default("[]")
   createdAt DateTime @default(now())
 
   ticketId String

@@ -16,4 +16,6 @@ export interface SplittableOrderItem {
   menuItemId: string;
   priceAtTime: Prisma.Decimal;
   note: string | null;
+  selectedOptions: unknown;
+  recipeSnapshottedAt: Date | null;
 }

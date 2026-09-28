@@ -54,6 +54,12 @@ import { OutboxService } from '../durable/outbox.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
+import {
+  ORDER_MENU_ITEM_SELECT,
+  readSelectedOptions,
+  resolveMenuSelection,
+  type SelectedMenuOption,
+} from '../menu/menu-option-selection';
 
 const PICKUP_CODE_TTL_MS = 72 * 60 * 60 * 1000;
 const MAX_PICKUP_CODE_VERSION = 2_147_483_647;
@@ -69,6 +75,7 @@ const PICKUP_INVOICE_SELECT = {
     select: {
       id: true,
       quantity: true,
+      selectedOptions: true,
       serveStatus: true,
       isPaid: true,
       menuItem: { select: { name: true } },
@@ -366,6 +373,7 @@ export class OrdersService {
         is: {
           tableId: null,
           sessionStatus: { not: SessionStatus.CANCELLED },
+          onlineOrderRequest: { is: null },
         },
       },
     };
@@ -843,10 +851,13 @@ export class OrdersService {
     tx: ExtendedPrismaTransactionClient,
     employeeId: string,
     items: AddOrderItemsDto['items'],
-    quotedPrices: Map<string, Prisma.Decimal>,
+    quotes: Array<{
+      unitPrice: Prisma.Decimal;
+      selectedOptions: SelectedMenuOption[];
+    }>,
   ) {
     const session = await this.createOrderSession(tx, { employeeId });
-    await this.addOrderItemsInTransaction(tx, session.id, items, quotedPrices);
+    await this.addOrderItemsInTransaction(tx, session.id, items, quotes);
     return session.id;
   }
 
@@ -854,49 +865,16 @@ export class OrdersService {
     tx: ExtendedPrismaTransactionClient,
     orderSessionId: string,
     items: AddOrderItemsDto['items'],
-    quotedPrices?: Map<string, Prisma.Decimal>,
+    quotes?: Array<{
+      unitPrice: Prisma.Decimal;
+      selectedOptions: SelectedMenuOption[];
+    }>,
   ) {
     const menuItemIds = [...new Set(items.map((item) => item.menuItemId))];
-    const [session, menuItems] = await Promise.all([
-      tx.orderSession.findUnique({
-        where: { id: orderSessionId },
-      }),
-      tx.menuItem.findMany({
-        where: {
-          id: {
-            in: menuItemIds,
-          },
-          deletedAt: null,
-          isAvailable: true,
-          category: { deletedAt: null },
-          OR: [
-            { kitchenStationId: null },
-            {
-              kitchenStation: {
-                is: { isActive: true, deletedAt: null },
-              },
-            },
-          ],
-        },
-        select: {
-          id: true,
-          name: true,
-          price: true,
-          kitchenStation: {
-            select: {
-              id: true,
-              code: true,
-              name: true,
-              prepSlaSeconds: true,
-              printDevice: {
-                select: { id: true, isActive: true, deletedAt: true },
-              },
-            },
-          },
-        },
-      }),
-    ]);
-
+    const session = await tx.orderSession.findUnique({
+      where: { id: orderSessionId },
+      include: { onlineOrderRequest: { select: { id: true } } },
+    });
     if (!session) {
       throw new NotFoundException(
         `Order session with ID ${orderSessionId} not found.`,
@@ -907,6 +885,25 @@ export class OrdersService {
       session.sessionStatus,
       'Cannot add items to an inactive order session.',
     );
+    if (session.onlineOrderRequest) {
+      throw new ConflictException(
+        'Accepted online orders cannot be changed in POS.',
+      );
+    }
+
+    const menuItems = await tx.menuItem.findMany({
+      where: {
+        id: { in: menuItemIds },
+        deletedAt: null,
+        isAvailable: true,
+        category: { deletedAt: null },
+        OR: [
+          { kitchenStationId: null },
+          { kitchenStation: { is: { isActive: true, deletedAt: null } } },
+        ],
+      },
+      select: ORDER_MENU_ITEM_SELECT,
+    });
 
     if (menuItems.length !== menuItemIds.length) {
       throw new NotFoundException(
@@ -914,37 +911,48 @@ export class OrdersService {
       );
     }
 
-    if (
-      quotedPrices &&
-      menuItems.some(
-        (menuItem) => !quotedPrices.get(menuItem.id)?.equals(menuItem.price),
-      )
-    ) {
-      throw new ConflictException(
-        'Menu prices changed since the order was placed.',
-      );
-    }
-
     const menuItemsById = new Map(
       menuItems.map((menuItem) => [menuItem.id, menuItem]),
     );
 
+    if (quotes && quotes.length !== items.length) {
+      throw new ConflictException(
+        'Online order quote does not match its items.',
+      );
+    }
+    const planned = items.map((item, index) => {
+      const menuItem = menuItemsById.get(item.menuItemId);
+      if (!menuItem) {
+        throw new NotFoundException(
+          `Menu item with ID ${item.menuItemId} not found.`,
+        );
+      }
+      const selection = resolveMenuSelection(menuItem, item.optionIds);
+      const quote = quotes?.[index];
+      if (
+        quote &&
+        (!quote.unitPrice.equals(selection.unitPrice) ||
+          JSON.stringify(quote.selectedOptions) !==
+            JSON.stringify(selection.selectedOptions))
+      ) {
+        throw new ConflictException(
+          'Menu price or options changed since the order was placed.',
+        );
+      }
+      return { id: randomUUID(), item, ...selection };
+    });
+
     const createdItems = await tx.orderItem.createManyAndReturn({
-      data: items.map((item) => {
-        const menuItem = menuItemsById.get(item.menuItemId);
-
-        if (!menuItem) {
-          throw new NotFoundException(
-            `Menu item with ID ${item.menuItemId} not found.`,
-          );
-        }
-
+      data: planned.map(({ id, item, unitPrice, selectedOptions }) => {
         return {
+          id,
           orderSessionId,
           menuItemId: item.menuItemId,
           quantity: item.quantity,
-          priceAtTime: menuItem.price,
+          priceAtTime: unitPrice,
           note: item.note,
+          selectedOptions,
+          recipeSnapshottedAt: new Date(),
         };
       }),
       select: {
@@ -952,8 +960,20 @@ export class OrdersService {
         menuItemId: true,
         quantity: true,
         note: true,
+        selectedOptions: true,
       },
     });
+
+    const recipeRows = planned.flatMap(({ id, recipe }) =>
+      recipe.map(({ inventoryItemId, quantityPerItem }) => ({
+        orderItemId: id,
+        inventoryItemId,
+        quantityPerItem,
+      })),
+    );
+    if (recipeRows.length > 0) {
+      await tx.orderItemRecipeIngredient.createMany({ data: recipeRows });
+    }
 
     const kitchenTickets = await this.kitchenRouting.createTickets(tx, {
       orderSessionId,
@@ -1012,7 +1032,9 @@ export class OrdersService {
       const item = await tx.orderItem.findUnique({
         where: { id },
         include: {
-          orderSession: true,
+          orderSession: {
+            include: { onlineOrderRequest: { select: { id: true } } },
+          },
           menuItem: true,
           invoice: {
             select: {
@@ -1040,6 +1062,15 @@ export class OrdersService {
       }
       if (item.serveStatus === ServeStatus.CANCELLED) {
         throw new BadRequestException('Cannot change a cancelled order item.');
+      }
+      if (
+        serveStatus === ServeStatus.SERVED &&
+        item.orderSession.onlineOrderRequest &&
+        !pickup
+      ) {
+        throw new ConflictException(
+          'Online orders must be paid and collected through the pickup flow.',
+        );
       }
       if (
         pickup &&
@@ -1803,10 +1834,27 @@ export class OrdersService {
               quantity: payloadItem.quantityToMove,
               priceAtTime: dbItem.priceAtTime,
               note: dbItem.note,
+              selectedOptions: readSelectedOptions(dbItem.selectedOptions),
+              recipeSnapshottedAt: dbItem.recipeSnapshottedAt,
               serveStatus: dbItem.serveStatus,
             },
             select: { id: true },
           });
+
+          if (dbItem.recipeSnapshottedAt) {
+            const recipe = await tx.orderItemRecipeIngredient.findMany({
+              where: { orderItemId: dbItem.id },
+              select: { inventoryItemId: true, quantityPerItem: true },
+            });
+            if (recipe.length > 0) {
+              await tx.orderItemRecipeIngredient.createMany({
+                data: recipe.map((ingredient) => ({
+                  orderItemId: movedItem.id,
+                  ...ingredient,
+                })),
+              });
+            }
+          }
 
           const ticketItem = await tx.kitchenTicketItem.findUnique({
             where: { orderItemId: dbItem.id },
@@ -1825,6 +1873,9 @@ export class OrdersService {
                 itemName: ticketItem.itemName,
                 quantity: payloadItem.quantityToMove,
                 note: ticketItem.note,
+                selectedOptions: readSelectedOptions(
+                  ticketItem.selectedOptions,
+                ),
               },
             });
           }

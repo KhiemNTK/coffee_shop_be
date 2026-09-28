@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -75,6 +76,13 @@ export class KitchenController {
   @RequirePermissions(PermissionKeys.KITCHEN_TICKETS_READ)
   events() {
     return this.realtime.stream();
+  }
+
+  @Get('workload')
+  @RequirePermissions(PermissionKeys.KITCHEN_TICKETS_READ)
+  @Header('Cache-Control', 'no-store')
+  getWorkload() {
+    return this.kitchen.getWorkload();
   }
 
   @Get('tickets')

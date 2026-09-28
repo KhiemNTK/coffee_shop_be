@@ -147,6 +147,23 @@ export class InvoicesService {
     return this.createInvoiceInternal(createInput);
   }
 
+  checkoutOnlinePickupInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    employeeId: string,
+    orderSessionId: string,
+    amountTendered: string,
+  ) {
+    return this.createInvoiceInTransaction(tx, {
+      employeeId,
+      input: { orderSessionId },
+      paymentStatus: PaymentStatus.PAID,
+      paymentMethod: PaymentMethod.CASH,
+      amountTendered,
+      closeSessionAfterPayment: true,
+      eventNames: [ORDER_EVENTS.INVOICE_CREATED, ORDER_EVENTS.INVOICE_PAID],
+    });
+  }
+
   async getInvoices({
     page,
     itemPerPage,

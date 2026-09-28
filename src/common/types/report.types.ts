@@ -31,6 +31,49 @@ export interface ReportTrendRow {
   netRevenue: Decimal;
 }
 
+export interface ReportOnlineOrderJourneyRow {
+  bucket: string | null;
+  submittedCount: bigint;
+  pendingCount: bigint;
+  expiredCount: bigint;
+  acceptedCount: bigint;
+  scheduledAcceptedCount: bigint;
+  scheduledCollectedCount: bigint;
+  noShowCount: bigint;
+  rejectedCount: bigint;
+  cancelledBeforeReviewCount: bigint;
+  cancelledAfterAcceptanceCount: bigint;
+  readyCount: bigint;
+  paidCount: bigint;
+  collectedCount: bigint;
+  quotedDemand: Decimal;
+  netReceipts: Decimal;
+  collectedNetReceipts: Decimal;
+  reviewedCount: bigint;
+  reviewSeconds: Decimal;
+  prepSampleCount: bigint;
+  prepSeconds: Decimal;
+}
+
+export interface ReportKitchenSlaRow {
+  stationId: string;
+  stationCode: string;
+  stationName: string;
+  ticketCount: bigint;
+  completedCount: bigint;
+  lateCompletedCount: bigint;
+  overdueOpenCount: bigint;
+  averageTicketToReadySeconds: number | null;
+  p95TicketToReadySeconds: number | null;
+}
+
+export interface ReportKitchenBottleneckRow extends ReportKitchenSlaRow {
+  bucketStartAt: Date;
+  orderedUnitCount: bigint;
+  openNowCount: bigint;
+  cancelledTicketCount: bigint;
+}
+
 export interface ReportProfitabilityRow {
   paidInvoiceCount: bigint;
   grossSales: Decimal;

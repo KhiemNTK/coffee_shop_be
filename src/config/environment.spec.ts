@@ -7,6 +7,7 @@ const productionEnvironment = {
   FE_URL: 'https://coffee.example.com',
   JWT_SECRET: 'strong-access-secret-with-more-than-32-characters',
   JWT_REFRESH_SECRET: 'strong-refresh-secret-with-more-than-32-characters',
+  ONLINE_REORDER_SECRET: 'strong-reorder-secret-with-more-than-32-characters',
   PASSWORD_RESET_URL: 'https://coffee.example.com/reset-password',
   AUTH_SIGNUP_ENABLED: 'false',
   CSRF_ENABLED: 'true',
@@ -50,6 +51,50 @@ describe('validateEnvironment', () => {
     ).toThrow();
   });
 
+  it('requires valid local hours when scheduled pickup is enabled', () => {
+    const base = {
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+    };
+    expect(() =>
+      validateEnvironment({ ...base, ONLINE_PICKUP_SLOT_CAPACITY: '4' }),
+    ).toThrow('Online pickup requires aligned opening and closing times.');
+    expect(() =>
+      validateEnvironment({
+        ...base,
+        ONLINE_PICKUP_SLOT_CAPACITY: '4',
+        ONLINE_PICKUP_OPEN_LOCAL: '07:10',
+        ONLINE_PICKUP_CLOSE_LOCAL: '22:00',
+      }),
+    ).toThrow('Online pickup requires aligned opening and closing times.');
+    expect(
+      validateEnvironment({
+        ...base,
+        ONLINE_PICKUP_SLOT_CAPACITY: '4',
+        ONLINE_PICKUP_OPEN_LOCAL: '07:00',
+        ONLINE_PICKUP_CLOSE_LOCAL: '22:00',
+      }).ONLINE_PICKUP_SLOT_CAPACITY,
+    ).toBe(4);
+  });
+
+  it('requires all Telegram settings together', () => {
+    const base = {
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+      TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
+    };
+    expect(() => validateEnvironment(base)).toThrow(
+      'Telegram requires bot token, username and webhook secret.',
+    );
+    expect(
+      validateEnvironment({
+        ...base,
+        TELEGRAM_BOT_USERNAME: 'coffee_test_bot',
+        TELEGRAM_WEBHOOK_SECRET: 's'.repeat(32),
+      }).TELEGRAM_BOT_USERNAME,
+    ).toBe('coffee_test_bot');
+  });
+
   it('rejects incomplete production configuration', () => {
     expect(() =>
       validateEnvironment({
@@ -57,6 +102,15 @@ describe('validateEnvironment', () => {
         DATABASE_URL: 'postgresql://localhost/test',
       }),
     ).toThrow('Missing required production environment variables');
+  });
+
+  it('requires a distinct reorder secret in production', () => {
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        ONLINE_REORDER_SECRET: productionEnvironment.JWT_SECRET,
+      }),
+    ).toThrow('ONLINE_REORDER_SECRET must be a distinct strong secret');
   });
 
   it('rejects public sign-up in production', () => {

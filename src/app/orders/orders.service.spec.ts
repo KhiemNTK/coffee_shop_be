@@ -958,7 +958,7 @@ describe('OrdersService', () => {
     });
   });
 
-  it('lists only READY items for staff handoff with ticket numbers', async () => {
+  it('lists READY non-online items for staff handoff with ticket numbers', async () => {
     const readyAt = new Date();
     prisma.orderItem.count.mockResolvedValue(1);
     prisma.orderItem.findMany.mockResolvedValue([
@@ -988,6 +988,7 @@ describe('OrdersService', () => {
             is: {
               tableId: null,
               sessionStatus: { not: SessionStatus.CANCELLED },
+              onlineOrderRequest: { is: null },
             },
           },
         },

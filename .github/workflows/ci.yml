@@ -38,6 +38,9 @@ jobs:
     env:
       NODE_ENV: test
       DATABASE_URL: postgresql://coffee_shop:coffee_shop@localhost:5432/coffee_shop_test?schema=public
+      ONLINE_PICKUP_SLOT_CAPACITY: 4
+      ONLINE_PICKUP_OPEN_LOCAL: '07:00'
+      ONLINE_PICKUP_CLOSE_LOCAL: '22:00'
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-access-secret-with-at-least-thirty-two-characters
       JWT_REFRESH_SECRET: ci-refresh-secret-with-at-least-thirty-two-characters

@@ -15,24 +15,42 @@ export class InventoryConsumptionService {
 
   async consumeOrderItem(
     tx: ExtendedPrismaTransactionClient,
-    orderItem: { id: string; menuItemId: string; quantity: number },
+    orderItem: {
+      id: string;
+      menuItemId: string;
+      quantity: number;
+      recipeSnapshottedAt?: Date | null;
+    },
   ): Promise<InventoryMovementResult[]> {
-    const recipe = await tx.menuItemIngredient.findMany({
-      where: { menuItemId: orderItem.menuItemId },
-      orderBy: { inventoryItemId: 'asc' },
-      select: {
-        quantity: true,
-        inventoryItem: {
+    const inventoryItemSelect = {
+      id: true,
+      name: true,
+      deletedAt: true,
+      averageUnitCost: true,
+      unit: { select: { name: true } },
+    } as const;
+    const recipe = orderItem.recipeSnapshottedAt
+      ? (
+          await tx.orderItemRecipeIngredient.findMany({
+            where: { orderItemId: orderItem.id },
+            orderBy: { inventoryItemId: 'asc' },
+            select: {
+              quantityPerItem: true,
+              inventoryItem: { select: inventoryItemSelect },
+            },
+          })
+        ).map(({ quantityPerItem, inventoryItem }) => ({
+          quantity: quantityPerItem,
+          inventoryItem,
+        }))
+      : await tx.menuItemIngredient.findMany({
+          where: { menuItemId: orderItem.menuItemId },
+          orderBy: { inventoryItemId: 'asc' },
           select: {
-            id: true,
-            name: true,
-            deletedAt: true,
-            averageUnitCost: true,
-            unit: { select: { name: true } },
+            quantity: true,
+            inventoryItem: { select: inventoryItemSelect },
           },
-        },
-      },
-    });
+        });
 
     if (recipe.some(({ inventoryItem }) => inventoryItem.deletedAt !== null)) {
       throw new ConflictException(

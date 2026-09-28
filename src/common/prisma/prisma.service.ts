@@ -42,7 +42,7 @@ export class PrismaService
         $allModels: {
           async $allOperations({ model, operation, args, query }) {
             if (model === 'ActionLog' && operation === 'create') {
-              const safeArgs = (args ? { ...args } : {}) as Record<string, any>;
+              const safeArgs = { ...(args as object) } as Record<string, any>;
               const data = { ...(safeArgs.data as Record<string, unknown>) };
               data.requestId ??= getRequestContext()?.requestId;
               safeArgs.data = data;
@@ -52,7 +52,7 @@ export class PrismaService
             const isSoftDeleteModel = modelsWithSoftDelete.includes(model);
             if (!isSoftDeleteModel) return query(args);
 
-            const safeArgs = (args ? { ...args } : {}) as Record<string, any>;
+            const safeArgs: Record<string, any> = Object.assign({}, args);
 
             if (
               [

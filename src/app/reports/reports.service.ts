@@ -11,21 +11,57 @@ import type {
   ReportEmployeeCashRiskRow,
   ReportInventoryWasteRow,
   ReportMenuItemRow,
+  ReportOnlineOrderJourneyRow,
+  ReportKitchenSlaRow,
   ReportPaymentMethodRow,
   ReportPaymentOperationsRow,
   ReportPromotionRow,
   ReportQueryPeriod,
+  ReportGranularity,
   ReportReservationRow,
   ReportSummaryRow,
   ReportTrendRow,
 } from '../../common/types';
 import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
-import { GetDashboardReportDto } from './dto';
+import {
+  GetDashboardReportDto,
+  GetKitchenSlaDto,
+  GetOnlineOrderJourneyDto,
+} from './dto';
+import { queryKitchenBottlenecks, queryKitchenSla } from './kitchen-sla.query';
+import { queryOnlineOrderJourney } from './online-order-journey.query';
 import { queryProfitability } from './profitability.query';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_REPORT_RANGE_MS = 366 * DAY_MS;
 const MAX_HOURLY_RANGE_MS = 31 * DAY_MS;
+const MAX_KITCHEN_BOTTLENECK_RANGE_MS = 7 * DAY_MS;
+
+function presentKitchenSlaRow(row: ReportKitchenSlaRow) {
+  const completedCount = Number(row.completedCount);
+  const lateCompletedCount = Number(row.lateCompletedCount);
+  return {
+    stationId: row.stationId,
+    stationCode: row.stationCode,
+    stationName: row.stationName,
+    ticketCount: Number(row.ticketCount),
+    completedCount,
+    lateCompletedCount,
+    overdueOpenCount: Number(row.overdueOpenCount),
+    lateRatePercent:
+      completedCount > 0
+        ? ((lateCompletedCount / completedCount) * 100).toFixed(2)
+        : null,
+    averageTicketToReadySeconds:
+      row.averageTicketToReadySeconds === null
+        ? null
+        : Math.round(row.averageTicketToReadySeconds),
+    p95TicketToReadySeconds:
+      row.p95TicketToReadySeconds === null
+        ? null
+        : Math.round(row.p95TicketToReadySeconds),
+  };
+}
 
 @Injectable()
 export class ReportsService {
@@ -126,6 +162,145 @@ export class ReportsService {
         { sheetName: 'Payment Operations', data: [report.paymentOperations] },
       ],
     });
+  }
+
+  async getOnlineOrderJourney(query: GetOnlineOrderJourneyDto) {
+    const period = this.resolvePeriod(query);
+    const rows = await queryOnlineOrderJourney(this.prisma, period, new Date());
+    const total = rows[0];
+    if (!total || total.bucket !== null) {
+      throw new Error('Online order journey summary is missing.');
+    }
+
+    const present = (row: ReportOnlineOrderJourneyRow) => {
+      const submittedCount = Number(row.submittedCount);
+      const acceptedCount = Number(row.acceptedCount);
+      const scheduledAcceptedCount = Number(row.scheduledAcceptedCount);
+      const scheduledCollectedCount = Number(row.scheduledCollectedCount);
+      const noShowCount = Number(row.noShowCount);
+      const rejectedCount = Number(row.rejectedCount);
+      const collectedCount = Number(row.collectedCount);
+      const reviewedCount = Number(row.reviewedCount);
+      const prepSampleCount = Number(row.prepSampleCount);
+      const percent = (value: number, denominator: number) =>
+        denominator > 0 ? ((value / denominator) * 100).toFixed(2) : null;
+
+      return {
+        submittedCount,
+        pendingCount: Number(row.pendingCount),
+        expiredCount: Number(row.expiredCount),
+        acceptedCount,
+        scheduledAcceptedCount,
+        scheduledCollectedCount,
+        noShowCount,
+        noShowRatePercent: percent(
+          noShowCount,
+          noShowCount + scheduledCollectedCount,
+        ),
+        rejectedCount,
+        cancelledBeforeReviewCount: Number(row.cancelledBeforeReviewCount),
+        cancelledAfterAcceptanceCount: Number(
+          row.cancelledAfterAcceptanceCount,
+        ),
+        readyCount: Number(row.readyCount),
+        paidCount: Number(row.paidCount),
+        collectedCount,
+        quotedDemand: this.money(row.quotedDemand),
+        netReceipts: this.money(row.netReceipts),
+        collectedNetReceipts: this.money(row.collectedNetReceipts),
+        reviewAcceptanceRatePercent: percent(
+          acceptedCount,
+          acceptedCount + rejectedCount,
+        ),
+        requestToCollectionRatePercent: percent(collectedCount, submittedCount),
+        acceptanceToCollectionRatePercent: percent(
+          collectedCount,
+          acceptedCount,
+        ),
+        averageReviewSeconds:
+          reviewedCount > 0
+            ? Number(row.reviewSeconds.div(reviewedCount).toFixed(0))
+            : null,
+        averagePrepSeconds:
+          prepSampleCount > 0
+            ? Number(row.prepSeconds.div(prepSampleCount).toFixed(0))
+            : null,
+      };
+    };
+
+    return {
+      period: {
+        from: period.from.toISOString(),
+        to: period.to.toISOString(),
+        timeZone: period.timeZone,
+        granularity: 'day',
+        cohort: 'requestCreatedAt',
+      },
+      summary: present(total),
+      trend: rows
+        .slice(1)
+        .map((row) => ({ bucket: row.bucket!, ...present(row) })),
+    };
+  }
+
+  async getKitchenSla(query: GetKitchenSlaDto) {
+    const period = this.resolvePeriod(query);
+    if (period.to.getTime() - period.from.getTime() > MAX_HOURLY_RANGE_MS) {
+      throw new BadRequestException('Kitchen SLA range cannot exceed 31 days.');
+    }
+    const rows = await queryKitchenSla(
+      this.prisma,
+      period,
+      new Date(),
+      query.stationId,
+    );
+    return {
+      period: { from: period.from.toISOString(), to: period.to.toISOString() },
+      stations: rows.map(presentKitchenSlaRow),
+    };
+  }
+
+  async getKitchenBottlenecks(query: GetKitchenSlaDto) {
+    const to = query.to ?? new Date();
+    const period = this.resolvePeriod({
+      ...query,
+      from:
+        query.from ?? new Date(to.getTime() - MAX_KITCHEN_BOTTLENECK_RANGE_MS),
+      to,
+      granularity: 'hour',
+    });
+    if (
+      period.to.getTime() - period.from.getTime() >
+      MAX_KITCHEN_BOTTLENECK_RANGE_MS
+    ) {
+      throw new BadRequestException(
+        'Kitchen bottleneck range cannot exceed 7 days.',
+      );
+    }
+    const asOf = new Date();
+    const rows = await queryKitchenBottlenecks(
+      this.prisma,
+      period,
+      asOf,
+      query.stationId,
+    );
+    return {
+      period: {
+        from: period.from.toISOString(),
+        to: period.to.toISOString(),
+        timeZone: period.timeZone,
+        granularity: 'hour',
+        cohort: 'ticketCreatedAt',
+        asOf: asOf.toISOString(),
+      },
+      slots: rows.map((row) => ({
+        bucketStartAt: row.bucketStartAt.toISOString(),
+        ...presentKitchenSlaRow(row),
+        orderedUnitCount: Number(row.orderedUnitCount),
+        openNowCount: Number(row.openNowCount),
+        cancelledTicketCount: Number(row.cancelledTicketCount),
+      })),
+    };
   }
 
   private async getSummary(
@@ -854,10 +1029,16 @@ export class ReportsService {
     });
   }
 
-  private resolvePeriod(query: GetDashboardReportDto): ReportQueryPeriod {
+  private resolvePeriod(query: {
+    from?: Date;
+    to?: Date;
+    timeZone: string;
+    granularity?: ReportGranularity;
+  }): ReportQueryPeriod {
     const to = query.to ?? new Date();
     const from = query.from ?? new Date(to.getTime() - 30 * DAY_MS);
     const duration = to.getTime() - from.getTime();
+    const granularity = query.granularity ?? 'day';
 
     if (duration <= 0) {
       throw new BadRequestException('from must be before to.');
@@ -865,7 +1046,7 @@ export class ReportsService {
     if (duration > MAX_REPORT_RANGE_MS) {
       throw new BadRequestException('Report range cannot exceed 366 days.');
     }
-    if (query.granularity === 'hour' && duration > MAX_HOURLY_RANGE_MS) {
+    if (granularity === 'hour' && duration > MAX_HOURLY_RANGE_MS) {
       throw new BadRequestException('Hourly reports cannot exceed 31 days.');
     }
     try {
@@ -878,7 +1059,7 @@ export class ReportsService {
       from,
       to,
       timeZone: query.timeZone,
-      granularity: query.granularity,
+      granularity,
     };
   }
 

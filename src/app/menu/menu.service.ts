@@ -19,11 +19,46 @@ import {
   CreateMenuItemDto,
   GetMenuCategoriesDto,
   GetMenuItemsDto,
+  ReplaceMenuOptionsDto,
   ReplaceMenuRecipeDto,
   UpdateMenuCategoryDto,
   UpdateMenuItemAvailabilityDto,
   UpdateMenuItemDto,
 } from './dto';
+
+type MenuOptionGroupConfig = {
+  name: string;
+  minSelected: number;
+  maxSelected: number;
+  options: Array<{
+    name: string;
+    priceDelta: string | number | Prisma.Decimal;
+    ingredients: Array<{
+      inventoryItemId: string;
+      quantity: string | number | Prisma.Decimal;
+    }>;
+  }>;
+};
+
+function optionConfigSnapshot(groups: MenuOptionGroupConfig[]) {
+  return groups.map((group) => ({
+    name: group.name,
+    minSelected: group.minSelected,
+    maxSelected: group.maxSelected,
+    options: group.options.map((option) => ({
+      name: option.name,
+      priceDelta: new Prisma.Decimal(option.priceDelta).toFixed(2),
+      ingredients: option.ingredients
+        .map((ingredient) => ({
+          inventoryItemId: ingredient.inventoryItemId,
+          quantity: new Prisma.Decimal(ingredient.quantity).toFixed(4),
+        }))
+        .sort((left, right) =>
+          left.inventoryItemId.localeCompare(right.inventoryItemId),
+        ),
+    })),
+  }));
+}
 
 @Injectable()
 export class MenuService {
@@ -278,6 +313,19 @@ export class MenuService {
           name: true,
           price: true,
           category: { select: { id: true, name: true } },
+          optionGroups: {
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+            select: {
+              id: true,
+              name: true,
+              minSelected: true,
+              maxSelected: true,
+              options: {
+                orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+                select: { id: true, name: true, priceDelta: true },
+              },
+            },
+          },
         },
       }),
     ]);
@@ -548,6 +596,122 @@ export class MenuService {
       });
 
       return { id: item.id, name: item.name, ingredients };
+    });
+  }
+
+  async getItemOptions(id: string) {
+    const item = await this.prisma.menuItem.findFirst({
+      where: { id, deletedAt: null, category: { deletedAt: null } },
+      select: {
+        id: true,
+        name: true,
+        optionGroups: {
+          orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+          include: {
+            options: {
+              orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+              include: { ingredients: true },
+            },
+          },
+        },
+      },
+    });
+    if (!item)
+      throw new NotFoundException(`Menu item with ID ${id} not found.`);
+    return item;
+  }
+
+  async replaceItemOptions(
+    id: string,
+    employeeId: string,
+    dto: ReplaceMenuOptionsDto,
+  ) {
+    return this.runSerializable(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      await this.findActiveItem(tx, id);
+      const ingredientIds = [
+        ...new Set(
+          dto.groups.flatMap((group) =>
+            group.options.flatMap((option) =>
+              option.ingredients.map(
+                (ingredient) => ingredient.inventoryItemId,
+              ),
+            ),
+          ),
+        ),
+      ];
+      const inventoryItems = await tx.inventoryItem.findMany({
+        where: { id: { in: ingredientIds }, deletedAt: null },
+        select: { id: true },
+      });
+      if (inventoryItems.length !== ingredientIds.length) {
+        throw new NotFoundException(
+          'One or more inventory items were not found or are inactive.',
+        );
+      }
+
+      const previousGroups = await tx.menuItemOptionGroup.findMany({
+        where: { menuItemId: id },
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          options: {
+            orderBy: { sortOrder: 'asc' },
+            include: { ingredients: true },
+          },
+        },
+      });
+      const before = optionConfigSnapshot(previousGroups);
+      const after = optionConfigSnapshot(dto.groups);
+      const getOptions = () =>
+        tx.menuItem.findFirstOrThrow({
+          where: { id },
+          select: {
+            id: true,
+            optionGroups: {
+              orderBy: { sortOrder: 'asc' },
+              include: {
+                options: {
+                  orderBy: { sortOrder: 'asc' },
+                  include: { ingredients: true },
+                },
+              },
+            },
+          },
+        });
+      if (JSON.stringify(before) === JSON.stringify(after)) {
+        return getOptions();
+      }
+      await tx.menuItemOptionGroup.deleteMany({ where: { menuItemId: id } });
+      for (const [groupIndex, group] of dto.groups.entries()) {
+        await tx.menuItemOptionGroup.create({
+          data: {
+            menuItemId: id,
+            name: group.name,
+            minSelected: group.minSelected,
+            maxSelected: group.maxSelected,
+            sortOrder: groupIndex,
+            options: {
+              create: group.options.map((option, optionIndex) => ({
+                name: option.name,
+                priceDelta: this.toPrice(option.priceDelta),
+                sortOrder: optionIndex,
+                ingredients: {
+                  create: option.ingredients.map((ingredient) => ({
+                    inventoryItemId: ingredient.inventoryItemId,
+                    quantity: this.toQuantity(ingredient.quantity),
+                  })),
+                },
+              })),
+            },
+          },
+        });
+      }
+      await this.logAction(tx, employeeId, 'MENU_OPTIONS_REPLACED', {
+        menuItemId: id,
+        before,
+        after,
+      });
+      return getOptions();
     });
   }
 
