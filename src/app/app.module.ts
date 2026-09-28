@@ -45,6 +45,7 @@ import { KitchenModule } from './kitchen/kitchen.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { ManagementExceptionsModule } from './management-exceptions/management-exceptions.module';
 import { OnlineOrdersModule } from './online-orders/online-orders.module';
+import { RecommendationsModule } from './recommendations/recommendations.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -83,6 +84,7 @@ import { OnlineOrdersModule } from './online-orders/online-orders.module';
     AuditLogsModule,
     ManagementExceptionsModule,
     OnlineOrdersModule,
+    RecommendationsModule,
   ],
   controllers: [AppController],
   providers: [
