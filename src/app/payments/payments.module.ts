@@ -7,6 +7,8 @@ import { PaymentReconciliationScheduler } from './payment-reconciliation.schedul
 import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentRefundsService } from './payment-refunds.service';
 import { PaymentsService } from './payments.service';
+import { MomoService } from './momo.service';
+import { PaymentProviderFactory } from './payment-provider.factory';
 import { VnpayService } from './vnpay.service';
 
 @Module({
@@ -18,6 +20,8 @@ import { VnpayService } from './vnpay.service';
     PaymentReconciliationService,
     PaymentReconciliationScheduler,
     VnpayService,
+    MomoService,
+    PaymentProviderFactory,
   ],
 })
 export class PaymentsModule {}

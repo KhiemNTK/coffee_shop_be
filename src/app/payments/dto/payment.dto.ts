@@ -5,6 +5,7 @@ import { z } from 'zod';
 export class CreatePaymentAttemptDto extends createZodDto(
   z.object({
     idempotencyKey: z.string().trim().min(8).max(120),
+    provider: z.enum(PaymentProvider).optional(),
     locale: z.enum(['vn', 'en']).default('vn'),
     bankCode: z
       .string()

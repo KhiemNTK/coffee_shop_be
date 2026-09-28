@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import {
   PaymentAttemptStatus,
+  PaymentProvider,
   FundType,
   PaymentMethod,
   PaymentRefundStatus,
@@ -23,6 +24,8 @@ import { OutboxService } from '../src/app/durable/outbox.service';
 import { PaymentsService } from '../src/app/payments/payments.service';
 import { PaymentRefundsService } from '../src/app/payments/payment-refunds.service';
 import { VnpayService } from '../src/app/payments/vnpay.service';
+import { MomoService } from '../src/app/payments/momo.service';
+import { PaymentProviderFactory } from '../src/app/payments/payment-provider.factory';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import type { PromotionCalculatorService } from '../src/app/promotions/services/promotion-calculator.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
@@ -40,6 +43,13 @@ describe('VNPay payment lifecycle (e2e)', () => {
     VNPAY_PAYMENT_URL: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
     VNPAY_RETURN_URL: 'https://coffee.example.com/payment/vnpay/return',
     VNPAY_ATTEMPT_TTL_MINUTES: 15,
+    MOMO_PARTNER_CODE: 'TESTSHOP',
+    MOMO_ACCESS_KEY: 'access-key',
+    MOMO_SECRET_KEY: 'momo-sandbox-secret-123456789',
+    MOMO_API_URL: 'https://test-payment.momo.vn',
+    MOMO_REDIRECT_URL: 'https://shop.example.com/payment/momo/return',
+    MOMO_IPN_URL: 'https://api.example.com/api/v1/payments/momo/ipn',
+    MOMO_API_TIMEOUT_MS: 30_000,
   });
   const invoices = new InvoicesService(
     extendedPrisma,
@@ -60,6 +70,11 @@ describe('VNPay payment lifecycle (e2e)', () => {
     invoices,
     outbox,
     new VnpayService(config),
+    new PaymentProviderFactory(
+      new VnpayService(config),
+      new MomoService(config),
+    ),
+    new MomoService(config),
   );
   const refundGateway = {
     assertApiConfigured: jest.fn(),
@@ -159,6 +174,15 @@ describe('VNPay payment lifecycle (e2e)', () => {
         .digest('hex'),
     };
   };
+
+  const signMomo = (fields: Record<string, string>) =>
+    createHmac('sha256', 'momo-sandbox-secret-123456789')
+      .update(
+        Object.entries(fields)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('&'),
+      )
+      .digest('hex');
 
   beforeAll(async () => {
     const position = await prisma.position.create({
@@ -347,6 +371,113 @@ describe('VNPay payment lifecycle (e2e)', () => {
     await expect(
       prisma.cashTransaction.count({ where: { invoiceId: invoice.id } }),
     ).resolves.toBe(0);
+  });
+
+  it('settles a signed MoMo IPN once and ignores a forged replay', async () => {
+    const { invoice } = await createUnpaidInvoice('125000');
+    const payUrl = 'https://test-payment.momo.vn/v2/gateway/pay?test=1';
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation((_url, init) => {
+        const request = JSON.parse(init?.body as string) as {
+          orderId: string;
+          amount: number;
+        };
+        const response = {
+          partnerCode: 'TESTSHOP',
+          orderId: request.orderId,
+          requestId: request.orderId,
+          amount: request.amount,
+          message: 'Successful.',
+          resultCode: 0,
+          payUrl,
+          responseTime: 123456,
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...response,
+              signature: signMomo({
+                accessKey: 'access-key',
+                amount: String(request.amount),
+                message: response.message,
+                orderId: request.orderId,
+                partnerCode: 'TESTSHOP',
+                payUrl,
+                requestId: request.orderId,
+                responseTime: '123456',
+                resultCode: '0',
+              }),
+            }),
+            { status: 200 },
+          ),
+        );
+      });
+    try {
+      const created = await payments.createAttempt(
+        invoice.id,
+        employeeId,
+        '127.0.0.1',
+        {
+          provider: PaymentProvider.MOMO,
+          idempotencyKey: `momo-${randomUUID()}`,
+          locale: 'vn',
+          closeSessionAfterPayment: false,
+        },
+      );
+      expect(created.paymentUrl).toBe(payUrl);
+      const fields = {
+        accessKey: 'access-key',
+        amount: '125000',
+        extraData: '',
+        message: 'Successful.',
+        orderId: created.merchantReference,
+        orderInfo: `Thanh toan hoa don ${invoice.invoiceNumber}`,
+        orderType: 'momo_wallet',
+        partnerCode: 'TESTSHOP',
+        payType: 'qr',
+        requestId: created.merchantReference,
+        responseTime: String(Date.now()),
+        resultCode: '0',
+        transId: String(Date.now()),
+      };
+      const callback = {
+        ...fields,
+        amount: 125000,
+        responseTime: Number(fields.responseTime),
+        resultCode: 0,
+        transId: Number(fields.transId),
+        signature: signMomo(fields),
+      };
+      await expect(
+        payments.handleMomoIpn({ ...callback, amount: 1 }),
+      ).rejects.toThrow();
+      await payments.handleMomoIpn(callback);
+      await payments.handleMomoIpn(callback);
+      const lateFailureFields = {
+        ...fields,
+        resultCode: '1001',
+        message: 'Insufficient funds.',
+      };
+      await payments.handleMomoIpn({
+        ...callback,
+        resultCode: 1001,
+        message: lateFailureFields.message,
+        signature: signMomo(lateFailureFields),
+      });
+      const [paid, attempt, events] = await Promise.all([
+        prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } }),
+        prisma.paymentAttempt.findUniqueOrThrow({ where: { id: created.id } }),
+        prisma.paymentWebhookEvent.count({
+          where: { paymentAttemptId: created.id },
+        }),
+      ]);
+      expect(paid.paymentStatus).toBe(PaymentStatus.PAID);
+      expect(attempt.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+      expect(events).toBe(2);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it('persists amount mismatches without mutating the invoice', async () => {

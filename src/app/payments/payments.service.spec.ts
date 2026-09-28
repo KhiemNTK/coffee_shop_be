@@ -14,6 +14,8 @@ import type { InvoicesService } from '../invoices/invoices.service';
 import type { OutboxService } from '../durable/outbox.service';
 import { PaymentsService } from './payments.service';
 import type { VnpayService } from './vnpay.service';
+import type { MomoService } from './momo.service';
+import type { PaymentProviderFactory } from './payment-provider.factory';
 
 describe('PaymentsService', () => {
   const tx = {
@@ -55,6 +57,11 @@ describe('PaymentsService', () => {
     invoices as unknown as InvoicesService,
     outbox as unknown as OutboxService,
     vnpay as unknown as VnpayService,
+    {
+      get: jest.fn(() => vnpay),
+      createPaymentUrl: jest.fn(() => 'https://sandbox/payment'),
+    } as unknown as PaymentProviderFactory,
+    {} as MomoService,
   );
   const attempt = {
     id: 'attempt-id',

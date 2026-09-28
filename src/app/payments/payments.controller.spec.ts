@@ -13,6 +13,7 @@ describe('PaymentsController', () => {
   let app: INestApplication<App>;
   const paymentsService = {
     handleVnpayIpn: jest.fn(),
+    handleMomoIpn: jest.fn(),
   };
 
   beforeAll(async () => {
@@ -46,5 +47,18 @@ describe('PaymentsController', () => {
       .get('/payments/vnpay/ipn?vnp_TxnRef=PA123')
       .expect(200)
       .expect({ RspCode: '00', Message: 'Confirm Success' });
+  });
+
+  it('acknowledges MoMo IPN with HTTP 204 and no response body', async () => {
+    paymentsService.handleMomoIpn.mockResolvedValue(undefined);
+
+    await request(app.getHttpServer())
+      .post('/payments/momo/ipn')
+      .send({ orderId: 'PA123' })
+      .expect(204)
+      .expect('');
+    expect(paymentsService.handleMomoIpn).toHaveBeenCalledWith({
+      orderId: 'PA123',
+    });
   });
 });

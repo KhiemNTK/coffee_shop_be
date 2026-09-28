@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ConflictException,
+  BadRequestException,
   Inject,
   Injectable,
   Logger,
@@ -31,6 +32,8 @@ import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { CreatePaymentAttemptDto, GetPaymentAttemptsDto } from './dto';
 import { VnpayService } from './vnpay.service';
+import { MomoService } from './momo.service';
+import { PaymentProviderFactory } from './payment-provider.factory';
 
 const VNPAY_RESPONSE = {
   SUCCESS: { RspCode: '00', Message: 'Confirm Success' },
@@ -71,6 +74,8 @@ export class PaymentsService {
     private readonly invoicesService: InvoicesService,
     private readonly outbox: OutboxService,
     private readonly vnpay: VnpayService,
+    private readonly providers: PaymentProviderFactory,
+    private readonly momo: MomoService,
   ) {}
 
   async createAttempt(
@@ -79,7 +84,11 @@ export class PaymentsService {
     ipAddress: string,
     dto: CreatePaymentAttemptDto,
   ) {
-    this.vnpay.assertConfigured();
+    const provider = dto.provider ?? PaymentProvider.VNPAY;
+    this.providers.get(provider).assertConfigured();
+    if (provider === PaymentProvider.MOMO && dto.bankCode) {
+      throw new BadRequestException('MoMo does not support bankCode.');
+    }
     const requestHash = this.createRequestHash(invoiceId, dto);
     const existing = await this.prisma.paymentAttempt.findUnique({
       where: {
@@ -144,6 +153,9 @@ export class PaymentsService {
               'Only unpaid invoices can create payment attempts.',
             );
           }
+          if (provider === PaymentProvider.MOMO) {
+            this.momo.assertAmount(invoice.totalAmount);
+          }
 
           const now = new Date();
           await tx.paymentAttempt.updateMany({
@@ -172,13 +184,15 @@ export class PaymentsService {
             employeeId,
           );
           const ttlMinutes = this.config.get<number>(
-            'VNPAY_ATTEMPT_TTL_MINUTES',
+            provider === PaymentProvider.MOMO
+              ? 'MOMO_ATTEMPT_TTL_MINUTES'
+              : 'VNPAY_ATTEMPT_TTL_MINUTES',
             15,
           );
           const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
           const created = await tx.paymentAttempt.create({
             data: {
-              provider: PaymentProvider.VNPAY,
+              provider,
               amount: invoice.totalAmount,
               merchantReference: this.createMerchantReference(),
               idempotencyKey: dto.idempotencyKey,
@@ -483,6 +497,177 @@ export class PaymentsService {
     };
   }
 
+  async handleMomoIpn(raw: unknown) {
+    const verified = this.momo.verifyCallback(raw);
+    if (!verified) throw new BadRequestException('Invalid MoMo notification.');
+    const { data, payloadHash } = verified;
+    try {
+      await runSerializableTransaction(this.prisma, async (tx) => {
+        const attempt = await tx.paymentAttempt.findUnique({
+          where: { merchantReference: data.orderId },
+          include: {
+            invoice: { select: { paymentStatus: true, invoiceNumber: true } },
+          },
+        });
+        const event = await tx.paymentWebhookEvent.create({
+          data: {
+            provider: PaymentProvider.MOMO,
+            payloadHash,
+            merchantReference: data.orderId,
+            providerTransactionNo:
+              data.transId > 0 ? String(data.transId) : null,
+            responseCode: String(data.resultCode),
+            transactionStatus: String(data.resultCode),
+            payload: data,
+            paymentAttemptId: attempt?.id,
+          },
+        });
+        if (!attempt || attempt.provider !== PaymentProvider.MOMO) {
+          await this.completeWebhook(tx, event.id, 'NOT_FOUND');
+          return;
+        }
+        const succeeded = data.resultCode === 0;
+        const amount = new Prisma.Decimal(data.amount);
+        const referenceMatches =
+          data.extraData === '' &&
+          data.orderInfo ===
+            `Thanh toan hoa don ${attempt.invoice.invoiceNumber}`.slice(
+              0,
+              255,
+            ) &&
+          attempt.amount.equals(amount) &&
+          attempt.currency === 'VND';
+        if (!referenceMatches || (succeeded && data.transId <= 0)) {
+          await this.markPaymentReview(tx, attempt, {
+            type: PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+            title: 'MoMo notification does not match the payment attempt',
+            providerTransactionNo:
+              data.transId > 0 ? String(data.transId) : null,
+            details: { resultCode: data.resultCode, amount: data.amount },
+          });
+          await this.completeWebhook(tx, event.id, 'MISMATCH');
+          return;
+        }
+        if ([1000, 7000, 7002, 9000].includes(data.resultCode)) {
+          await this.completeWebhook(tx, event.id, 'PENDING');
+          return;
+        }
+        if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
+          if (
+            succeeded &&
+            attempt.providerTransactionNo !== String(data.transId)
+          ) {
+            await this.markPaymentReview(tx, attempt, {
+              type: PaymentReconciliationIncidentType.PAYMENT_STATE_CONFLICT,
+              title: 'MoMo notification conflicts with confirmed payment',
+              providerTransactionNo:
+                data.transId > 0 ? String(data.transId) : null,
+              details: { resultCode: data.resultCode },
+            });
+          }
+          await this.completeWebhook(
+            tx,
+            event.id,
+            succeeded ? 'ALREADY_CONFIRMED' : 'STALE_FAILURE',
+          );
+          return;
+        }
+        if (attempt.status === PaymentAttemptStatus.REQUIRES_REVIEW) {
+          await this.completeWebhook(tx, event.id, 'REQUIRES_REVIEW');
+          return;
+        }
+        if (attempt.invoice.paymentStatus !== PaymentStatus.UNPAID) {
+          if (succeeded) {
+            await this.markPaymentReview(tx, attempt, {
+              type: PaymentReconciliationIncidentType.PAYMENT_STATE_CONFLICT,
+              title: 'MoMo payment succeeded after invoice state changed',
+              providerTransactionNo: String(data.transId),
+              details: { invoiceStatus: attempt.invoice.paymentStatus },
+            });
+          }
+          await this.completeWebhook(tx, event.id, 'PAYMENT_STATE_CONFLICT');
+          return;
+        }
+        const completedAt = new Date();
+        if (!succeeded) {
+          await tx.paymentAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              status: PaymentAttemptStatus.FAILED,
+              failureCode: `MOMO_${data.resultCode}`,
+              completedAt,
+              lastReconciledAt: completedAt,
+              nextReconcileAt: null,
+              reconciliationLockedAt: null,
+            },
+          });
+          await this.completeWebhook(tx, event.id, 'FAILED');
+          return;
+        }
+        await this.invoicesService.completeOnlinePayment(tx, {
+          invoiceId: attempt.invoiceId,
+          employeeId: attempt.createdById,
+          shiftId: attempt.shiftId,
+          closeSessionAfterPayment: attempt.closeSessionAfterPayment,
+        });
+        await tx.paymentAttempt.update({
+          where: { id: attempt.id },
+          data: {
+            status: PaymentAttemptStatus.SUCCEEDED,
+            providerTransactionNo: String(data.transId),
+            failureCode: null,
+            completedAt,
+            lastReconciledAt: completedAt,
+            nextReconcileAt: null,
+            reconciliationLockedAt: null,
+          },
+        });
+        await tx.paymentAttempt.updateMany({
+          where: {
+            invoiceId: attempt.invoiceId,
+            id: { not: attempt.id },
+            status: PaymentAttemptStatus.PENDING,
+          },
+          data: {
+            status: PaymentAttemptStatus.FAILED,
+            failureCode: 'SUPERSEDED',
+            completedAt,
+            nextReconcileAt: null,
+          },
+        });
+        await this.completeWebhook(tx, event.id, 'SUCCEEDED');
+        await this.log(tx, attempt.createdById, 'MOMO_PAYMENT_SUCCEEDED', {
+          paymentAttemptId: attempt.id,
+          invoiceId: attempt.invoiceId,
+          providerTransactionNo: String(data.transId),
+        });
+      });
+    } catch (error) {
+      if (this.isPayloadReplay(error)) return;
+      this.logger.error(
+        `MoMo IPN processing failed for ${data.orderId}.`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw error;
+    }
+  }
+
+  async inspectMomoReturn(query: unknown) {
+    const verified = this.momo.verifyCallback(query);
+    const attempt = verified
+      ? await this.prisma.paymentAttempt.findUnique({
+          where: { merchantReference: verified.data.orderId },
+          select: {
+            id: true,
+            invoiceId: true,
+            status: true,
+            completedAt: true,
+          },
+        })
+      : null;
+    return { signatureValid: Boolean(verified), attempt };
+  }
+
   private async resolveExistingAttempt(
     attempt: PaymentAttemptView,
     invoiceId: string,
@@ -516,14 +701,14 @@ export class PaymentsService {
     return this.presentAttempt(attempt, ipAddress, dto);
   }
 
-  private presentAttempt(
+  private async presentAttempt(
     attempt: PaymentAttemptView,
     ipAddress: string,
     dto: CreatePaymentAttemptDto,
   ) {
     const paymentUrl =
       attempt.status === PaymentAttemptStatus.PENDING
-        ? this.vnpay.createPaymentUrl({
+        ? await this.providers.createPaymentUrl(attempt.provider, {
             amount: attempt.amount,
             invoiceNumber: attempt.invoice.invoiceNumber,
             merchantReference: attempt.merchantReference,
@@ -563,7 +748,7 @@ export class PaymentsService {
       .update(
         JSON.stringify({
           invoiceId,
-          provider: PaymentProvider.VNPAY,
+          provider: dto.provider ?? PaymentProvider.VNPAY,
           locale: dto.locale,
           bankCode: dto.bankCode ?? null,
           closeSessionAfterPayment: dto.closeSessionAfterPayment,

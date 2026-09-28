@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
+  PaymentProvider,
   PaymentProviderRequestStatus,
   PaymentProviderRequestType,
   PaymentReconciliationIncidentStatus,
@@ -90,7 +91,6 @@ export class PaymentRefundsService {
         : existing;
     }
 
-    this.vnpay.assertApiConfigured();
     try {
       const refund = await runSerializableTransaction(
         this.prisma,
@@ -119,6 +119,12 @@ export class PaymentRefundsService {
               `Payment attempt with ID ${paymentAttemptId} not found.`,
             );
           }
+          if (attempt.provider !== PaymentProvider.VNPAY) {
+            throw new ConflictException(
+              'Refunds for this payment provider are not available through the API.',
+            );
+          }
+          this.vnpay.assertApiConfigured();
           if (
             attempt.status !== PaymentAttemptStatus.SUCCEEDED ||
             !attempt.providerTransactionNo

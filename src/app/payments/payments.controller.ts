@@ -7,6 +7,7 @@ import {
   Query,
   Req,
   Res,
+  HttpCode,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
@@ -16,6 +17,7 @@ import { IDDto } from '../../common/dto/param.dto';
 import type { PaymentCallbackQuery } from '../../common/types';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import { SkipAuth } from '../auth/auth.decorator';
+import { SkipCsrf } from '../auth/csrf.decorator';
 import {
   CreatePaymentAttemptDto,
   CreatePaymentRefundDto,
@@ -126,5 +128,19 @@ export class PaymentsController {
   @SkipAuth()
   inspectVnpayReturn(@Query() query: PaymentCallbackQuery) {
     return this.paymentsService.inspectVnpayReturn(query);
+  }
+
+  @Post('payments/momo/ipn')
+  @SkipAuth()
+  @SkipCsrf()
+  @HttpCode(204)
+  async handleMomoIpn(@Body() body: unknown) {
+    await this.paymentsService.handleMomoIpn(body);
+  }
+
+  @Get('payments/momo/return')
+  @SkipAuth()
+  inspectMomoReturn(@Query() query: unknown) {
+    return this.paymentsService.inspectMomoReturn(query);
   }
 }

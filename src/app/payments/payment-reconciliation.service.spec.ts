@@ -1,14 +1,21 @@
-import { PaymentAttemptStatus, PaymentStatus, Prisma } from '@prisma/client';
+import {
+  PaymentAttemptStatus,
+  PaymentProvider,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import type { OutboxService } from '../durable/outbox.service';
 import type { InvoicesService } from '../invoices/invoices.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
 import type { VnpayService } from './vnpay.service';
+import type { MomoService } from './momo.service';
 
 describe('PaymentReconciliationService', () => {
   const attempt = {
     id: 'attempt-id',
+    provider: PaymentProvider.VNPAY,
     status: PaymentAttemptStatus.EXPIRED,
     amount: new Prisma.Decimal('100000'),
     currency: 'VND',
@@ -64,18 +71,26 @@ describe('PaymentReconciliationService', () => {
     assertApiConfigured: jest.fn(),
     queryTransaction: jest.fn(),
   };
+  const momo = {
+    assertConfigured: jest.fn(),
+    queryTransaction: jest.fn(),
+  };
   const service = new PaymentReconciliationService(
     prisma as unknown as ExtendedPrismaClient,
     new PaginationUtilService(),
     invoices as unknown as InvoicesService,
     outbox as unknown as OutboxService,
     vnpay as unknown as VnpayService,
+    momo as unknown as MomoService,
   );
 
   beforeEach(() => {
     jest.clearAllMocks();
     prisma.paymentAttempt.findUnique
-      .mockResolvedValueOnce({ id: attempt.id })
+      .mockResolvedValueOnce({
+        id: attempt.id,
+        provider: PaymentProvider.VNPAY,
+      })
       .mockResolvedValueOnce(attempt);
     prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
     prisma.paymentProviderRequest.create.mockResolvedValue({
@@ -138,5 +153,39 @@ describe('PaymentReconciliationService', () => {
     expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
     expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
     expect(result?.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
+  });
+
+  it('confirms a matching MoMo query without calling VNPay', async () => {
+    prisma.paymentAttempt.findUnique
+      .mockReset()
+      .mockResolvedValueOnce({ id: attempt.id, provider: PaymentProvider.MOMO })
+      .mockResolvedValueOnce({ ...attempt, provider: PaymentProvider.MOMO });
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.MOMO,
+    });
+    momo.queryTransaction.mockResolvedValue({
+      request: {
+        partnerCode: 'TESTSHOP',
+        orderId: 'PA123',
+        requestId: 'query-id',
+      },
+      response: {
+        partnerCode: 'TESTSHOP',
+        orderId: 'PA123',
+        requestId: 'query-id',
+        resultCode: 0,
+        amount: 100000,
+        transId: 123456789,
+        message: 'Successful.',
+      },
+    });
+
+    const result = await service.reconcileAttempt(attempt.id, 'manager-id');
+
+    expect(vnpay.queryTransaction).not.toHaveBeenCalled();
+    expect(momo.queryTransaction).toHaveBeenCalledTimes(1);
+    expect(result?.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+    expect(invoices.completeOnlinePayment).toHaveBeenCalledTimes(1);
   });
 });

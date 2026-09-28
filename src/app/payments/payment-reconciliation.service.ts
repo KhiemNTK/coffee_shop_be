@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
+  PaymentProvider,
   PaymentProviderRequestStatus,
   PaymentProviderRequestType,
   PaymentReconciliationIncidentStatus,
@@ -27,8 +28,10 @@ import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { GetPaymentIncidentsDto, ResolvePaymentIncidentDto } from './dto';
 import { VnpayService } from './vnpay.service';
+import { MomoService } from './momo.service';
 
 const BATCH_SIZE = 25;
+const RECONCILE_CONCURRENCY = 3;
 const MAX_QUERY_ATTEMPTS = 5;
 const LOCK_TIMEOUT_MS = 10 * 60 * 1_000;
 const RETRY_BASE_MS = 60 * 1_000;
@@ -58,16 +61,21 @@ export class PaymentReconciliationService {
     private readonly invoicesService: InvoicesService,
     private readonly outbox: OutboxService,
     private readonly vnpay: VnpayService,
+    private readonly momo: MomoService,
   ) {}
 
   async reconcileAttempt(id: string, employeeId: string) {
-    this.vnpay.assertApiConfigured();
     const attempt = await this.prisma.paymentAttempt.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, provider: true },
     });
     if (!attempt) {
       throw new NotFoundException(`Payment attempt with ID ${id} not found.`);
+    }
+    if (attempt.provider === PaymentProvider.MOMO) {
+      this.momo.assertConfigured();
+    } else {
+      this.vnpay.assertApiConfigured();
     }
     if (!(await this.claimAttempt(id))) {
       throw new ConflictException(
@@ -101,19 +109,33 @@ export class PaymentReconciliationService {
     let claimed = 0;
     let processed = 0;
     let failed = 0;
-    for (const { id } of due) {
-      if (!(await this.claimAttempt(id, true))) continue;
-      claimed++;
-      try {
-        await this.queryProvider(id);
-        processed++;
-      } catch (error) {
-        failed++;
-        this.logger.error(
-          `Payment reconciliation failed for attempt ${id}.`,
-          error instanceof Error ? error.stack : undefined,
-        );
-      }
+    for (let offset = 0; offset < due.length; offset += RECONCILE_CONCURRENCY) {
+      const outcomes = await Promise.all(
+        due
+          .slice(offset, offset + RECONCILE_CONCURRENCY)
+          .map(async ({ id }) => {
+            let isClaimed = false;
+            try {
+              isClaimed = await this.claimAttempt(id, true);
+              if (!isClaimed) return 'SKIPPED';
+              await this.queryProvider(id);
+              return 'PROCESSED';
+            } catch (error) {
+              this.logger.error(
+                `Payment reconciliation failed for attempt ${id}.`,
+                error instanceof Error ? error.stack : undefined,
+              );
+              return isClaimed ? 'FAILED' : 'CLAIM_FAILED';
+            }
+          }),
+      );
+      claimed += outcomes.filter(
+        (outcome) => outcome === 'PROCESSED' || outcome === 'FAILED',
+      ).length;
+      processed += outcomes.filter((outcome) => outcome === 'PROCESSED').length;
+      failed += outcomes.filter(
+        (outcome) => outcome === 'FAILED' || outcome === 'CLAIM_FAILED',
+      ).length;
     }
     return { claimed, processed, failed };
   }
@@ -243,6 +265,10 @@ export class PaymentReconciliationService {
       },
     });
 
+    if (attempt.provider === PaymentProvider.MOMO) {
+      return this.queryMomo(attempt, providerRequest.id, requestId, employeeId);
+    }
+
     let result: Awaited<ReturnType<VnpayService['queryTransaction']>>;
     try {
       result = await this.vnpay.queryTransaction(input);
@@ -263,6 +289,81 @@ export class PaymentReconciliationService {
         },
       });
       return await this.applyQueryResponse(attempt, result, employeeId);
+    } catch (error) {
+      await this.releaseAttempt(attempt.id);
+      throw error;
+    }
+  }
+
+  private async queryMomo(
+    attempt: AttemptView,
+    providerRequestId: string,
+    requestId: string,
+    employeeId?: string,
+  ) {
+    let result: Awaited<ReturnType<MomoService['queryTransaction']>>;
+    try {
+      result = await this.momo.queryTransaction({
+        requestId,
+        merchantReference: attempt.merchantReference,
+      });
+    } catch (error) {
+      await this.recordQueryFailure(attempt, providerRequestId, error);
+      throw new BadGatewayException('MoMo reconciliation request failed.');
+    }
+    try {
+      await this.prisma.paymentProviderRequest.update({
+        where: { id: providerRequestId },
+        data: {
+          status: PaymentProviderRequestStatus.SUCCEEDED,
+          requestPayload: result.request,
+          responsePayload: result.response,
+          responseCode: String(result.response.resultCode),
+          transactionStatus: String(result.response.resultCode),
+          completedAt: new Date(),
+        },
+      });
+      return await this.prisma.$transaction(async (tx) => {
+        const current = await tx.paymentAttempt.findUnique({
+          where: { id: attempt.id },
+          include: ATTEMPT_INCLUDE,
+        });
+        if (!current)
+          throw new NotFoundException(
+            `Payment attempt with ID ${attempt.id} not found.`,
+          );
+        const response = result.response;
+        if (response.resultCode === 0) {
+          if (
+            response.amount === undefined ||
+            !current.amount.equals(response.amount) ||
+            !response.transId ||
+            response.transId <= 0 ||
+            (current.providerTransactionNo &&
+              current.providerTransactionNo !== String(response.transId))
+          ) {
+            return this.markForReview(
+              tx,
+              current,
+              PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+              'MoMo transaction does not match the local payment attempt',
+              { response: this.toJson(response) },
+            );
+          }
+          return this.confirmProviderPayment(
+            tx,
+            current,
+            String(response.transId),
+            employeeId,
+          );
+        }
+        return this.rescheduleOrReview(
+          tx,
+          current,
+          PaymentReconciliationIncidentType.STALE_ATTEMPT,
+          { provider: PaymentProvider.MOMO, resultCode: response.resultCode },
+        );
+      });
     } catch (error) {
       await this.releaseAttempt(attempt.id);
       throw error;
@@ -312,7 +413,7 @@ export class PaymentReconciliationService {
         return this.confirmProviderPayment(
           tx,
           current,
-          result.response,
+          result.response.vnp_TransactionNo,
           employeeId,
         );
       }
@@ -331,20 +432,31 @@ export class PaymentReconciliationService {
   private async confirmProviderPayment(
     tx: ExtendedPrismaTransactionClient,
     attempt: AttemptView,
-    response: Record<string, string>,
+    providerTransactionNo: string | undefined,
     employeeId?: string,
   ) {
-    const providerTransactionNo = response.vnp_TransactionNo;
     if (!providerTransactionNo || providerTransactionNo === '0') {
       return this.markForReview(
         tx,
         attempt,
         PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
-        'VNPay confirmed payment without a transaction number',
-        { response },
+        'Provider confirmed payment without a transaction number',
+        { provider: attempt.provider },
       );
     }
     if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
+      if (attempt.providerTransactionNo !== providerTransactionNo) {
+        return this.markForReview(
+          tx,
+          attempt,
+          PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+          'Provider transaction number differs from confirmed payment',
+          {
+            providerTransactionNo,
+            confirmedTransactionNo: attempt.providerTransactionNo,
+          },
+        );
+      }
       if (
         attempt.invoice.paymentStatus !== PaymentStatus.PAID &&
         attempt.invoice.paymentStatus !== PaymentStatus.PARTIALLY_REFUNDED &&
@@ -473,7 +585,7 @@ export class PaymentReconciliationService {
       await this.openIncident(tx, {
         type: incidentType,
         deduplicationKey: `${incidentType}:${attempt.id}`,
-        title: 'Confirmed payment could not be verified with VNPay',
+        title: 'Confirmed payment could not be verified with provider',
         details,
         paymentAttemptId: attempt.id,
       });

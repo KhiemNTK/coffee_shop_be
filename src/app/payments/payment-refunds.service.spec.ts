@@ -98,6 +98,7 @@ describe('PaymentRefundsService', () => {
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
     tx.paymentAttempt.findUnique.mockResolvedValue({
       id: 'attempt-id',
+      provider: PaymentProvider.VNPAY,
       status: PaymentAttemptStatus.SUCCEEDED,
       amount,
       providerTransactionNo: 'VNP-PAYMENT-1',
@@ -132,6 +133,26 @@ describe('PaymentRefundsService', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it('rejects MoMo refunds without sending a VNPay refund request', async () => {
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'attempt-id',
+      provider: PaymentProvider.MOMO,
+      status: PaymentAttemptStatus.SUCCEEDED,
+      amount,
+      providerTransactionNo: '123456789',
+      invoice: { paymentStatus: PaymentStatus.PAID },
+    });
+
+    await expect(
+      service.createRefund('attempt-id', 'employee-id', {
+        amount: '100000',
+        reason: 'Customer request',
+        idempotencyKey: 'momo-refund-key',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(vnpay.refundTransaction).not.toHaveBeenCalled();
+  });
 
   it('reserves and completes a full refund without exceeding the payment', async () => {
     const result = await service.createRefund('attempt-id', 'employee-id', {
