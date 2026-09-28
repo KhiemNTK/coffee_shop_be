@@ -40,13 +40,23 @@ separate staging rehearsal before go-live.
 ## Customer-facing and operator APIs
 
 - `GET /api/v1/menu/public/categories` and `/menu/public/items` expose only
-  active categories and saleable item names/prices. Availability is manually
+  active categories and saleable item names/prices/option groups. Availability is manually
   controlled; this is not a promise that ingredients are reserved.
+- Staff configure size/topping groups with `GET/PUT /api/v1/menu/items/:id/options`
+  (`/menu_read` or `/menu_update`). `PUT` replaces all groups with
+  `{groups:[{name,minSelected,maxSelected,options:[{name,priceDelta,ingredients:[{inventoryItemId,quantity}]}]}]}`.
+  Changing groups gives choices new IDs, so pending online requests with old
+  choices must be resubmitted; accepted orders retain their price, choice and
+  recipe snapshots. Ingredients are additive to the base recipe, not substitutes.
 - Remote takeaway uses `POST /api/v1/online-orders/requests` with
-  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?}]}`.
+  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?,optionIds?}], maxSubtotal?}`.
   `clientRequestId` is a fresh UUID per checkout attempt; retry with the same
   ID and payload returns the same request and `accessToken`, while a changed
-  payload returns 409. The server quotes current menu prices; no stock or
+  payload returns 409. Set `maxSubtotal` to the current quote when confirming
+  a reordered cart; a higher server quote returns 409 without creating an
+  order. The server quotes base price plus selected choices;
+  `POST /api/v1/orders/sessions/:id/items` accepts the same `optionIds` per
+  line for POS. No stock or
   payment is reserved. Requests wait up to 30 minutes for staff review.
 - Customers send `{requestId, accessToken}` in the body of
   `POST /api/v1/online-orders/requests/status` to track review, kitchen
@@ -56,10 +66,121 @@ separate staging rehearsal before go-live.
   `GET /api/v1/online-orders/requests` and `GET /requests/:id` with
   `/online-orders_read`, then `POST /requests/:id/accept` or `/reject` with
   `/online-orders_review`. Rejection requires `{reason}`. Acceptance creates
-  one takeaway order session and kitchen ticket atomically; changed menu prices
-  or unavailable items require staff to reject and ask the customer to reorder.
-  Checkout and payment happen at pickup through the existing invoice/POS flow;
-  online acceptance does not mark the order paid.
+  one takeaway order session and kitchen ticket atomically; changed menu prices,
+  choices or unavailable items require staff to reject and ask the customer to reorder.
+  Acceptance does not reserve stock or collect payment. Staff use
+  `GET /api/v1/online-orders/requests/fulfillment` to monitor accepted orders.
+  Once every item is `READY`, staff with `/invoices_create` and
+  `/orders_items_handoff` send `{accessToken,amountTendered,idempotencyKey}` to
+  `POST /api/v1/online-orders/requests/:id/collect`. The customer must present
+  their access token; the open cashier shift, cash invoice, cash ledger entry,
+  item handoff and audit are committed together. Reuse the same idempotency key
+  when retrying a failed response. Do not use the generic unpaid handoff route
+  for online orders. Staff with `/online-orders_review` can send `{reason}` to
+  `POST /api/v1/online-orders/requests/:id/cancel` before payment or collection;
+  prepared ingredients are recorded as waste, not returned to stock.
+- Scheduled pickup uses `GET /api/v1/online-orders/pickup-slots?date=YYYY-MM-DD`
+  and an optional `pickupAt` ISO timestamp on request creation. Configure
+  `ONLINE_PICKUP_SLOT_CAPACITY`, `ONLINE_PICKUP_OPEN_LOCAL` and
+  `ONLINE_PICKUP_CLOSE_LOCAL` to enable it (15-minute slots in
+  `Asia/Ho_Chi_Minh`; the current shop uses 07:00-22:00 and 4 accepted orders
+  per slot). A pending request does **not** reserve capacity; acceptance
+  rechecks it transactionally. `GET /requests/fulfillment?overdueOnly=true`
+  shows uncollected orders more than 15 minutes past their pickup time;
+  staff decide whether to cancel, and prepared stock is recorded as waste.
+- Staff with `/online-orders_review` may call
+  `POST /api/v1/online-orders/requests/:id/no-show` only for an unpaid,
+  scheduled order whose active items are all READY and whose pickup grace period
+  has passed. The 15-minute grace starts at the later of the booked pickup time
+  and the last item-ready time, so kitchen delays are not blamed on the guest.
+  This explicitly cancels the order and session, records prepared ingredients as
+  waste, and writes an audit entry; there is no automatic no-show cancellation.
+  Staff detail and fulfillment responses include `isNoShowEligible`.
+- A new online request returns a `reorderToken` and `reorderExpiresAt` in
+  addition to its 72-hour `accessToken`. Keep the reorder token in private
+  client storage, not in URLs or logs. It is valid for 180 days from order
+  creation and only grants a cart preview, not order status, customer details
+  or checkout. `POST /api/v1/online-orders/requests/reorder-template` accepts
+  either `{requestId,accessToken}` within 72 hours or
+  `{requestId,reorderToken}` within 180 days. It returns `items` and a live
+  `quote` with per-line availability and current prices. When `canSubmit` is
+  false, the customer must update unavailable items or choices. On confirmation,
+  submit a fresh `clientRequestId`, customer details and `maxSubtotal` equal to
+  `quote.currentSubtotal`; the server requotes and never reuses old prices.
+  `POST /requests/reorder-key` reissues the key while the 72-hour access token
+  is valid; `POST /requests/reorder-key/revoke` revokes it using the reorder
+  token. Older orders without a reorder key cannot be recovered after their
+  access token expires; long-term account-based history would require customer
+  authentication. In production, keep `ONLINE_REORDER_SECRET` stable and
+  separate from JWT secrets so JWT rotation does not break reorder keys.
+- Optional "buy together" suggestions: before checkout, generate a fresh
+  `clientRequestId` and call `POST /api/v1/recommendations/online` with
+  `{clientRequestId,menuItemIds:[...]}`. Use the same ID in
+  `POST /api/v1/online-orders/requests`; generate a new ID if the basket's
+  starting items change. `CONTROL` intentionally returns no suggestions;
+  `TREATMENT` returns up to three currently saleable items with current base
+  prices. The client must never auto-add them. Pairs come from paid, non-refunded
+  invoices in the past 90 days, require at least three distinct invoices, and
+  refresh in the background every six hours. Availability is still checked on
+  each response; stock is not reserved. The public endpoint is rate-limited
+  and stores only the checkout UUID, basket hash, cohort and suggested IDs,
+  never customer contact details. Repeating the same ID and basket is safe;
+  changing the basket with that ID returns 409. Staff with `/reports_read` use
+  `GET /api/v1/recommendations/experiment?from=<ISO>&to=<ISO>` for the last
+  90 days. `assignments` means API responses assigned to a cohort, not verified
+  screen views; `attachedOrders` counts suggested items in paid orders. Compare
+  paid conversion and revenue per assignment before enabling suggestions for
+  everyone. No recommendation is shown until enough paid history exists.
+  POS staff with `/orders_sessions_read` can call
+  `GET /api/v1/recommendations/pos/:id` for an active order session. This uses
+  the same current-menu filter but is not part of the online A/B experiment.
+- Optional Telegram order updates: create a bot with BotFather, set
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` and a random 32+ character
+  `TELEGRAM_WEBHOOK_SECRET`, then register the HTTPS webhook at
+  `/api/v1/online-orders/telegram/webhook` with Telegram's `secret_token` and
+  `allowed_updates=["message"]`. The client calls
+  `POST /api/v1/online-orders/requests/telegram-link` with
+  `{requestId,accessToken}` and opens the returned deep link. The customer must
+  press Start in a private bot chat to opt in; `/stop` unsubscribes that chat.
+  Links expire after 30 minutes and can be used once. The bot sends only order
+  status, never name, phone, total or access token. Notifications are advisory;
+  the status endpoint remains authoritative. Telegram delivery may repeat after
+  an outbox retry and requires a public HTTPS endpoint; no real message is sent
+  until the bot settings are configured.
+- `GET /api/v1/reports/online-orders?from=...&to=...&timeZone=...` requires
+  `/reports_read` and returns a daily request-cohort funnel: submitted,
+  reviewed/accepted, rejected, expired, cancelled, ready, paid and collected,
+  plus review/preparation time and paid receipts after successful refunds.
+  `from` is inclusive, `to` exclusive (default last 30 days, maximum 366 days);
+  each day follows the requested IANA time zone. The cohort is the request's
+  creation day, not the payment day: late payments/refunds can restate old
+  cohorts. Stage counts overlap (a later-cancelled order was still accepted),
+  and quoted demand is not booked revenue. Menu views and abandoned carts are
+  not measured because the backend has no trustworthy event for them.
+  `noShowCount` is an explicit staff-confirmed outcome. `noShowRatePercent`
+  divides no-shows by no-shows plus collected scheduled orders, excluding
+  upcoming and unresolved bookings from the denominator.
+- `GET /api/v1/reports/kitchen-sla?from=...&to=...&stationId=...` requires
+  `/reports_read` and reports completed, late and still-overdue kitchen tickets
+  by station, with average and p95 ticket-to-ready seconds. The range is
+  limited to 31 days; cancelled items are excluded from completion timing.
+- `GET /api/v1/reports/kitchen-bottlenecks?from=...&to=...&timeZone=...&stationId=...`
+  requires `/reports_read` and groups kitchen tickets by station and their
+  creation hour in the requested IANA time zone. `bucketStartAt` is an absolute
+  UTC timestamp, so repeated local hours during DST remain distinguishable.
+  The default range is 7 days and the maximum is 7 days (`from` inclusive,
+  `to` exclusive). `orderedUnitCount` includes units later cancelled;
+  `lateRatePercent` divides late completions by completed tickets only.
+  `openNowCount` and `overdueOpenCount` are current snapshots at `period.asOf`,
+  not reconstructed historical backlog. Cancellation can restate past cohorts.
+  The report diagnoses load and observed delay; it does not infer root cause.
+- `GET /api/v1/kitchen/workload` requires `/kitchen-tickets_read` and returns
+  one current snapshot per non-deleted station: open tickets and units,
+  overdue tickets, tickets due within five minutes, oldest open time and next
+  due time. Open means at least one item is `PENDING` or `COOKING`, matching the
+  KDS ticket list. Counts change with time even without a kitchen event; clients
+  should refresh periodically as well as on `kitchen.refresh` events. This is
+  an operational queue snapshot, not a historical backlog or staffing forecast.
 - `POST /api/v1/reservations/public/requests` accepts a request up to 30 days
   ahead. It does **not** reserve a table or confirm the booking. Staff review
   requests through `GET /api/v1/reservations/requests` and approve with
