@@ -1,4 +1,6 @@
-import 'dotenv/config';
+import { config } from 'dotenv';
+
+if (process.env.NODE_ENV !== 'test') config();
 
 async function start() {
   let cleanupTelemetry: (() => Promise<void>) | undefined;

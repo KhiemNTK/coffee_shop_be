@@ -50,6 +50,7 @@ import { RecommendationsModule } from './recommendations/recommendations.module'
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      ignoreEnvFile: process.env.NODE_ENV === 'test',
       expandVariables: true,
       validate: validateEnvironment,
     }),
