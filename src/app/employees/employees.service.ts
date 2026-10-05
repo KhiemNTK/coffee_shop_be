@@ -10,7 +10,6 @@ import {
   type ExtendedPrismaClient,
   PRISMA_SERVICE_TOKEN,
 } from '../../common/prisma/prisma.service';
-import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { StringUtilService } from '../../common/utils/string-util/string-util.service';
@@ -45,7 +44,6 @@ export class EmployeesService {
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
     private paginationUtilService: PaginationUtilService,
-    private queryUtilService: QueryUtilService,
     private authorizationService: AuthorizationService,
     private readonly stringUtilService: StringUtilService,
   ) {}
@@ -77,12 +75,23 @@ export class EmployeesService {
     page,
     itemPerPage,
     select,
-    ...search
+    search,
+    isActive,
+    positionId,
   }: GetEmployeesPaginationDto) {
     const fieldsSelect = this.getPublicSelect(select);
-    const searchQuery = this.queryUtilService.buildSearchQuery<Employee>({
-      search,
-    });
+    const searchQuery: Prisma.EmployeeWhereInput = {
+      deletedAt: null,
+      ...(isActive === undefined ? {} : { isActive }),
+      ...(positionId ? { positionId } : {}),
+      ...(search
+        ? {
+            OR: ['fullName', 'username', 'email'].map((field) => ({
+              [field]: { contains: search, mode: 'insensitive' },
+            })),
+          }
+        : {}),
+    };
     const totalItems = await this.prisma.employee.count({
       where: searchQuery,
     });
@@ -98,7 +107,7 @@ export class EmployeesService {
       skip: paging.skip,
       take: paging.itemPerPage,
       where: searchQuery,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     const data = paging.format(list);
