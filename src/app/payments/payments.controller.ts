@@ -39,6 +39,12 @@ export class PaymentsController {
     private readonly reconciliationService: PaymentReconciliationService,
   ) {}
 
+  @Get('payments/providers')
+  @RequirePermissions(PermissionKeys.PAYMENT_ATTEMPTS_READ)
+  listProviders() {
+    return this.paymentsService.listProviders();
+  }
+
   @Post('invoices/:id/payment-attempts')
   @RequirePermissions(PermissionKeys.PAYMENT_ATTEMPTS_CREATE)
   createAttempt(

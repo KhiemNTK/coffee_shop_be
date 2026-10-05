@@ -139,6 +139,32 @@ describe('PaymentsService', () => {
     expect(result.paymentUrl).toBe('https://sandbox/payment');
   });
 
+  it('rejects a new payment attempt while an earlier payment requires review', async () => {
+    tx.paymentAttempt.findFirst.mockResolvedValue({ id: 'review-attempt' });
+
+    await expect(
+      service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+        idempotencyKey: 'new-payment-key',
+        locale: 'vn',
+        closeSessionAfterPayment: true,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.paymentAttempt.findFirst).toHaveBeenCalledWith({
+      where: {
+        invoiceId: 'invoice-id',
+        status: {
+          in: [
+            PaymentAttemptStatus.PENDING,
+            PaymentAttemptStatus.REQUIRES_REVIEW,
+          ],
+        },
+      },
+      select: { id: true },
+    });
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+  });
+
   it('rejects an idempotency key reused with another request', async () => {
     prisma.paymentAttempt.findUnique.mockResolvedValue({
       ...attempt,
@@ -202,5 +228,54 @@ describe('PaymentsService', () => {
       shiftId: 'shift-id',
       closeSessionAfterPayment: true,
     });
+  });
+
+  it('rejects a valid VNPay callback targeting a MoMo attempt', async () => {
+    vnpay.verifyCallback.mockReturnValue({
+      isValid: true,
+      payloadHash: 'cross-provider-payload',
+      params: {
+        vnp_TxnRef: attempt.merchantReference,
+        vnp_Amount: '10000000',
+        vnp_ResponseCode: '00',
+        vnp_TransactionStatus: '00',
+        vnp_TransactionNo: 'VNP-001',
+      },
+    });
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.MOMO,
+    });
+    tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'event-id' });
+
+    await expect(service.handleVnpayIpn({})).resolves.toEqual({
+      RspCode: '01',
+      Message: 'Order not found',
+    });
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
+    expect(tx.paymentWebhookEvent.update).toHaveBeenCalledWith({
+      where: { id: 'event-id' },
+      data: { processingCode: '01', processedAt: expect.any(Date) },
+    });
+  });
+
+  it('does not expose another provider attempt on a signed VNPay return', async () => {
+    vnpay.verifyCallback.mockReturnValue({
+      isValid: true,
+      params: { vnp_TxnRef: attempt.merchantReference },
+    });
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.MOMO,
+    });
+
+    await expect(service.inspectVnpayReturn({})).resolves.toEqual({
+      signatureValid: true,
+      responseCode: null,
+      transactionStatus: null,
+      attempt: null,
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

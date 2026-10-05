@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { PaymentProvider, Prisma } from '@prisma/client';
 import { MomoService } from './momo.service';
 import { VnpayService } from './vnpay.service';
@@ -9,6 +9,18 @@ export class PaymentProviderFactory {
     private readonly vnpay: VnpayService,
     private readonly momo: MomoService,
   ) {}
+
+  listProviders() {
+    return Object.values(PaymentProvider).map((provider) => {
+      try {
+        this.get(provider).assertConfigured();
+        return { provider, configured: true };
+      } catch (error) {
+        if (!(error instanceof ServiceUnavailableException)) throw error;
+        return { provider, configured: false };
+      }
+    });
+  }
 
   get(provider: PaymentProvider): VnpayService | MomoService {
     switch (provider) {

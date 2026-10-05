@@ -43,6 +43,15 @@ export class InvoicesController {
     return this.invoicesService.checkoutInvoice(employeeId, checkoutInvoiceDto);
   }
 
+  @Post('quote')
+  @RequirePermissions(PermissionKeys.INVOICES_CREATE)
+  quoteInvoice(
+    @Employee('employeeId') employeeId: string,
+    @Body() input: CreateInvoiceDto,
+  ) {
+    return this.invoicesService.quoteInvoice(employeeId, input);
+  }
+
   @Get()
   @RequirePermissions(PermissionKeys.INVOICES_READ)
   getInvoices(@Query() query: GetInvoicesPaginationDto) {

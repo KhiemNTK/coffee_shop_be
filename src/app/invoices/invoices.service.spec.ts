@@ -1,7 +1,8 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
   PaymentMethod,
+  PaymentAttemptStatus,
   PaymentStatus,
   Prisma,
   ServeStatus,
@@ -21,6 +22,7 @@ import { InvoicesService } from './invoices.service';
 describe('InvoicesService', () => {
   let service: InvoicesService;
   let tx: any;
+  let promotionCalculator: { calculateDiscountTx: jest.Mock };
   let ledger: {
     requireOpenShift: jest.Mock;
     recordCashInvoice: jest.Mock;
@@ -77,6 +79,12 @@ describe('InvoicesService', () => {
       recordCashInvoice: jest.fn(),
     };
     const outbox = { enqueue: jest.fn() };
+    promotionCalculator = {
+      calculateDiscountTx: jest.fn().mockResolvedValue({
+        promotionId: 'promotion-id',
+        discountAmount: new Prisma.Decimal('4500'),
+      }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -91,7 +99,7 @@ describe('InvoicesService', () => {
         },
         { provide: IdempotencyService, useValue: {} },
         { provide: OutboxService, useValue: outbox },
-        { provide: PromotionCalculatorService, useValue: {} },
+        { provide: PromotionCalculatorService, useValue: promotionCalculator },
         { provide: CashierShiftLedgerService, useValue: ledger },
       ],
     }).compile();
@@ -121,6 +129,56 @@ describe('InvoicesService', () => {
     });
   });
 
+  it('quotes selected lines without invoice, ledger or item mutations', async () => {
+    const quote = await service.quoteInvoice('employee-id', {
+      orderSessionId: 'session-id',
+      orderItemIds: ['item-id'],
+      taxRate: '10',
+    });
+    expect(quote.orderItemIds).toEqual(['item-id']);
+    expect(quote.totalAmount.toString()).toBe('49500');
+    expect(tx.invoice.create).not.toHaveBeenCalled();
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+  });
+
+  it('rejects quotes for already invoiced lines', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-id',
+        quantity: 1,
+        priceAtTime: new Prisma.Decimal('45000'),
+        serveStatus: ServeStatus.SERVED,
+        isPaid: false,
+        invoiceId: 'existing-invoice',
+      },
+    ]);
+    await expect(
+      service.quoteInvoice('employee-id', {
+        orderSessionId: 'session-id',
+        orderItemIds: ['item-id'],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('quotes promotions through the same authoritative calculator as checkout', async () => {
+    const quote = await service.quoteInvoice('employee-id', {
+      orderSessionId: 'session-id',
+      promotionId: 'promotion-id',
+      taxRate: '10',
+    });
+    expect(promotionCalculator.calculateDiscountTx).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        promotionId: 'promotion-id',
+        subTotal: new Prisma.Decimal('45000'),
+      }),
+    );
+    expect(quote.discountAmount.toString()).toBe('4500');
+    expect(quote.totalAmount.toString()).toBe('44550');
+    expect(tx.invoice.create).not.toHaveBeenCalled();
+  });
+
   it('keeps a pending invoice outside a shift until payment', async () => {
     await service.createInvoice('employee-id', {
       orderSessionId: 'session-id',
@@ -146,4 +204,46 @@ describe('InvoicesService', () => {
 
     expect(ledger.requireOpenShift).not.toHaveBeenCalled();
   });
+
+  it.each([PaymentAttemptStatus.PENDING, PaymentAttemptStatus.REQUIRES_REVIEW])(
+    'blocks manual payment and void while an online attempt is %s',
+    async (status) => {
+      tx.invoice.findUnique.mockResolvedValue({
+        id: 'invoice-id',
+        paymentStatus: PaymentStatus.UNPAID,
+        orderSession: { tableId: null },
+        orderItems: [],
+      });
+      tx.paymentAttempt = {
+        findFirst: jest.fn().mockResolvedValue({ id: 'attempt-id', status }),
+      };
+
+      await expect(
+        service.updatePayment('invoice-id', 'employee-id', {
+          paymentStatus: PaymentStatus.PAID,
+          paymentMethod: PaymentMethod.CASH,
+          amountTendered: '50000',
+          closeSessionAfterPayment: true,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.voidInvoice('invoice-id', 'employee-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.paymentAttempt.findFirst).toHaveBeenCalledWith({
+        where: {
+          invoiceId: 'invoice-id',
+          status: {
+            in: [
+              PaymentAttemptStatus.PENDING,
+              PaymentAttemptStatus.REQUIRES_REVIEW,
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+      expect(ledger.recordCashInvoice).not.toHaveBeenCalled();
+      expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    },
+  );
 });

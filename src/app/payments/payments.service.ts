@@ -78,6 +78,10 @@ export class PaymentsService {
     private readonly momo: MomoService,
   ) {}
 
+  listProviders() {
+    return this.providers.listProviders();
+  }
+
   async createAttempt(
     invoiceId: string,
     employeeId: string,
@@ -169,13 +173,21 @@ export class PaymentsService {
               completedAt: now,
             },
           });
-          const pending = await tx.paymentAttempt.findFirst({
-            where: { invoiceId, status: PaymentAttemptStatus.PENDING },
+          const unresolved = await tx.paymentAttempt.findFirst({
+            where: {
+              invoiceId,
+              status: {
+                in: [
+                  PaymentAttemptStatus.PENDING,
+                  PaymentAttemptStatus.REQUIRES_REVIEW,
+                ],
+              },
+            },
             select: { id: true },
           });
-          if (pending) {
+          if (unresolved) {
             throw new ConflictException(
-              'This invoice already has a pending payment attempt.',
+              'This invoice already has an unresolved payment attempt.',
             );
           }
 
@@ -314,7 +326,7 @@ export class PaymentsService {
               paymentAttemptId: attempt?.id,
             },
           });
-          if (!attempt) {
+          if (!attempt || attempt.provider !== PaymentProvider.VNPAY) {
             await this.completeWebhook(tx, event.id, '01');
             return { response: VNPAY_RESPONSE.NOT_FOUND, invoice: null };
           }
@@ -482,6 +494,7 @@ export class PaymentsService {
           where: { merchantReference },
           select: {
             id: true,
+            provider: true,
             invoiceId: true,
             status: true,
             amount: true,
@@ -493,7 +506,7 @@ export class PaymentsService {
       signatureValid: verification.isValid,
       responseCode: verification.params.vnp_ResponseCode ?? null,
       transactionStatus: verification.params.vnp_TransactionStatus ?? null,
-      attempt,
+      attempt: attempt?.provider === PaymentProvider.VNPAY ? attempt : null,
     };
   }
 
@@ -659,13 +672,17 @@ export class PaymentsService {
           where: { merchantReference: verified.data.orderId },
           select: {
             id: true,
+            provider: true,
             invoiceId: true,
             status: true,
             completedAt: true,
           },
         })
       : null;
-    return { signatureValid: Boolean(verified), attempt };
+    return {
+      signatureValid: Boolean(verified),
+      attempt: attempt?.provider === PaymentProvider.MOMO ? attempt : null,
+    };
   }
 
   private async resolveExistingAttempt(

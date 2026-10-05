@@ -113,6 +113,45 @@ export class InvoicesService {
     });
   }
 
+  async quoteInvoice(employeeId: string, input: CreateInvoiceDto) {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const employee = await tx.employee.findUnique({
+          where: { id: employeeId },
+          select: { isActive: true },
+        });
+        this.invoicePolicy.assertActiveEmployee(employee);
+        const session = await tx.orderSession.findUnique({
+          where: { id: input.orderSessionId },
+          select: { sessionStatus: true },
+        });
+        if (!session) throw new NotFoundException('Order session not found.');
+        this.invoicePolicy.assertActiveSession(session.sessionStatus);
+        const items = await this.getInvoiceItems(tx, input);
+        this.invoicePolicy.assertInvoiceItemsAreBillable(items);
+        const subTotal = this.calculateSubTotal(items);
+        const promotionCalculation = input.promotionId
+          ? await this.promotionCalculatorService.calculateDiscountTx(tx, {
+              promotionId: input.promotionId,
+              subTotal,
+              at: new Date(),
+            })
+          : null;
+        return {
+          orderItemIds: items.map((item) => item.id),
+          ...this.calculateInvoice({
+            subTotal,
+            promotionCalculation,
+            taxRate: input.taxRate,
+            paymentStatus: PaymentStatus.UNPAID,
+            paymentMethod: PaymentMethod.CASH,
+          }),
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
+  }
+
   async checkoutInvoice(
     employeeId: string,
     checkoutInvoiceDto: CheckoutInvoiceDto,
@@ -258,7 +297,7 @@ export class InvoicesService {
       }
 
       this.invoicePolicy.assertInvoiceIsUnpaid(existingInvoice);
-      await this.assertNoPendingOnlinePayment(tx, id);
+      await this.assertNoUnresolvedOnlinePayment(tx, id);
 
       const paymentMethod =
         updatePaymentDto.paymentMethod ?? existingInvoice.paymentMethod;
@@ -345,7 +384,7 @@ export class InvoicesService {
       }
 
       this.invoicePolicy.assertInvoiceIsUnpaid(existingInvoice);
-      await this.assertNoPendingOnlinePayment(tx, id);
+      await this.assertNoUnresolvedOnlinePayment(tx, id);
 
       await tx.orderItem.updateMany({
         where: {
@@ -787,17 +826,25 @@ export class InvoicesService {
     return invoice;
   }
 
-  private async assertNoPendingOnlinePayment(
+  private async assertNoUnresolvedOnlinePayment(
     tx: ExtendedPrismaTransactionClient,
     invoiceId: string,
   ) {
-    const pendingAttempt = await tx.paymentAttempt.findFirst({
-      where: { invoiceId, status: PaymentAttemptStatus.PENDING },
+    const unresolvedAttempt = await tx.paymentAttempt.findFirst({
+      where: {
+        invoiceId,
+        status: {
+          in: [
+            PaymentAttemptStatus.PENDING,
+            PaymentAttemptStatus.REQUIRES_REVIEW,
+          ],
+        },
+      },
       select: { id: true },
     });
-    if (pendingAttempt) {
+    if (unresolvedAttempt) {
       throw new ConflictException(
-        'Invoice has a pending online payment attempt.',
+        'Invoice has an unresolved online payment attempt.',
       );
     }
   }
