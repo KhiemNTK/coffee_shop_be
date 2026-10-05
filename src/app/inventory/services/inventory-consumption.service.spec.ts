@@ -1,4 +1,3 @@
-import { ConflictException } from '@nestjs/common';
 import { InventoryTxType, Prisma } from '@prisma/client';
 import { InventoryConsumptionService } from './inventory-consumption.service';
 
@@ -156,7 +155,11 @@ describe('InventoryConsumptionService', () => {
         menuItemId: 'menu-item-id',
         quantity: 2,
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'INVENTORY_INSUFFICIENT_STOCK',
+      }),
+    });
 
     expect(tx.orderItemIngredientSnapshot.createMany).not.toHaveBeenCalled();
     expect(tx.inventoryTransaction.createManyAndReturn).not.toHaveBeenCalled();

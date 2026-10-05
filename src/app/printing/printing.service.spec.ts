@@ -7,6 +7,7 @@ import {
 } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { PrintingService } from './printing.service';
+import { GetPrintDevicesDto } from './dto';
 
 describe('PrintingService leases', () => {
   const createService = (prisma: object) =>
@@ -15,6 +16,41 @@ describe('PrintingService leases', () => {
       new PaginationUtilService(),
       {} as never,
     );
+
+  it('searches devices before paging without exposing agent credentials', async () => {
+    const prisma = {
+      printDevice: {
+        count: jest.fn().mockResolvedValue(51),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    };
+    const query = GetPrintDevicesDto.schema.parse({
+      page: 2,
+      itemPerPage: 50,
+      keyword: '  Bếp  ',
+      type: 'KITCHEN',
+      isActive: 'false',
+    });
+    const result = await createService(prisma).getDevices(query);
+    const where = {
+      deletedAt: null,
+      name: { contains: 'Bếp', mode: 'insensitive' },
+      type: PrintDeviceType.KITCHEN,
+      isActive: false,
+    };
+    expect(prisma.printDevice.count).toHaveBeenCalledWith({ where });
+    expect(prisma.printDevice.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where, skip: 50, take: 50 }),
+    );
+    expect(
+      prisma.printDevice.findMany.mock.calls[0][0].select,
+    ).not.toHaveProperty('apiKeyHash');
+    expect(result).toMatchObject({
+      currentPage: 2,
+      totalItems: 51,
+      totalPages: 2,
+    });
+  });
 
   it('projects admin jobs without lease hashes, deduplication keys, or list payloads', async () => {
     const prisma = {

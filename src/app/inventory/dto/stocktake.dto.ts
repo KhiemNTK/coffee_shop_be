@@ -34,7 +34,10 @@ export class UpdateStocktakeCountsDto extends createZodDto(
 ) {}
 
 export class PostStocktakeDto extends createZodDto(
-  z.object({ idempotencyKey: RequiredIdempotencyKeySchema }),
+  z.object({
+    idempotencyKey: RequiredIdempotencyKeySchema,
+    expectedCounts: UpdateStocktakeCountsDto.schema.shape.items.optional(),
+  }),
 ) {}
 
 export class CancelStocktakeDto extends createZodDto(

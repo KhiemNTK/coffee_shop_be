@@ -85,9 +85,10 @@ export class InventoryConsumptionService {
       });
 
       if (updated.count !== 1) {
-        throw new ConflictException(
-          `Insufficient stock for inventory item '${ingredient.inventoryItemName}'.`,
-        );
+        throw new ConflictException({
+          code: 'INVENTORY_INSUFFICIENT_STOCK',
+          message: `Insufficient stock for inventory item '${ingredient.inventoryItemName}'.`,
+        });
       }
     }
 

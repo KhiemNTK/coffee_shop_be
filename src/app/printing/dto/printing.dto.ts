@@ -40,6 +40,7 @@ export class UpdatePrintDeviceDto extends createZodDto(
 
 export class GetPrintDevicesDto extends createZodDto(
   PaginationSchema.extend({
+    keyword: z.string().trim().min(1).max(120).optional(),
     type: z.enum(PrintDeviceType).optional(),
     isActive: z.preprocess((value) => {
       if (value === 'true') return true;

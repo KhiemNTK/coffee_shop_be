@@ -122,6 +122,9 @@ export class PrintingService {
   async getDevices(query: GetPrintDevicesDto) {
     const where: Prisma.PrintDeviceWhereInput = {
       deletedAt: null,
+      ...(query.keyword
+        ? { name: { contains: query.keyword, mode: 'insensitive' } }
+        : {}),
       ...(query.type ? { type: query.type } : {}),
       ...(query.isActive === undefined ? {} : { isActive: query.isActive }),
     };

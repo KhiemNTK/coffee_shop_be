@@ -53,7 +53,7 @@ export class StocktakeService {
           request.inventoryItemIds,
         );
         const inventoryItems = await tx.inventoryItem.findMany({
-          where: { id: { in: request.inventoryItemIds } },
+          where: { id: { in: request.inventoryItemIds }, deletedAt: null },
           orderBy: { id: 'asc' },
           select: {
             id: true,
@@ -192,13 +192,17 @@ export class StocktakeService {
     });
   }
 
-  post(id: string, employeeId: string, { idempotencyKey }: PostStocktakeDto) {
+  post(
+    id: string,
+    employeeId: string,
+    { idempotencyKey, expectedCounts }: PostStocktakeDto,
+  ) {
     return this.idempotency.execute(
       {
         employeeId,
         operation: 'inventory.stocktake.post',
         key: idempotencyKey,
-        request: { id },
+        request: { id, ...(expectedCounts ? { expectedCounts } : {}) },
       },
       async (tx) => {
         await this.assertActiveEmployee(tx, employeeId);
@@ -236,6 +240,33 @@ export class StocktakeService {
             'Every stocktake item must be counted before posting.',
           );
         }
+        if (expectedCounts) {
+          this.inventoryPolicy.assertNoDuplicateInventoryItems(
+            expectedCounts.map((item) => item.inventoryItemId),
+          );
+          const counts = new Map(
+            expectedCounts.map((item) => [
+              item.inventoryItemId,
+              this.inventoryPolicy.toNonNegativeDecimal(
+                item.countedQuantity,
+                'countedQuantity',
+              ),
+            ]),
+          );
+          if (
+            counts.size !== stocktake.items.length ||
+            stocktake.items.some(
+              (line) =>
+                !counts.get(line.inventoryItemId)?.eq(line.countedQuantity!),
+            )
+          ) {
+            throw new ConflictException({
+              code: 'INVENTORY_STOCKTAKE_COUNTS_CHANGED',
+              message:
+                'Stocktake counts changed after review. Reload the stocktake before confirming.',
+            });
+          }
+        }
 
         const claimed = await tx.stocktake.updateMany({
           where: { id, status: StocktakeStatus.DRAFT },
@@ -263,9 +294,10 @@ export class StocktakeService {
             );
           }
           if (!item.stock.eq(line.expectedQuantity)) {
-            throw new ConflictException(
-              `Inventory item ${item.id} changed after the stocktake snapshot. Recount is required.`,
-            );
+            throw new ConflictException({
+              code: 'INVENTORY_STOCKTAKE_SNAPSHOT_STALE',
+              message: `Inventory item ${item.id} changed after the stocktake snapshot. Cancel this draft and create a new stocktake before recounting.`,
+            });
           }
 
           const countedQuantity = line.countedQuantity!;
@@ -279,9 +311,10 @@ export class StocktakeService {
             data: { stock: countedQuantity },
           });
           if (updated.count !== 1) {
-            throw new ConflictException(
-              `Inventory item ${item.id} changed while posting. Recount is required.`,
-            );
+            throw new ConflictException({
+              code: 'INVENTORY_STOCKTAKE_SNAPSHOT_STALE',
+              message: `Inventory item ${item.id} changed while posting. Cancel this draft and create a new stocktake before recounting.`,
+            });
           }
           if (!difference.isZero()) {
             const quantity = difference.abs();

@@ -83,6 +83,24 @@ export class KitchenService {
     const where: Prisma.KitchenStationWhereInput = {
       deletedAt: null,
       ...(query.isActive === undefined ? {} : { isActive: query.isActive }),
+      ...(query.keyword
+        ? {
+            OR: [
+              {
+                name: {
+                  contains: query.keyword,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+              {
+                code: {
+                  contains: query.keyword,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+            ],
+          }
+        : {}),
     };
     const totalItems = await this.prisma.kitchenStation.count({ where });
     const paging = this.pagination.paging({ ...query, totalItems });

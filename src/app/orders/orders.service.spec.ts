@@ -159,6 +159,21 @@ describe('OrdersService', () => {
     service = module.get<OrdersService>(OrdersService);
   });
 
+  it('does not cancel an online session outside the online order workflow', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      sessionStatus: SessionStatus.ACTIVE,
+      orderItems: [],
+      onlineOrderRequest: { id: 'request-id' },
+    });
+    await expect(service.cancelSession('session-id')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
   it('should be defined', () => {
     expect(service).toBeDefined();
   });

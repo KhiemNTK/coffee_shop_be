@@ -77,6 +77,39 @@ describe('StocktakeService', () => {
       }),
       include: expect.any(Object),
     });
+    expect(tx.inventoryItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ['item-id'] }, deletedAt: null },
+      }),
+    );
+  });
+
+  it('rejects a snapshot containing a missing or deleted item', async () => {
+    tx.inventoryItem.findMany.mockResolvedValue([]);
+    await expect(
+      service.create('employee-id', {
+        inventoryItemIds: ['deleted-item-id'],
+        note: null,
+        idempotencyKey: 'stocktake-create-key',
+      }),
+    ).rejects.toThrow('One or more active inventory items were not found.');
+    expect(tx.stocktake.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects posting before every line has a saved count', async () => {
+    tx.stocktake.findUnique.mockResolvedValue({
+      id: 'stocktake-id',
+      status: StocktakeStatus.DRAFT,
+      items: [{ countedQuantity: null }],
+    });
+    await expect(
+      service.post('stocktake-id', 'employee-id', {
+        idempotencyKey: 'stocktake-post-key',
+      }),
+    ).rejects.toThrow('Every stocktake item must be counted before posting.');
+    expect(tx.stocktake.updateMany).not.toHaveBeenCalled();
+    expect(tx.inventoryItem.updateMany).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('posts a negative variance with an immutable cost snapshot', async () => {
@@ -131,6 +164,23 @@ describe('StocktakeService', () => {
       expect.objectContaining({ status: StocktakeStatus.POSTED }),
     );
     expect(outbox.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects changed counts before claiming a reviewed stocktake', async () => {
+    tx.stocktake.findUnique.mockResolvedValue({
+      id: 'stocktake-id',
+      status: StocktakeStatus.DRAFT,
+      items: [{ inventoryItemId: 'item-id', countedQuantity: new Decimal(9) }],
+    });
+    await expect(
+      service.post('stocktake-id', 'employee-id', {
+        idempotencyKey: 'stocktake-post-key',
+        expectedCounts: [{ inventoryItemId: 'item-id', countedQuantity: '8' }],
+      }),
+    ).rejects.toThrow('Stocktake counts changed after review.');
+    expect(tx.stocktake.updateMany).not.toHaveBeenCalled();
+    expect(tx.inventoryItem.updateMany).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
   it('requires a recount when stock changed after the snapshot', async () => {

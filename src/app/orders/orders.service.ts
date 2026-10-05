@@ -116,6 +116,7 @@ export class OrdersService {
   }
 
   private readonly orderSessionInclude = {
+    onlineOrderRequest: { select: { id: true } },
     table: true,
     employee: {
       select: {
@@ -1338,6 +1339,7 @@ export class OrdersService {
         where: { id },
         include: {
           orderItems: true,
+          onlineOrderRequest: { select: { id: true } },
         },
       });
 
@@ -1349,6 +1351,12 @@ export class OrdersService {
         session.sessionStatus,
         'Order session is already inactive.',
       );
+
+      if (session.onlineOrderRequest) {
+        throw new ConflictException(
+          'Cancel online orders through online order management to release pickup capacity and update the customer request.',
+        );
+      }
 
       this.orderPolicy.assertNoPaidOrInvoicedItems(
         session.orderItems,

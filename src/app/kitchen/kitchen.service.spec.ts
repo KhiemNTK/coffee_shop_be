@@ -5,6 +5,7 @@ import { KitchenService } from './kitchen.service';
 describe('KitchenService ticket state', () => {
   const prisma = {
     kitchenTicket: { findUnique: jest.fn() },
+    kitchenStation: { count: jest.fn(), findMany: jest.fn() },
     $queryRaw: jest.fn(),
   };
   const service = new KitchenService(
@@ -31,6 +32,41 @@ describe('KitchenService ticket state', () => {
   });
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('uses the same active keyword scope for station count and paginated lookup', async () => {
+    prisma.kitchenStation.count.mockResolvedValue(51);
+    prisma.kitchenStation.findMany.mockResolvedValue([]);
+    await expect(
+      service.getStations({
+        page: 3,
+        itemPerPage: 20,
+        isActive: true,
+        keyword: 'BAR',
+      }),
+    ).resolves.toEqual({
+      list: [],
+      totalItems: 51,
+      totalPages: 3,
+      currentPage: 3,
+    });
+    expect(prisma.kitchenStation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skip: 40,
+        take: 20,
+        where: {
+          deletedAt: null,
+          isActive: true,
+          OR: [
+            { name: { contains: 'BAR', mode: 'insensitive' } },
+            { code: { contains: 'BAR', mode: 'insensitive' } },
+          ],
+        },
+      }),
+    );
+    expect(prisma.kitchenStation.count.mock.calls[0][0].where).toEqual(
+      prisma.kitchenStation.findMany.mock.calls[0][0].where,
+    );
+  });
 
   it('completes the kitchen ticket when every item is READY or cancelled', async () => {
     prisma.kitchenTicket.findUnique.mockResolvedValue(

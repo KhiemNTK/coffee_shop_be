@@ -35,6 +35,7 @@ export class GetKitchenStationsDto extends createZodDto(
   z.object({
     page: z.coerce.number().int().min(1).default(1),
     itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    keyword: z.string().trim().max(120).optional(),
     isActive: z.preprocess((value) => {
       if (value === 'true') return true;
       if (value === 'false') return false;
