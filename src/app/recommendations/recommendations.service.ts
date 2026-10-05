@@ -15,6 +15,10 @@ import {
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
 import type { RecommendOnlineItemsDto } from './dto/recommendation.dto';
+import {
+  PUBLIC_MENU_SELECT,
+  PUBLIC_MENU_WHERE,
+} from '../menu/public-menu-query';
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TRAINING_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
@@ -333,26 +337,24 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
     if (!ids.length) return Promise.resolve([]);
     return this.prisma.menuItem.findMany({
       where: {
+        ...PUBLIC_MENU_WHERE,
         id: { in: ids },
-        deletedAt: null,
-        isAvailable: true,
-        category: { deletedAt: null },
-        OR: [
-          { kitchenStationId: null },
-          { kitchenStation: { is: { isActive: true, deletedAt: null } } },
-        ],
       },
       select: { id: true, name: true, price: true },
     });
   }
 
   private async currentSuggestions(candidateIds: string[]) {
-    const available = await this.availableItems(candidateIds);
+    if (!candidateIds.length) return [];
+    const available = await this.prisma.menuItem.findMany({
+      where: { ...PUBLIC_MENU_WHERE, id: { in: candidateIds } },
+      select: PUBLIC_MENU_SELECT,
+    });
     const byId = new Map(available.map((item) => [item.id, item] as const));
     return candidateIds.flatMap((id) => {
       const item = byId.get(id);
       return item
-        ? [{ menuItemId: id, name: item.name, price: item.price.toFixed(2) }]
+        ? [{ ...item, menuItemId: id, price: item.price.toFixed(2) }]
         : [];
     });
   }

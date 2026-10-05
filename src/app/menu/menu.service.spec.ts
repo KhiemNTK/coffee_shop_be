@@ -33,8 +33,10 @@ describe('MenuService', () => {
         create: jest.fn(),
         count: jest.fn(),
         findFirst: jest.fn().mockResolvedValue(activeItem),
+        findFirstOrThrow: jest.fn(),
         update: jest.fn(),
       },
+      menuItemOptionGroup: { findMany: jest.fn(), deleteMany: jest.fn() },
       menuItemIngredient: {
         createMany: jest.fn(),
         deleteMany: jest.fn(),
@@ -63,6 +65,26 @@ describe('MenuService', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it('returns the full option editor contract without rewriting unchanged options', async () => {
+    tx.inventoryItem.findMany.mockResolvedValue([]);
+    tx.menuItemOptionGroup.findMany.mockResolvedValue([]);
+    tx.menuItem.findFirstOrThrow.mockResolvedValue({
+      id: activeItem.id,
+      name: activeItem.name,
+      optionGroups: [],
+    });
+    await expect(
+      service.replaceItemOptions(activeItem.id, 'employee-id', { groups: [] }),
+    ).resolves.toMatchObject({ name: activeItem.name, optionGroups: [] });
+    expect(tx.menuItem.findFirstOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ id: true, name: true }),
+      }),
+    );
+    expect(tx.menuItemOptionGroup.deleteMany).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
 
   it('blocks deleting a category that still has active menu items', async () => {
     tx.menuItem.count.mockResolvedValue(1);
@@ -131,6 +153,11 @@ describe('MenuService', () => {
       stockStatus: 'INSUFFICIENT',
       atRiskIngredients: [{ id: 'inventory-id', name: 'Coffee beans' }],
     });
+    expect(result).toMatchObject({
+      totalItems: 1,
+      totalPages: 1,
+      currentPage: 1,
+    });
     expect(prisma.menuItem.findMany).toHaveBeenCalledTimes(1);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
@@ -167,6 +194,34 @@ describe('MenuService', () => {
       'UNTRACKED',
       'LOW',
     ]);
+  });
+
+  it('returns the filtered stock count and pagination even on an empty later page', async () => {
+    prisma.menuItem.count.mockResolvedValue(21);
+    prisma.menuItem.findMany.mockResolvedValue([]);
+    await expect(
+      service.getItemStockStatus({
+        page: 3,
+        itemPerPage: 10,
+        keyword: 'tea',
+        isAvailable: false,
+      }),
+    ).resolves.toEqual({
+      list: [],
+      totalItems: 21,
+      totalPages: 3,
+      currentPage: 3,
+    });
+    expect(prisma.menuItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skip: 20,
+        take: 10,
+        where: expect.objectContaining({
+          isAvailable: false,
+          name: { contains: 'tea', mode: 'insensitive' },
+        }),
+      }),
+    );
   });
 
   it('rejects replacing a recipe when an inventory item is inactive or missing', async () => {

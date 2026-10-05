@@ -14,6 +14,7 @@ import {
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
+import { PUBLIC_MENU_SELECT, PUBLIC_MENU_WHERE } from './public-menu-query';
 import {
   CreateMenuCategoryDto,
   CreateMenuItemDto,
@@ -283,13 +284,7 @@ export class MenuService {
 
   async getPublicItems(query: GetMenuItemsDto) {
     const where: Prisma.MenuItemWhereInput = {
-      deletedAt: null,
-      isAvailable: true,
-      category: { deletedAt: null },
-      OR: [
-        { kitchenStationId: null },
-        { kitchenStation: { is: { isActive: true, deletedAt: null } } },
-      ],
+      ...PUBLIC_MENU_WHERE,
       ...(query.categoryId ? { categoryId: query.categoryId } : {}),
       ...(query.keyword
         ? {
@@ -308,25 +303,7 @@ export class MenuService {
         skip: paging.skip,
         take: paging.itemPerPage,
         orderBy: [{ name: 'asc' }, { id: 'asc' }],
-        select: {
-          id: true,
-          name: true,
-          price: true,
-          category: { select: { id: true, name: true } },
-          optionGroups: {
-            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-            select: {
-              id: true,
-              name: true,
-              minSelected: true,
-              maxSelected: true,
-              options: {
-                orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-                select: { id: true, name: true, priceDelta: true },
-              },
-            },
-          },
-        },
+        select: PUBLIC_MENU_SELECT,
       }),
     ]);
     return this.paginationUtil.paging({ ...query, totalItems }).format(list);
@@ -379,7 +356,7 @@ export class MenuService {
       }),
     ]);
 
-    return paging.format(
+    return this.paginationUtil.paging({ ...query, totalItems }).format(
       items.map((item) => {
         const insufficient = item.ingredients.filter(
           ({ quantity, inventoryItem }) =>
@@ -610,7 +587,7 @@ export class MenuService {
           include: {
             options: {
               orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-              include: { ingredients: true },
+              include: { ingredients: { select: this.recipeIngredientSelect } },
             },
           },
         },
@@ -667,12 +644,15 @@ export class MenuService {
           where: { id },
           select: {
             id: true,
+            name: true,
             optionGroups: {
               orderBy: { sortOrder: 'asc' },
               include: {
                 options: {
                   orderBy: { sortOrder: 'asc' },
-                  include: { ingredients: true },
+                  include: {
+                    ingredients: { select: this.recipeIngredientSelect },
+                  },
                 },
               },
             },
