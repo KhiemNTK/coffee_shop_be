@@ -93,18 +93,20 @@ const EnvironmentSchema = z
       .default(45),
     ONLINE_PICKUP_DAYS_AHEAD: z.coerce.number().int().min(1).max(14).default(7),
     ONLINE_REORDER_SECRET: z.string().min(32).optional(),
-    TELEGRAM_BOT_TOKEN: z.string().trim().min(20).optional(),
-    TELEGRAM_BOT_USERNAME: z
-      .string()
-      .trim()
-      .regex(/^[A-Za-z0-9_]{5,32}$/)
-      .optional(),
-    TELEGRAM_WEBHOOK_SECRET: z
-      .string()
-      .min(32)
-      .max(256)
-      .regex(/^[A-Za-z0-9_-]+$/)
-      .optional(),
+    TELEGRAM_BOT_TOKEN: OptionalCredentialSchema,
+    TELEGRAM_BOT_USERNAME: optionalBlank(
+      z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9_]{5,32}$/),
+    ),
+    TELEGRAM_WEBHOOK_SECRET: optionalBlank(
+      z
+        .string()
+        .min(32)
+        .max(256)
+        .regex(/^[A-Za-z0-9_-]+$/),
+    ),
     SHUTDOWN_TIMEOUT_MS: z.coerce
       .number()
       .int()

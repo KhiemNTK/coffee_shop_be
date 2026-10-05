@@ -98,6 +98,23 @@ describe('OnlineOrdersService Telegram link', () => {
     expect(prisma.onlineOrderRequest.updateMany).not.toHaveBeenCalled();
   });
 
+  it('exposes notification availability and subscription, never chat credentials', async () => {
+    prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+      id: requestId,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 30 * 60_000),
+      status: OnlineOrderStatus.PENDING,
+      telegramChatId: '123456',
+      items: [],
+      orderSession: null,
+    });
+    const result = await service.trackPublicRequest({ requestId, accessToken });
+    expect(result.telegram).toEqual({ enabled: true, subscribed: true });
+    expect(result).not.toHaveProperty('telegramChatId');
+    expect(JSON.stringify(result)).not.toContain('123456');
+    expect(prisma.onlineOrderRequest.findUnique).toHaveBeenCalledTimes(1);
+  });
+
   it('does not issue a link for an expired pending request', async () => {
     prisma.onlineOrderRequest.findUnique.mockResolvedValue({
       createdAt: new Date(Date.now() - 60 * 60_000),

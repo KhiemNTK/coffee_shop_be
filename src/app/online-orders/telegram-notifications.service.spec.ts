@@ -220,6 +220,51 @@ describe('TelegramNotificationsService', () => {
     expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
+  it.each([
+    JSON.stringify({
+      ok: false,
+      error_code: 429,
+      description: 'private-chat-detail',
+    }),
+    JSON.stringify({ unexpected: true }),
+    '<html>proxy failure</html>',
+  ])('keeps failed or malformed delivery retryable: %s', async (body) => {
+    prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+      status: OnlineOrderStatus.ACCEPTED,
+      telegramChatId: '123456',
+      orderSession: { orderItems: [{ serveStatus: ServeStatus.READY }] },
+    });
+    fetchMock.mockResolvedValueOnce(new Response(body, { status: 200 }));
+    await expect(
+      eventBus.publish(ONLINE_ORDER_TELEGRAM_READY_EVENT, { requestId }),
+    ).rejects.toThrow(/^Telegram send (rejected|response invalid)\.$/);
+    expect(prisma.onlineOrderRequest.updateMany).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([200, 403])(
+    'unsubscribes a blocked chat (HTTP %s) without endless retries',
+    async (status) => {
+      prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+        status: OnlineOrderStatus.ACCEPTED,
+        telegramChatId: '123456',
+        orderSession: { orderItems: [{ serveStatus: ServeStatus.READY }] },
+      });
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, error_code: 403 }), {
+          status,
+        }),
+      );
+      await expect(
+        eventBus.publish(ONLINE_ORDER_TELEGRAM_READY_EVENT, { requestId }),
+      ).resolves.toBeUndefined();
+      expect(prisma.onlineOrderRequest.updateMany).toHaveBeenCalledWith({
+        where: { telegramChatId: '123456' },
+        data: { telegramChatId: null },
+      });
+    },
+  );
+
   it('skips table orders before querying for an online subscription', async () => {
     await eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
       orderSessionId: sessionId,

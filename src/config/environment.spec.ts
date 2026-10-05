@@ -145,6 +145,27 @@ describe('validateEnvironment', () => {
     ).toBe('coffee_test_bot');
   });
 
+  it('treats blank Telegram settings as disabled, not as partial credentials', () => {
+    const base = {
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+      TELEGRAM_BOT_TOKEN: '',
+      TELEGRAM_BOT_USERNAME: ' ',
+      TELEGRAM_WEBHOOK_SECRET: '',
+    };
+    expect(validateEnvironment(base)).toMatchObject({
+      TELEGRAM_BOT_TOKEN: undefined,
+      TELEGRAM_BOT_USERNAME: undefined,
+      TELEGRAM_WEBHOOK_SECRET: undefined,
+    });
+    expect(() =>
+      validateEnvironment({
+        ...base,
+        TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
+      }),
+    ).toThrow('Telegram requires bot token, username and webhook secret.');
+  });
+
   it('rejects incomplete production configuration', () => {
     expect(() =>
       validateEnvironment({

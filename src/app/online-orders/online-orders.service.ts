@@ -256,6 +256,7 @@ export class OnlineOrdersService {
         rejectionReason: true,
         cancellationReason: true,
         noShowAt: true,
+        telegramChatId: true,
         quotedSubtotal: true,
         pickupAt: true,
         items: publicRequestSelect.items,
@@ -310,6 +311,10 @@ export class OnlineOrdersService {
       isPaid:
         activeItems.length > 0 && activeItems.every((item) => item.isPaid),
       orderItems,
+      telegram: {
+        enabled: Boolean(this.telegramBotUsername),
+        subscribed: Boolean(request.telegramChatId),
+      },
     };
   }
 

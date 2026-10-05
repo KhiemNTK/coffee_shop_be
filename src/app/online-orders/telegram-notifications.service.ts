@@ -31,6 +31,10 @@ const UpdateSchema = z.object({
     text: z.string().max(256),
   }),
 });
+const SendResponseSchema = z.object({
+  ok: z.boolean(),
+  error_code: z.number().int().optional(),
+});
 const StatusEventSchema = z.object({
   requestId: z.uuid(),
   status: z.enum([
@@ -342,6 +346,14 @@ export class TelegramNotificationsService
     if (response.status === 403) return false;
     if (!response.ok)
       throw new Error(`Telegram send failed: HTTP ${response.status}`);
+    const result = SendResponseSchema.safeParse(
+      await response.json().catch(() => null),
+    );
+    if (!result.success) throw new Error('Telegram send response invalid.');
+    if (!result.data.ok) {
+      if (result.data.error_code === 403) return false;
+      throw new Error('Telegram send rejected.');
+    }
     return true;
   }
 }
