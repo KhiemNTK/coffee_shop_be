@@ -72,9 +72,17 @@ export class ReservationsController {
   }
 
   @Get('requests')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
   getRequests(@Query() query: GetReservationRequestsDto) {
     return this.reservationsService.findRequests(query);
+  }
+
+  @Get('requests/:id')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
+  getRequest(@Param() { id }: ReservationRequestIdDto) {
+    return this.reservationsService.findRequest(id);
   }
 
   @Post('requests/:id/approve')
@@ -107,12 +115,14 @@ export class ReservationsController {
   }
 
   @Get()
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
   findAll(@Query() query: GetReservationsDto) {
     return this.reservationsService.findAll(query);
   }
 
   @Get(':id')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
   findOne(@Param() { id }: ReservationIdDto) {
     return this.reservationsService.findOne(id);

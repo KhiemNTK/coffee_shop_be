@@ -107,6 +107,45 @@ describe('Public menu and reservation request (e2e)', () => {
     }
   });
 
+  it('allows only one concurrent edit for the same reservation revision', async () => {
+    const startsAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
+    const created = await reservations.create(employeeId, {
+      phoneNumber: '0900000099',
+      tableId,
+      guestCount: 2,
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60 * 1000),
+    });
+    const results = await Promise.allSettled([
+      reservations.update(created.id, employeeId, {
+        notes: 'Editor A',
+        expectedUpdatedAt: created.updatedAt,
+      }),
+      reservations.update(created.id, employeeId, {
+        notes: 'Editor B',
+        expectedUpdatedAt: created.updatedAt,
+      }),
+    ]);
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    const persisted = await prisma.reservation.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(persisted.updatedAt.getTime()).toBeGreaterThan(
+      created.updatedAt.getTime(),
+    );
+    expect(['Editor A', 'Editor B']).toContain(persisted.notes);
+    expect(
+      await prisma.actionLog.count({
+        where: { employeeId, actionType: 'RESERVATION_UPDATED' },
+      }),
+    ).toBe(1);
+  });
+
   it('shows only public sale fields for available items', async () => {
     const response = await request(app.getHttpServer())
       .get(`${prefix}/menu/public/items`)

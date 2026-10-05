@@ -20,6 +20,7 @@ describe('ReservationsService', () => {
     startsAt,
     endsAt,
     status: ReservationStatus.PENDING,
+    updatedAt: new Date(),
   };
   const tx = {
     employee: { findFirst: jest.fn() },
@@ -108,6 +109,84 @@ describe('ReservationsService', () => {
       }),
     );
     expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the pending-future default and explicitly supports all requests', async () => {
+    const format = jest.fn((list: unknown[]) => ({ list }));
+    paginationUtil.paging.mockReturnValue({ skip: 0, itemPerPage: 20, format });
+    prisma.reservationRequest.count.mockResolvedValue(0);
+    prisma.reservationRequest.findMany.mockResolvedValue([]);
+    await service.findRequests({ page: 1, itemPerPage: 20 });
+    expect(prisma.reservationRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { status: 'PENDING', startsAt: { gt: expect.any(Date) } },
+      }),
+    );
+    await service.findRequests({ page: 1, itemPerPage: 20, status: 'ALL' });
+    expect(prisma.reservationRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: {},
+        select: expect.not.objectContaining({ accessTokenHash: true }),
+      }),
+    );
+    expect(format).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads a staff request without selecting its tracking-token hash', async () => {
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: 'PENDING',
+    });
+    await expect(service.findRequest('request-id')).resolves.toEqual({
+      id: 'request-id',
+      status: 'PENDING',
+    });
+    expect(prisma.reservationRequest.findUnique).toHaveBeenCalledWith({
+      where: { id: 'request-id' },
+      select: expect.not.objectContaining({ accessTokenHash: true }),
+    });
+    prisma.reservationRequest.findUnique.mockResolvedValue(null);
+    await expect(service.findRequest('missing')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('atomically rejects stale edits without recording a successful update', async () => {
+    const version = new Date('2026-10-05T10:00:00.000Z');
+    tx.reservation.findUnique.mockResolvedValue({
+      ...includeResult,
+      updatedAt: version,
+    });
+    tx.reservation.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      service.update(1, 'employee-id', {
+        notes: null,
+        expectedUpdatedAt: version,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.reservation.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: ReservationStatus.PENDING, updatedAt: version },
+      data: { notes: null, updatedAt: expect.any(Date) },
+    });
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('advances the edit revision even when the clock has not advanced', async () => {
+    const version = new Date(Date.now() + 60_000);
+    tx.reservation.findUnique.mockResolvedValue({
+      ...includeResult,
+      updatedAt: version,
+    });
+    tx.reservation.updateMany.mockResolvedValue({ count: 1 });
+    tx.reservation.findUniqueOrThrow.mockResolvedValue(includeResult);
+    await service.update(1, 'employee-id', {
+      notes: 'Changed',
+      expectedUpdatedAt: version,
+    });
+    expect(tx.reservation.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, status: 'PENDING', updatedAt: version },
+      data: { notes: 'Changed', updatedAt: new Date(version.getTime() + 1) },
+    });
   });
 
   it('accepts an anonymous request without assigning a table', async () => {

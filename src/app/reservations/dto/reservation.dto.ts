@@ -49,10 +49,14 @@ export class UpdateReservationDto extends createZodDto(
       endsAt: ReservationFields.endsAt.optional(),
       guestCount: ReservationFields.guestCount.optional(),
       notes: ReservationFields.notes,
+      expectedUpdatedAt: ReservationDateTimeSchema.optional(),
     })
-    .refine((value) => Object.keys(value).length > 0, {
-      message: 'At least one field must be provided',
-    })
+    .refine(
+      (value) => Object.keys(value).some((key) => key !== 'expectedUpdatedAt'),
+      {
+        message: 'At least one field must be provided',
+      },
+    )
     .superRefine(validateWindow),
 ) {}
 
@@ -111,7 +115,9 @@ export class GetReservationRequestsDto extends createZodDto(
   z.object({
     itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
     page: z.coerce.number().int().min(1).default(1),
-    status: z.enum(ReservationRequestStatus).optional(),
+    status: z
+      .union([z.enum(ReservationRequestStatus), z.literal('ALL')])
+      .optional(),
   }),
 ) {}
 

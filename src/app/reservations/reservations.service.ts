@@ -211,12 +211,15 @@ export class ReservationsService
   }
 
   async findRequests(query: GetReservationRequestsDto) {
-    const where: Prisma.ReservationRequestWhereInput = query.status
-      ? { status: query.status }
-      : {
-          status: ReservationRequestStatus.PENDING,
-          startsAt: { gt: new Date() },
-        };
+    const where: Prisma.ReservationRequestWhereInput =
+      query.status === 'ALL'
+        ? {}
+        : query.status
+          ? { status: query.status }
+          : {
+              status: ReservationRequestStatus.PENDING,
+              startsAt: { gt: new Date() },
+            };
     const totalItems = await this.prisma.reservationRequest.count({ where });
     const paging = this.paginationUtil.paging({ ...query, totalItems });
     const list = await this.prisma.reservationRequest.findMany({
@@ -224,8 +227,18 @@ export class ReservationsService
       skip: paging.skip,
       take: paging.itemPerPage,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: this.requestSelect,
     });
     return paging.format(list);
+  }
+
+  async findRequest(id: string) {
+    const request = await this.prisma.reservationRequest.findUnique({
+      where: { id },
+      select: this.requestSelect,
+    });
+    if (!request) throw new NotFoundException('Request not found.');
+    return request;
   }
 
   async approveRequest(
@@ -383,6 +396,7 @@ export class ReservationsService
   }
 
   async update(id: number, employeeId: string, dto: UpdateReservationDto) {
+    const { expectedUpdatedAt, ...changes } = dto;
     try {
       return await this.prisma.$transaction(async (tx) => {
         await this.assertActiveEmployee(tx, employeeId);
@@ -405,11 +419,23 @@ export class ReservationsService
         }
 
         const updated = await tx.reservation.updateMany({
-          where: { id, status: ReservationStatus.PENDING },
-          data: dto,
+          where: {
+            id,
+            status: ReservationStatus.PENDING,
+            updatedAt: expectedUpdatedAt ?? existing.updatedAt,
+          },
+          data: {
+            ...changes,
+            // Keep the revision distinct even for two writes in the same millisecond.
+            updatedAt: new Date(
+              Math.max(Date.now(), existing.updatedAt.getTime() + 1),
+            ),
+          },
         });
         if (updated.count !== 1) {
-          throw new ConflictException('Reservation status has changed.');
+          throw new ConflictException(
+            'Reservation has changed. Reload before editing.',
+          );
         }
 
         const reservation = await tx.reservation.findUniqueOrThrow({
@@ -418,7 +444,7 @@ export class ReservationsService
         });
         await this.logAction(tx, employeeId, 'RESERVATION_UPDATED', {
           reservationId: id,
-          changes: this.toAuditChanges(dto),
+          changes: this.toAuditChanges(changes),
         });
         return reservation;
       });
@@ -512,6 +538,23 @@ export class ReservationsService
       select: { id: true, sessionStatus: true, createdAt: true },
     },
   } as const;
+
+  private readonly requestSelect = {
+    id: true,
+    customerName: true,
+    phoneNumber: true,
+    startsAt: true,
+    endsAt: true,
+    guestCount: true,
+    notes: true,
+    status: true,
+    rejectionReason: true,
+    cancelledAt: true,
+    createdAt: true,
+    reviewedAt: true,
+    reviewedById: true,
+    reservationId: true,
+  } as const satisfies Prisma.ReservationRequestSelect;
 
   private hashAccessToken(accessToken: string) {
     return createHash('sha256').update(accessToken).digest('hex');
