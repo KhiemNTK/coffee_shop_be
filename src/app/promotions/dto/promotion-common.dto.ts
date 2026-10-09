@@ -45,7 +45,11 @@ export const SearchPromotionsSchema = z.object({
   discountType: z.enum(DiscountType).optional(),
   status: PromotionStatusSchema.optional(),
   validAt: OptionalPromotionDateSchema,
-  includeDeleted: z.coerce.boolean().optional().default(false),
+  includeDeleted: z.preprocess((value) => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  }, z.boolean().default(false)),
   sortBy: PromotionSortFieldSchema,
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
