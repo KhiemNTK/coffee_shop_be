@@ -19,6 +19,7 @@ const OrderItemPayloadSchema = z.object({
 });
 
 export const AddOrderItemsSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(120).optional(),
   items: z
     .array(OrderItemPayloadSchema)
     .min(1, { message: 'Must add at least one item to the order' })

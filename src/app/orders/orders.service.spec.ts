@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { OrdersService } from './orders.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { OutboxService } from '../durable/outbox.service';
+import { IdempotencyService } from '../durable/idempotency.service';
 import {
   Prisma,
   PaymentStatus,
@@ -26,6 +27,7 @@ describe('OrdersService', () => {
   let prisma: any;
   let tx: any;
   let outbox: { enqueue: jest.Mock };
+  let idempotency: { execute: jest.Mock };
   let inventoryConsumption: {
     consumeOrderItem: jest.Mock;
     recordWaste: jest.Mock;
@@ -34,6 +36,7 @@ describe('OrdersService', () => {
   let kitchenRouting: { createTickets: jest.Mock };
 
   beforeEach(async () => {
+    idempotency = { execute: jest.fn() };
     tx = {
       employee: {
         findUnique: jest.fn(),
@@ -123,6 +126,7 @@ describe('OrdersService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         OrdersService,
+        { provide: IdempotencyService, useValue: idempotency },
         {
           provide: PRISMA_SERVICE_TOKEN,
           useValue: prisma,
@@ -176,6 +180,33 @@ describe('OrdersService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('reuses durable idempotency with trusted actor and session scope when submitting items', async () => {
+    const items = [{ menuItemId: 'menu-item-id', quantity: 1 }];
+    const snapshot = { id: 'session-id', orderItems: [] };
+    idempotency.execute.mockResolvedValue(snapshot);
+
+    await expect(
+      service.addOrderItems(
+        'session-id',
+        {
+          items,
+          idempotencyKey: 'order-retry-key',
+        },
+        'employee-id',
+      ),
+    ).resolves.toBe(snapshot);
+    expect(idempotency.execute).toHaveBeenCalledWith(
+      {
+        employeeId: 'employee-id',
+        operation: 'orders.add-items',
+        key: 'order-retry-key',
+        request: { orderSessionId: 'session-id', items },
+      },
+      expect.any(Function),
+    );
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('rejects skipping directly from pending to served', async () => {

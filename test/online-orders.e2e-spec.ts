@@ -20,6 +20,7 @@ import { OnlineOrdersService } from '../src/app/online-orders/online-orders.serv
 import { vietnamDate } from '../src/app/online-orders/pickup-schedule';
 import { MenuService } from '../src/app/menu/menu.service';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
 import { ReportsService } from '../src/app/reports/reports.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -39,6 +40,7 @@ describe('Remote takeaway orders (e2e)', () => {
   const suffix = randomUUID();
   const ids: Record<string, string> = {};
   const clientRequestIds: string[] = [];
+  const posSessionIds: string[] = [];
 
   const createDto = (clientRequestId = randomUUID()) => ({
     clientRequestId,
@@ -107,9 +109,12 @@ describe('Remote takeaway orders (e2e)', () => {
         select: { id: true, orderSessionId: true },
       });
       const requestIds = requests.map((entry) => entry.id);
-      const sessionIds = requests.flatMap((entry) =>
-        entry.orderSessionId ? [entry.orderSessionId] : [],
-      );
+      const sessionIds = [
+        ...requests.flatMap((entry) =>
+          entry.orderSessionId ? [entry.orderSessionId] : [],
+        ),
+        ...posSessionIds,
+      ];
       const orderItems = await prisma.orderItem.findMany({
         where: { orderSessionId: { in: sessionIds } },
         select: { id: true },
@@ -209,6 +214,48 @@ describe('Remote takeaway orders (e2e)', () => {
       await app?.close();
       throttleSpy?.mockRestore();
     }
+  });
+
+  it('creates one POS item batch and kitchen ticket for concurrent idempotent submissions', async () => {
+    const session = await prisma.orderSession.create({
+      data: { employeeId: ids.employee },
+    });
+    posSessionIds.push(session.id);
+    const dto = {
+      items: [{ menuItemId: ids.menuItem, quantity: 2 }],
+      idempotencyKey: `pos-${randomUUID()}`,
+    };
+    const [first, replay] = await Promise.all([
+      orders.addOrderItems(session.id, dto, ids.employee),
+      orders.addOrderItems(session.id, dto, ids.employee),
+    ]);
+    expect(first?.id).toBe(session.id);
+    expect(replay?.orderItems.map((item) => item.id)).toEqual(
+      first?.orderItems.map((item) => item.id),
+    );
+    await expect(
+      orders.addOrderItems(
+        session.id,
+        {
+          ...dto,
+          items: [{ menuItemId: ids.menuItem, quantity: 3 }],
+        },
+        ids.employee,
+      ),
+    ).rejects.toThrow('different request');
+    expect(
+      await prisma.orderItem.count({ where: { orderSessionId: session.id } }),
+    ).toBe(1);
+    expect(
+      await prisma.kitchenTicket.count({
+        where: { orderSessionId: session.id },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.outboxEvent.count({
+        where: { aggregateId: session.id, eventName: ORDER_EVENTS.ITEMS_ADDED },
+      }),
+    ).toBe(1);
   });
 
   it('verifies new requests but preserves idempotent retries without a fresh challenge', async () => {
@@ -674,6 +721,10 @@ describe('Remote takeaway orders (e2e)', () => {
       page: 1,
       itemPerPage: 50,
     });
+    expect(fulfillment.totalItems).toBeGreaterThanOrEqual(
+      fulfillment.list.length,
+    );
+    expect(fulfillment.totalPages).toBe(Math.ceil(fulfillment.totalItems / 50));
     expect(fulfillment.list).toContainEqual(
       expect.objectContaining({
         id: request.requestId,

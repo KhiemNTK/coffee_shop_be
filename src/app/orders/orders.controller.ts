@@ -176,8 +176,9 @@ export class OrdersController {
   addOrderItems(
     @Param() { id }: IDDto,
     @Body() addOrderItemsDto: AddOrderItemsDto,
+    @Employee('employeeId') employeeId: string,
   ) {
-    return this.ordersService.addOrderItems(id, addOrderItemsDto);
+    return this.ordersService.addOrderItems(id, addOrderItemsDto, employeeId);
   }
 
   @Patch('items/:id/status')

@@ -790,7 +790,7 @@ export class OnlineOrdersService {
         },
       }),
     ]);
-    return paging.format(
+    return this.pagination.paging({ ...query, totalItems }).format(
       list.map(({ orderSession, ...request }) => ({
         ...request,
         isOverdue:

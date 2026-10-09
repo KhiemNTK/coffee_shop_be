@@ -51,6 +51,7 @@ import {
 } from '../../common/consts/reservation';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { OutboxService } from '../durable/outbox.service';
+import { IdempotencyService } from '../durable/idempotency.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
@@ -106,6 +107,7 @@ export class OrdersService {
     private readonly kitchenRouting: KitchenRoutingService,
     private readonly pagination: PaginationUtilService,
     config: ConfigService,
+    private readonly idempotency: IdempotencyService,
   ) {
     this.pickupCodeKey = createHmac(
       'sha256',
@@ -841,11 +843,36 @@ export class OrdersService {
     return session;
   }
 
-  async addOrderItems(orderSessionId: string, { items }: AddOrderItemsDto) {
-    const result = await this.runSerializableTransaction((tx) =>
-      this.addOrderItemsInTransaction(tx, orderSessionId, items),
-    );
-    return result.session;
+  async addOrderItems(
+    orderSessionId: string,
+    { items, idempotencyKey }: AddOrderItemsDto,
+    employeeId?: string,
+  ) {
+    if (idempotencyKey && !employeeId) {
+      throw new BadRequestException(
+        'Idempotent order submission requires an authenticated employee.',
+      );
+    }
+    const add = async (tx: ExtendedPrismaTransactionClient) => {
+      if (employeeId) await this.assertActiveEmployee(tx, employeeId);
+      const result = await this.addOrderItemsInTransaction(
+        tx,
+        orderSessionId,
+        items,
+      );
+      return result.session;
+    };
+    return idempotencyKey && employeeId
+      ? this.idempotency.execute(
+          {
+            employeeId,
+            operation: 'orders.add-items',
+            key: idempotencyKey,
+            request: { orderSessionId, items },
+          },
+          add,
+        )
+      : this.runSerializableTransaction(add);
   }
 
   async createOnlineTakeawaySession(
