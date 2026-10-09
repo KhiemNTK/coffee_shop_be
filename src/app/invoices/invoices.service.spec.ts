@@ -205,7 +205,11 @@ describe('InvoicesService', () => {
     expect(ledger.requireOpenShift).not.toHaveBeenCalled();
   });
 
-  it.each([PaymentAttemptStatus.PENDING, PaymentAttemptStatus.REQUIRES_REVIEW])(
+  it.each([
+    PaymentAttemptStatus.PENDING,
+    PaymentAttemptStatus.EXPIRED,
+    PaymentAttemptStatus.REQUIRES_REVIEW,
+  ])(
     'blocks manual payment and void while an online attempt is %s',
     async (status) => {
       tx.invoice.findUnique.mockResolvedValue({
@@ -235,6 +239,7 @@ describe('InvoicesService', () => {
           status: {
             in: [
               PaymentAttemptStatus.PENDING,
+              PaymentAttemptStatus.EXPIRED,
               PaymentAttemptStatus.REQUIRES_REVIEW,
             ],
           },

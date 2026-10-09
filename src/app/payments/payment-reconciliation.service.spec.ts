@@ -155,6 +155,30 @@ describe('PaymentReconciliationService', () => {
     expect(result?.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
   });
 
+  it('records a provider conflict without demoting a confirmed payment', async () => {
+    const confirmed = {
+      ...attempt,
+      status: PaymentAttemptStatus.SUCCEEDED,
+      providerTransactionNo: 'CONFIRMED-TRANSACTION',
+      invoice: {
+        ...attempt.invoice,
+        paymentStatus: PaymentStatus.PARTIALLY_REFUNDED,
+      },
+    };
+    tx.paymentAttempt.findUnique.mockResolvedValue(confirmed);
+    tx.paymentAttempt.update.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ ...confirmed, ...data }),
+    );
+
+    const result = await service.reconcileAttempt(attempt.id, 'manager-id');
+
+    expect(result?.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+    expect(result?.providerTransactionNo).toBe('CONFIRMED-TRANSACTION');
+    expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+  });
+
   it('confirms a matching MoMo query without calling VNPay', async () => {
     prisma.paymentAttempt.findUnique
       .mockReset()

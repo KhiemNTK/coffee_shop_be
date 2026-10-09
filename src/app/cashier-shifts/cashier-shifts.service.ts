@@ -14,7 +14,6 @@ import {
   CashHandoverStatus,
   FundType,
   PaymentMethod,
-  PaymentAttemptStatus,
   PaymentRefundStatus,
   PaymentStatus,
   Prisma,
@@ -23,6 +22,7 @@ import {
   ShiftStatus,
 } from '@prisma/client';
 import { CashControlSettingKeys } from '../../common/consts/cash-control-settings';
+import { UNRESOLVED_PAYMENT_ATTEMPT_STATUSES } from '../../common/consts/payment-attempt-statuses';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -385,11 +385,7 @@ export class CashierShiftsService {
           where: {
             shiftId: shift.id,
             status: {
-              in: [
-                PaymentAttemptStatus.PENDING,
-                PaymentAttemptStatus.EXPIRED,
-                PaymentAttemptStatus.REQUIRES_REVIEW,
-              ],
+              in: UNRESOLVED_PAYMENT_ATTEMPT_STATUSES,
             },
           },
         });

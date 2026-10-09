@@ -9,7 +9,6 @@ import {
 } from '@nestjs/common';
 import {
   PaymentMethod,
-  PaymentAttemptStatus,
   PaymentStatus,
   Prisma,
   ServeStatus,
@@ -17,6 +16,7 @@ import {
   TableStatus,
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
+import { UNRESOLVED_PAYMENT_ATTEMPT_STATUSES } from '../../common/consts/payment-attempt-statuses';
 import {
   type ExtendedPrismaClient,
   PRISMA_SERVICE_TOKEN,
@@ -834,10 +834,7 @@ export class InvoicesService {
       where: {
         invoiceId,
         status: {
-          in: [
-            PaymentAttemptStatus.PENDING,
-            PaymentAttemptStatus.REQUIRES_REVIEW,
-          ],
+          in: UNRESOLVED_PAYMENT_ATTEMPT_STATUSES,
         },
       },
       select: { id: true },

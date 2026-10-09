@@ -47,7 +47,6 @@ describe('MomoService', () => {
           signature: sign({
             accessKey: 'access-key',
             amount: '100000',
-            message: response.message,
             orderId: 'PA123',
             partnerCode: 'TESTSHOP',
             payUrl,

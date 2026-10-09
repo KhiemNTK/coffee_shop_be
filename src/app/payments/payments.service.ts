@@ -17,6 +17,7 @@ import {
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
+import { UNRESOLVED_PAYMENT_ATTEMPT_STATUSES } from '../../common/consts/payment-attempt-statuses';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -161,26 +162,11 @@ export class PaymentsService {
             this.momo.assertAmount(invoice.totalAmount);
           }
 
-          const now = new Date();
-          await tx.paymentAttempt.updateMany({
-            where: {
-              invoiceId,
-              status: PaymentAttemptStatus.PENDING,
-              expiresAt: { lte: now },
-            },
-            data: {
-              status: PaymentAttemptStatus.EXPIRED,
-              completedAt: now,
-            },
-          });
           const unresolved = await tx.paymentAttempt.findFirst({
             where: {
               invoiceId,
               status: {
-                in: [
-                  PaymentAttemptStatus.PENDING,
-                  PaymentAttemptStatus.REQUIRES_REVIEW,
-                ],
+                in: UNRESOLVED_PAYMENT_ATTEMPT_STATUSES,
               },
             },
             select: { id: true },
@@ -195,6 +181,7 @@ export class PaymentsService {
             tx,
             employeeId,
           );
+          const now = new Date();
           const ttlMinutes = this.config.get<number>(
             provider === PaymentProvider.MOMO
               ? 'MOMO_ATTEMPT_TTL_MINUTES'
@@ -355,7 +342,27 @@ export class PaymentsService {
             return { response: VNPAY_RESPONSE.INVALID_AMOUNT, invoice: null };
           }
           if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
+            if (
+              succeeded &&
+              providerTransactionNo !== attempt.providerTransactionNo
+            ) {
+              await this.markPaymentReview(tx, attempt, {
+                type: PaymentReconciliationIncidentType.PAYMENT_STATE_CONFLICT,
+                title: 'VNPay notification conflicts with confirmed payment',
+                providerTransactionNo,
+                details: {
+                  confirmedTransactionNo: attempt.providerTransactionNo,
+                },
+              });
+            }
             await this.completeWebhook(tx, event.id, '02');
+            return {
+              response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
+              invoice: null,
+            };
+          }
+          if (attempt.status === PaymentAttemptStatus.REQUIRES_REVIEW) {
+            await this.completeWebhook(tx, event.id, '02_REQUIRES_REVIEW');
             return {
               response: VNPAY_RESPONSE.ALREADY_CONFIRMED,
               invoice: null,
@@ -699,7 +706,7 @@ export class PaymentsService {
       attempt.expiresAt <= new Date()
     ) {
       const completedAt = new Date();
-      await this.prisma.paymentAttempt.updateMany({
+      const expired = await this.prisma.paymentAttempt.updateMany({
         where: { id: attempt.id, status: PaymentAttemptStatus.PENDING },
         data: {
           status: PaymentAttemptStatus.EXPIRED,
@@ -707,6 +714,10 @@ export class PaymentsService {
           nextReconcileAt: completedAt,
         },
       });
+      if (expired.count !== 1) {
+        const current = await this.findAttempt(attempt.id);
+        return this.presentAttempt(current, ipAddress, dto);
+      }
       return {
         ...attempt,
         status: PaymentAttemptStatus.EXPIRED,
@@ -808,6 +819,7 @@ export class PaymentsService {
       id: string;
       invoiceId: string;
       createdById: string;
+      status: PaymentAttemptStatus;
     },
     input: {
       type: PaymentReconciliationIncidentType;
@@ -819,10 +831,14 @@ export class PaymentsService {
     await tx.paymentAttempt.update({
       where: { id: attempt.id },
       data: {
-        status: PaymentAttemptStatus.REQUIRES_REVIEW,
-        providerTransactionNo: input.providerTransactionNo,
-        failureCode: input.type,
-        completedAt: null,
+        ...(attempt.status === PaymentAttemptStatus.SUCCEEDED
+          ? {}
+          : {
+              status: PaymentAttemptStatus.REQUIRES_REVIEW,
+              providerTransactionNo: input.providerTransactionNo,
+              failureCode: input.type,
+              completedAt: null,
+            }),
         nextReconcileAt: null,
         reconciliationLockedAt: null,
       },

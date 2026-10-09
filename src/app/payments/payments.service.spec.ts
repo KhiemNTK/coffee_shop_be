@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { ConflictException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -29,11 +30,13 @@ describe('PaymentsService', () => {
       updateMany: jest.fn(),
     },
     paymentWebhookEvent: { create: jest.fn(), update: jest.fn() },
+    paymentReconciliationIncident: { upsert: jest.fn() },
     actionLog: { create: jest.fn() },
   };
   const prisma = {
     paymentAttempt: {
       findUnique: jest.fn(),
+      updateMany: jest.fn(),
     },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
@@ -99,6 +102,7 @@ describe('PaymentsService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     prisma.paymentAttempt.findUnique.mockResolvedValue(null);
+    prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
     tx.paymentAttempt.findUnique.mockResolvedValue(null);
     tx.paymentAttempt.findFirst.mockResolvedValue(null);
@@ -139,30 +143,134 @@ describe('PaymentsService', () => {
     expect(result.paymentUrl).toBe('https://sandbox/payment');
   });
 
-  it('rejects a new payment attempt while an earlier payment requires review', async () => {
-    tx.paymentAttempt.findFirst.mockResolvedValue({ id: 'review-attempt' });
+  it.each([PaymentAttemptStatus.EXPIRED, PaymentAttemptStatus.REQUIRES_REVIEW])(
+    'rejects a new payment attempt while an earlier payment is %s',
+    async (status) => {
+      tx.paymentAttempt.findFirst.mockResolvedValue({
+        id: 'unresolved-attempt',
+        status,
+      });
 
-    await expect(
-      service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
-        idempotencyKey: 'new-payment-key',
-        locale: 'vn',
-        closeSessionAfterPayment: true,
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(tx.paymentAttempt.findFirst).toHaveBeenCalledWith({
-      where: {
-        invoiceId: 'invoice-id',
-        status: {
-          in: [
-            PaymentAttemptStatus.PENDING,
-            PaymentAttemptStatus.REQUIRES_REVIEW,
-          ],
+      await expect(
+        service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+          idempotencyKey: 'new-payment-key',
+          locale: 'vn',
+          closeSessionAfterPayment: true,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.paymentAttempt.findFirst).toHaveBeenCalledWith({
+        where: {
+          invoiceId: 'invoice-id',
+          status: {
+            in: [
+              PaymentAttemptStatus.PENDING,
+              PaymentAttemptStatus.EXPIRED,
+              PaymentAttemptStatus.REQUIRES_REVIEW,
+            ],
+          },
         },
-      },
-      select: { id: true },
-    });
+        select: { id: true },
+      });
+      expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+      expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns the committed success when an expiry update loses to an IPN', async () => {
+    const dto = {
+      idempotencyKey: 'idempotency-key',
+      locale: 'vn' as const,
+      closeSessionAfterPayment: true,
+    };
+    const expired = {
+      ...attempt,
+      expiresAt: new Date(Date.now() - 1000),
+      requestHash: createHash('sha256')
+        .update(
+          JSON.stringify({
+            invoiceId: attempt.invoiceId,
+            provider: PaymentProvider.VNPAY,
+            locale: dto.locale,
+            bankCode: null,
+            closeSessionAfterPayment: true,
+          }),
+        )
+        .digest('hex'),
+    };
+    prisma.paymentAttempt.findUnique
+      .mockResolvedValueOnce(expired)
+      .mockResolvedValueOnce({
+        ...expired,
+        status: PaymentAttemptStatus.SUCCEEDED,
+      });
+    prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await service.createAttempt(
+      attempt.invoiceId,
+      attempt.createdById,
+      '127.0.0.1',
+      dto,
+    );
+
+    expect(result.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+    expect(result.paymentUrl).toBeNull();
     expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
-    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+  });
+
+  it('keeps a confirmed payment immutable when a conflicting signed success arrives', async () => {
+    vnpay.verifyCallback.mockReturnValue({
+      isValid: true,
+      payloadHash: 'conflicting-success',
+      params: {
+        vnp_TxnRef: attempt.merchantReference,
+        vnp_Amount: '10000000',
+        vnp_ResponseCode: '00',
+        vnp_TransactionStatus: '00',
+        vnp_TransactionNo: 'OTHER-TRANSACTION',
+      },
+    });
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      status: PaymentAttemptStatus.SUCCEEDED,
+      providerTransactionNo: 'CONFIRMED-TRANSACTION',
+      invoice: { paymentStatus: PaymentStatus.PAID },
+    });
+    tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'event-id' });
+
+    await expect(service.handleVnpayIpn({})).resolves.toMatchObject({
+      RspCode: '02',
+    });
+    expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
+    expect(tx.paymentAttempt.update).toHaveBeenCalledWith({
+      where: { id: attempt.id },
+      data: { nextReconcileAt: null, reconciliationLockedAt: null },
+    });
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a review hold with a later signed VNPay callback', async () => {
+    vnpay.verifyCallback.mockReturnValue({
+      isValid: true,
+      payloadHash: 'review-success',
+      params: {
+        vnp_TxnRef: attempt.merchantReference,
+        vnp_Amount: '10000000',
+        vnp_ResponseCode: '00',
+        vnp_TransactionStatus: '00',
+        vnp_TransactionNo: 'VNP-001',
+      },
+    });
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      status: PaymentAttemptStatus.REQUIRES_REVIEW,
+    });
+    tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'event-id' });
+
+    await expect(service.handleVnpayIpn({})).resolves.toMatchObject({
+      RspCode: '02',
+    });
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
   });
 
   it('rejects an idempotency key reused with another request', async () => {

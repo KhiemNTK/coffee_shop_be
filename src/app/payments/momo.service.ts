@@ -109,7 +109,6 @@ export class MomoService {
           {
             accessKey,
             amount: String(response.amount),
-            message: response.message,
             orderId: response.orderId,
             partnerCode: response.partnerCode,
             payUrl: response.payUrl ?? '',

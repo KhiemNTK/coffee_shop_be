@@ -625,9 +625,13 @@ export class PaymentReconciliationService {
     const updated = await tx.paymentAttempt.update({
       where: { id: attempt.id },
       data: {
-        status: PaymentAttemptStatus.REQUIRES_REVIEW,
-        completedAt: null,
-        failureCode: type,
+        ...(attempt.status === PaymentAttemptStatus.SUCCEEDED
+          ? {}
+          : {
+              status: PaymentAttemptStatus.REQUIRES_REVIEW,
+              completedAt: null,
+              failureCode: type,
+            }),
         lastReconciledAt: now,
         nextReconcileAt: null,
         reconciliationLockedAt: null,
