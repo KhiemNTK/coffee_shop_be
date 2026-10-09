@@ -24,6 +24,7 @@ describe('Public menu and reservation request (e2e)', () => {
   let tableId: string;
   let categoryId: string;
   const publicRequestIds: string[] = [];
+  const tableIds: string[] = [];
   const suffix = randomUUID();
 
   beforeAll(async () => {
@@ -56,10 +57,6 @@ describe('Public menu and reservation request (e2e)', () => {
       },
     });
     employeeId = employee.id;
-    const table = await prisma.diningTable.create({
-      data: { name: `Booking table ${suffix}` },
-    });
-    tableId = table.id;
     const category = await prisma.menuCategory.create({
       data: { name: `Public category ${suffix}` },
     });
@@ -75,6 +72,14 @@ describe('Public menu and reservation request (e2e)', () => {
         },
       ],
     });
+  });
+
+  beforeEach(async () => {
+    const table = await prisma.diningTable.create({
+      data: { name: `Booking table ${randomUUID()}` },
+    });
+    tableId = table.id;
+    tableIds.push(tableId);
   });
 
   afterAll(async () => {
@@ -95,8 +100,10 @@ describe('Public menu and reservation request (e2e)', () => {
         await prisma.menuItem.deleteMany({ where: { categoryId } });
         await prisma.menuCategory.deleteMany({ where: { id: categoryId } });
       }
-      if (tableId)
-        await prisma.diningTable.deleteMany({ where: { id: tableId } });
+      if (tableIds.length)
+        await prisma.diningTable.deleteMany({
+          where: { id: { in: tableIds } },
+        });
       if (employeeId)
         await prisma.employee.deleteMany({ where: { id: employeeId } });
       if (positionId)
@@ -279,6 +286,7 @@ describe('Public menu and reservation request (e2e)', () => {
   });
 
   it('keeps public requests unconfirmed until a staff member assigns a table', async () => {
+    expect(await prisma.reservation.count({ where: { tableId } })).toBe(0);
     const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const endsAt = new Date(startsAt.getTime() + 60 * 60 * 1000);
     const response = await request(app.getHttpServer())
