@@ -557,10 +557,11 @@ describe('VNPay payment lifecycle (e2e)', () => {
         transactionNo: `VNP-${randomUUID()}`,
       }),
     );
+    const transactionNo = `VNP-${randomUUID()}`;
     const ipn = signIpn({
       merchantReference: created.merchantReference,
       amount: invoice.totalAmount,
-      transactionNo: `VNP-${randomUUID()}`,
+      transactionNo,
     });
 
     await expect(payments.handleVnpayIpn(ipn)).resolves.toEqual({
@@ -570,7 +571,10 @@ describe('VNPay payment lifecycle (e2e)', () => {
     const [attempt, event, incident] = await Promise.all([
       prisma.paymentAttempt.findUniqueOrThrow({ where: { id: created.id } }),
       prisma.paymentWebhookEvent.findFirstOrThrow({
-        where: { paymentAttemptId: created.id },
+        where: {
+          paymentAttemptId: created.id,
+          providerTransactionNo: transactionNo,
+        },
       }),
       prisma.paymentReconciliationIncident.findFirstOrThrow({
         where: { paymentAttemptId: created.id },
@@ -594,9 +598,16 @@ describe('VNPay payment lifecycle (e2e)', () => {
       '127.0.0.1',
       dto,
     );
+    const expiresAt = new Date(Date.now() - 60_000);
+    const startedAt = new Date(expiresAt.getTime() - 15 * 60_000);
     await prisma.paymentAttempt.update({
       where: { id: created.id },
-      data: { expiresAt: new Date(Date.now() - 1000) },
+      data: {
+        createdAt: startedAt,
+        providerCreatedAt: startedAt,
+        expiresAt,
+        nextReconcileAt: expiresAt,
+      },
     });
     const expired = await payments.createAttempt(
       invoice.id,
