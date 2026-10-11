@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -235,6 +236,7 @@ export class ReportsService {
         timeZone: period.timeZone,
         granularity: 'day',
         cohort: 'requestCreatedAt',
+        preparationTimingBasis: 'firstTicketAvailableAt',
       },
       summary: present(total),
       trend: rows
@@ -255,7 +257,11 @@ export class ReportsService {
       query.stationId,
     );
     return {
-      period: { from: period.from.toISOString(), to: period.to.toISOString() },
+      period: {
+        from: period.from.toISOString(),
+        to: period.to.toISOString(),
+        preparationTimingBasis: 'ticketAvailableAt',
+      },
       stations: rows.map(presentKitchenSlaRow),
     };
   }
@@ -291,6 +297,7 @@ export class ReportsService {
         timeZone: period.timeZone,
         granularity: 'hour',
         cohort: 'ticketCreatedAt',
+        preparationTimingBasis: 'ticketAvailableAt',
         asOf: asOf.toISOString(),
       },
       slots: rows.map((row) => ({
@@ -336,11 +343,10 @@ export class ReportsService {
           ) AS "wasteEntryCount"
         FROM "Invoice" i
         LEFT JOIN (
-          SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
-          FROM "PaymentRefund" pr
-          JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+          SELECT pr."invoiceId", SUM(pr."amount") AS "amount"
+          FROM (${INVOICE_REFUNDS_SQL}) pr
           WHERE pr."status" = 'SUCCEEDED'
-          GROUP BY pa."invoiceId"
+          GROUP BY pr."invoiceId"
         ) refunds ON refunds."invoiceId" = i."id"
         WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
           AND i."createdAt" >= ${period.from}
@@ -404,11 +410,10 @@ export class ReportsService {
         ), 0)::numeric AS "netRevenue"
       FROM "Invoice" i
       LEFT JOIN (
-        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
-        FROM "PaymentRefund" pr
-        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        SELECT pr."invoiceId", SUM(pr."amount") AS "amount"
+        FROM (${INVOICE_REFUNDS_SQL}) pr
         WHERE pr."status" = 'SUCCEEDED'
-        GROUP BY pa."invoiceId"
+        GROUP BY pr."invoiceId"
       ) refunds ON refunds."invoiceId" = i."id"
       WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
@@ -437,11 +442,10 @@ export class ReportsService {
         ), 0)::numeric AS "netRevenue"
       FROM "Invoice" i
       LEFT JOIN (
-        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
-        FROM "PaymentRefund" pr
-        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        SELECT pr."invoiceId", SUM(pr."amount") AS "amount"
+        FROM (${INVOICE_REFUNDS_SQL}) pr
         WHERE pr."status" = 'SUCCEEDED'
-        GROUP BY pa."invoiceId"
+        GROUP BY pr."invoiceId"
       ) refunds ON refunds."invoiceId" = i."id"
       WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
@@ -511,11 +515,10 @@ export class ReportsService {
       FROM "Invoice" i
       JOIN "Promotion" p ON p."id" = i."promotionId"
       LEFT JOIN (
-        SELECT pa."invoiceId", SUM(pr."amount") AS "amount"
-        FROM "PaymentRefund" pr
-        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
+        SELECT pr."invoiceId", SUM(pr."amount") AS "amount"
+        FROM (${INVOICE_REFUNDS_SQL}) pr
         WHERE pr."status" = 'SUCCEEDED'
-        GROUP BY pa."invoiceId"
+        GROUP BY pr."invoiceId"
       ) refunds ON refunds."invoiceId" = i."id"
       WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         AND i."createdAt" >= ${period.from}
@@ -925,7 +928,7 @@ export class ReportsService {
           COALESCE(SUM(pr."amount") FILTER (
             WHERE pr."status" = 'REQUIRES_REVIEW'
           ), 0)::numeric AS "reviewRefundAmount"
-        FROM "PaymentRefund" pr
+        FROM (${INVOICE_REFUNDS_SQL}) pr
       ) refund_metrics
       CROSS JOIN (
         SELECT COUNT(*)::bigint AS "openReconciliationIncidentCount"

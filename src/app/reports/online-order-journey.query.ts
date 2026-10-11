@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import type {
   ReportOnlineOrderJourneyRow,
@@ -26,7 +27,14 @@ export function queryOnlineOrderJourney(
              MAX(oi."readyAt") AS "lastReadyAt"
       FROM "OrderItem" oi
       JOIN cohort r ON r."orderSessionId" = oi."orderSessionId"
+      WHERE NOT EXISTS (SELECT 1 FROM "OrderRemake" rm WHERE rm."replacementItemId" = oi."id")
       GROUP BY oi."orderSessionId"
+    ),
+    preparation AS (
+      SELECT t."orderSessionId", MIN(COALESCE(t."availableAt", t."createdAt")) AS "availableAt"
+      FROM "KitchenTicket" t
+      JOIN cohort r ON r."orderSessionId" = t."orderSessionId"
+      GROUP BY t."orderSessionId"
     ),
     payments AS (
       SELECT i."orderSessionId", COUNT(*)::bigint AS "paidInvoiceCount",
@@ -35,9 +43,8 @@ export function queryOnlineOrderJourney(
       JOIN cohort r ON r."orderSessionId" = i."orderSessionId"
       LEFT JOIN LATERAL (
         SELECT SUM(pr."amount") AS "amount"
-        FROM "PaymentAttempt" pa
-        JOIN "PaymentRefund" pr ON pr."paymentAttemptId" = pa."id"
-        WHERE pa."invoiceId" = i."id" AND pr."status" = 'SUCCEEDED'
+        FROM (${INVOICE_REFUNDS_SQL}) pr
+        WHERE pr."invoiceId" = i."id" AND pr."status" = 'SUCCEEDED'
       ) refunds ON TRUE
       WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
       GROUP BY i."orderSessionId"
@@ -49,10 +56,12 @@ export function queryOnlineOrderJourney(
              COALESCE(s."allPaid", FALSE) AS "allPaid",
              COALESCE(s."allCollected", FALSE) AS "allCollected",
              s."lastReadyAt",
+             GREATEST(r."reviewedAt", COALESCE(prep."availableAt", r."reviewedAt")) AS "prepStartedAt",
              COALESCE(p."paidInvoiceCount", 0) AS "paidInvoiceCount",
              COALESCE(p."netReceipts", 0) AS "netReceipts"
       FROM cohort r
       LEFT JOIN item_state s ON s."orderSessionId" = r."orderSessionId"
+      LEFT JOIN preparation prep ON prep."orderSessionId" = r."orderSessionId"
       LEFT JOIN payments p ON p."orderSessionId" = r."orderSessionId"
     )
     SELECT CASE WHEN GROUPING("day") = 1 THEN NULL ELSE "day" END AS "bucket",
@@ -74,8 +83,8 @@ export function queryOnlineOrderJourney(
            COALESCE(SUM("netReceipts") FILTER (WHERE "allCollected"), 0)::numeric AS "collectedNetReceipts",
            COUNT(*) FILTER (WHERE "reviewedAt" >= "createdAt")::bigint AS "reviewedCount",
            COALESCE(SUM(EXTRACT(EPOCH FROM "reviewedAt" - "createdAt")) FILTER (WHERE "reviewedAt" >= "createdAt"), 0)::numeric AS "reviewSeconds",
-           COUNT(*) FILTER (WHERE "reachedReady" AND "lastReadyAt" >= "reviewedAt")::bigint AS "prepSampleCount",
-           COALESCE(SUM(EXTRACT(EPOCH FROM "lastReadyAt" - "reviewedAt")) FILTER (WHERE "reachedReady" AND "lastReadyAt" >= "reviewedAt"), 0)::numeric AS "prepSeconds"
+           COUNT(*) FILTER (WHERE "reachedReady" AND "lastReadyAt" >= "prepStartedAt")::bigint AS "prepSampleCount",
+           COALESCE(SUM(EXTRACT(EPOCH FROM "lastReadyAt" - "prepStartedAt")) FILTER (WHERE "reachedReady" AND "lastReadyAt" >= "prepStartedAt"), 0)::numeric AS "prepSeconds"
     FROM journeys
     GROUP BY ROLLUP("day")
     ORDER BY "bucket" NULLS FIRST

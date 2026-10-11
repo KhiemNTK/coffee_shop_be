@@ -10,6 +10,7 @@ function kitchenTicketFacts(period: ReportQueryPeriod, stationId?: string) {
   return Prisma.sql`
     WITH ticket_facts AS (
       SELECT t."createdAt", t."dueAt", s."id" AS "stationId",
+             COALESCE(t."availableAt", t."createdAt") AS "availableAt",
              s."code" AS "stationCode", s."name" AS "stationName",
              items."itemCount", items."activeCount", items."waitingCount", items."lastReadyAt",
              items."orderedUnits"
@@ -36,12 +37,12 @@ function kitchenSlaAggregates(asOf: Date) {
            COUNT(*)::bigint AS "ticketCount",
            COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" = 0)::bigint AS "completedCount",
            COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" = 0 AND f."lastReadyAt" > f."dueAt")::bigint AS "lateCompletedCount",
-           COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" > 0 AND f."dueAt" < ${asOf})::bigint AS "overdueOpenCount",
-           AVG(EXTRACT(EPOCH FROM f."lastReadyAt" - f."createdAt")) FILTER
-             (WHERE f."activeCount" > 0 AND f."waitingCount" = 0 AND f."lastReadyAt" >= f."createdAt")::float8 AS "averageTicketToReadySeconds",
+           COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" > 0 AND f."availableAt" <= ${asOf} AND f."dueAt" < ${asOf})::bigint AS "overdueOpenCount",
+           AVG(EXTRACT(EPOCH FROM f."lastReadyAt" - f."availableAt")) FILTER
+             (WHERE f."activeCount" > 0 AND f."waitingCount" = 0 AND f."lastReadyAt" >= f."availableAt")::float8 AS "averageTicketToReadySeconds",
            percentile_cont(0.95) WITHIN GROUP
-             (ORDER BY EXTRACT(EPOCH FROM f."lastReadyAt" - f."createdAt")) FILTER
-             (WHERE f."activeCount" > 0 AND f."waitingCount" = 0 AND f."lastReadyAt" >= f."createdAt") AS "p95TicketToReadySeconds"
+             (ORDER BY EXTRACT(EPOCH FROM f."lastReadyAt" - f."availableAt")) FILTER
+             (WHERE f."activeCount" > 0 AND f."waitingCount" = 0 AND f."lastReadyAt" >= f."availableAt") AS "p95TicketToReadySeconds"
   `;
 }
 
@@ -73,7 +74,7 @@ export function queryKitchenBottlenecks(
            f."stationId", f."stationCode", f."stationName",
            ${kitchenSlaAggregates(asOf)},
            COALESCE(SUM(f."orderedUnits"), 0)::bigint AS "orderedUnitCount",
-           COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" > 0)::bigint AS "openNowCount",
+           COUNT(*) FILTER (WHERE f."activeCount" > 0 AND f."waitingCount" > 0 AND f."availableAt" <= ${asOf})::bigint AS "openNowCount",
            COUNT(*) FILTER (WHERE f."itemCount" > 0 AND f."activeCount" = 0)::bigint AS "cancelledTicketCount"
     FROM ticket_facts f
     GROUP BY 1, 2, 3, 4

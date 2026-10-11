@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import type {
   ExtendedPrismaTransactionClient,
   ReportProfitabilityRow,
@@ -18,12 +19,11 @@ export async function queryProfitability(
         AND i."createdAt" >= ${period.from}
         AND i."createdAt" < ${period.to}
     ), refunds AS (
-      SELECT pa."invoiceId", COUNT(*)::bigint AS count, SUM(pr."amount") AS amount
-      FROM "PaymentRefund" pr
-      JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
-      JOIN invoice_cohort i ON i."id" = pa."invoiceId"
+      SELECT pr."invoiceId", COUNT(*)::bigint AS count, SUM(pr."amount") AS amount
+      FROM (${INVOICE_REFUNDS_SQL}) pr
+      JOIN invoice_cohort i ON i."id" = pr."invoiceId"
       WHERE pr."status" = 'SUCCEEDED' AND pr."completedAt" <= ${asOf}
-      GROUP BY pa."invoiceId"
+      GROUP BY pr."invoiceId"
     ), sales AS (
       SELECT
         COUNT(*)::bigint AS "paidInvoiceCount",
@@ -45,14 +45,17 @@ export async function queryProfitability(
       LEFT JOIN refunds r ON r."invoiceId" = i."id"
     ), costs AS (
       SELECT
-        COALESCE(SUM(s."totalCost"), 0)::numeric AS "ingredientCost",
-        COUNT(*)::bigint AS "soldItemCount",
-        COUNT(*) FILTER (WHERE s."snapshotCount" > 0)::bigint AS "itemsWithCostSnapshot",
+        COALESCE(SUM(CASE WHEN discarded."id" IS NULL THEN s."totalCost" ELSE 0 END), 0)::numeric AS "ingredientCost",
+        COUNT(*) FILTER (WHERE oi."invoiceId" IS NOT NULL)::bigint AS "soldItemCount",
+        COUNT(*) FILTER (WHERE oi."invoiceId" IS NOT NULL AND s."snapshotCount" > 0)::bigint AS "itemsWithCostSnapshot",
         COUNT(*) FILTER (
-          WHERE s."snapshotCount" > 0 AND s."totalCost" = 0
+          WHERE oi."invoiceId" IS NOT NULL AND s."snapshotCount" > 0 AND s."totalCost" = 0
         )::bigint AS "zeroCostSnapshotCount"
       FROM "OrderItem" oi
-      JOIN invoice_cohort i ON i."id" = oi."invoiceId"
+      LEFT JOIN "OrderRemake" replacement ON replacement."replacementItemId" = oi."id" AND replacement."createdAt" <= ${asOf}
+      LEFT JOIN "OrderItem" original ON original."id" = replacement."originalItemId"
+      LEFT JOIN "OrderRemake" discarded ON discarded."originalItemId" = oi."id" AND discarded."createdAt" <= ${asOf}
+      JOIN invoice_cohort i ON i."id" = COALESCE(oi."invoiceId", original."invoiceId")
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS "snapshotCount", SUM(ois."totalCost") AS "totalCost"
         FROM "OrderItemIngredientSnapshot" ois
