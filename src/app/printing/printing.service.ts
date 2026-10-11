@@ -339,7 +339,10 @@ export class PrintingService {
   async retryJob(id: string, employeeId: string, dto: RetryPrintJobDto) {
     return this.transaction(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
-      const job = await tx.printJob.findUnique({ where: { id } });
+      const job = await tx.printJob.findUnique({
+        where: { id },
+        include: { kitchenTicket: { select: { availableAt: true } } },
+      });
       if (!job) throw new NotFoundException(`Print job ${id} not found.`);
       if (
         job.status !== PrintJobStatus.PENDING &&
@@ -359,7 +362,12 @@ export class PrintingService {
           status: PrintJobStatus.PENDING,
           deviceId,
           attempts: 0,
-          availableAt: new Date(),
+          availableAt: new Date(
+            Math.max(
+              Date.now(),
+              job.kitchenTicket?.availableAt?.getTime() ?? 0,
+            ),
+          ),
           failedAt: null,
           lastError: null,
         },
@@ -495,6 +503,7 @@ export class PrintingService {
       kitchenTicketId: string;
       deviceId: string;
       payload: Prisma.InputJsonObject;
+      availableAt?: Date;
     },
   ) {
     return tx.printJob.create({
@@ -503,6 +512,7 @@ export class PrintingService {
         kitchenTicketId: input.kitchenTicketId,
         deviceId: input.deviceId,
         payload: input.payload,
+        availableAt: input.availableAt,
         deduplicationKey: `KITCHEN_TICKET:${input.kitchenTicketId}`,
       },
     });

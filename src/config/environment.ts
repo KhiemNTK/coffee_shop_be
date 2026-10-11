@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BUSINESS_INSIGHT_MODELS } from '../common/consts/business-insights';
 
 const BooleanEnvSchema = z.preprocess((value) => {
   if (typeof value === 'boolean') return value;
@@ -43,6 +44,28 @@ const EnvironmentSchema = z
     APP_NAME: z.string().min(1).default('coffee_shop_be'),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.url().optional(),
+    AI_INSIGHTS_ENABLED: BooleanEnvSchema.default(false),
+    GEMINI_API_KEY: OptionalCredentialSchema,
+    GEMINI_MODEL: optionalBlank(z.enum(BUSINESS_INSIGHT_MODELS)),
+    GEMINI_DATA_POLICY_ACKNOWLEDGED: BooleanEnvSchema.default(false),
+    GEMINI_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(30_000)
+      .default(15_000),
+    GEMINI_DAILY_REQUEST_LIMIT: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(20),
+    GEMINI_MAX_OUTPUT_TOKENS: z.coerce
+      .number()
+      .int()
+      .min(1_500)
+      .max(4_000)
+      .default(3_000),
     FE_URL: CorsOriginsSchema.default('http://localhost:3001'),
     JWT_SECRET: z
       .string()
@@ -180,6 +203,17 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     ...parsed,
     SWAGGER_ENABLED: parsed.SWAGGER_ENABLED ?? parsed.NODE_ENV !== 'production',
   };
+  if (
+    environment.AI_INSIGHTS_ENABLED &&
+    (!environment.REDIS_URL ||
+      !environment.GEMINI_API_KEY ||
+      !environment.GEMINI_MODEL ||
+      !environment.GEMINI_DATA_POLICY_ACKNOWLEDGED)
+  ) {
+    throw new Error(
+      'AI insights require Redis, Gemini credentials/model and explicit data-policy acknowledgement.',
+    );
+  }
   if (environment.ONLINE_PICKUP_SLOT_CAPACITY) {
     const open = environment.ONLINE_PICKUP_OPEN_LOCAL;
     const close = environment.ONLINE_PICKUP_CLOSE_LOCAL;

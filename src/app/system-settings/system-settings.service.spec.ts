@@ -7,6 +7,7 @@ import { SettingValueType } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { SystemSettingsService } from './system-settings.service';
+import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../../common/consts/online-order-settings';
 
 describe('SystemSettingsService', () => {
   const setting = {
@@ -100,6 +101,27 @@ describe('SystemSettingsService', () => {
         isPublic: false,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('cannot bypass online-intake permission and validation through generic settings', async () => {
+    await expect(
+      service.create('employee-id', {
+        key: ONLINE_ORDER_INTAKE_SETTING_KEY,
+        value: {},
+        valueType: SettingValueType.JSON,
+        isPublic: false,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.update(ONLINE_ORDER_INTAKE_SETTING_KEY, 'employee-id', {
+        expectedVersion: 1,
+        value: {},
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.remove(ONLINE_ORDER_INTAKE_SETTING_KEY, 'employee-id', 1),
+    ).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 

@@ -40,6 +40,64 @@ describe('validateEnvironment', () => {
     expect(environment.HOST).toBe('0.0.0.0');
     expect(environment.SWAGGER_ENABLED).toBe(true);
     expect(environment.METRICS_ENABLED).toBe(true);
+    expect(environment.AI_INSIGHTS_ENABLED).toBe(false);
+  });
+
+  it('requires explicit Gemini configuration and data-policy acknowledgement', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://localhost/test',
+      AI_INSIGHTS_ENABLED: 'true',
+    };
+    expect(() => validateEnvironment(base)).toThrow('AI insights require');
+    const configured = {
+      ...base,
+      REDIS_URL: 'redis://localhost:6379',
+      GEMINI_API_KEY: 'fake-api-key-at-least-20-characters',
+      GEMINI_MODEL: 'gemini-3.5-flash-lite',
+    };
+    expect(() => validateEnvironment(configured)).toThrow(
+      'AI insights require',
+    );
+    expect(
+      validateEnvironment({
+        ...configured,
+        GEMINI_DATA_POLICY_ACKNOWLEDGED: 'true',
+      }).AI_INSIGHTS_ENABLED,
+    ).toBe(true);
+    expect(() =>
+      validateEnvironment({
+        ...configured,
+        GEMINI_DATA_POLICY_ACKNOWLEDGED: 'true',
+        GEMINI_MODEL: '../outside-endpoint',
+      }),
+    ).toThrow();
+    expect(() =>
+      validateEnvironment({
+        ...configured,
+        GEMINI_DATA_POLICY_ACKNOWLEDGED: 'true',
+        GEMINI_DAILY_REQUEST_LIMIT: '0',
+      }),
+    ).toThrow();
+  });
+
+  it.each(['gemini-fixture', 'gemini-3.1-flash-image', '../outside-endpoint'])(
+    'rejects unsupported AI model %s',
+    (model) => {
+      expect(() =>
+        validateEnvironment({
+          DATABASE_URL: 'postgresql://localhost/test',
+          GEMINI_MODEL: model,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it('bounds AI output and defaults to the explicit text-model policy', () => {
+    const base = { DATABASE_URL: 'postgresql://localhost/test' };
+    expect(validateEnvironment(base).GEMINI_MAX_OUTPUT_TOKENS).toBe(3_000);
+    expect(() =>
+      validateEnvironment({ ...base, GEMINI_MAX_OUTPUT_TOKENS: 256 }),
+    ).toThrow();
   });
 
   it('treats blank optional identity credentials as unconfigured locally', () => {

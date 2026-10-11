@@ -65,8 +65,11 @@ export class RolesController {
 
   @Get(':id/permissions')
   @RequirePermissions(PermissionKeys.ROLE_PERMISSIONS_READ)
-  getRolePermissions(@Param() { id }: IDDto) {
-    return this.rolesService.getRolePermissions(id);
+  getRolePermissions(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') actorId: string,
+  ) {
+    return this.rolesService.getRolePermissions(id, actorId);
   }
 
   @Put(':id/permissions')
@@ -74,10 +77,12 @@ export class RolesController {
   replaceRolePermissions(
     @Param() { id }: IDDto,
     @Body() replaceRolePermissionsDto: ReplaceRolePermissionsDto,
+    @Employee('employeeId') actorId: string,
   ) {
     return this.rolesService.replaceRolePermissions(
       id,
       replaceRolePermissionsDto,
+      actorId,
     );
   }
 
@@ -95,7 +100,7 @@ export class RolesController {
 
   @Delete(':id')
   @RequirePermissions(PermissionKeys.ROLES_DELETE)
-  deleteRole(@Param() { id }: IDDto) {
-    return this.rolesService.deleteRole(id);
+  deleteRole(@Param() { id }: IDDto, @Employee('employeeId') actorId: string) {
+    return this.rolesService.deleteRole(id, actorId);
   }
 }

@@ -13,6 +13,7 @@ import { EmployeesService } from './employees.service';
 import { IDDto } from '../../common/dto/param.dto';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import { Employee } from '../../common/decorators/employee.decorator';
 import {
   CreateEmployeeDto,
   GetEmployeesPaginationDto,
@@ -40,8 +41,11 @@ export class EmployeesController {
 
   @Get(':id/roles')
   @RequirePermissions(PermissionKeys.EMPLOYEE_ROLES_READ)
-  getEmployeeRoles(@Param() { id }: IDDto) {
-    return this.employeesService.getEmployeeRoles(id);
+  getEmployeeRoles(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') actorId: string,
+  ) {
+    return this.employeesService.getEmployeeRoles(id, actorId);
   }
 
   @Put(':id/roles')
@@ -49,10 +53,12 @@ export class EmployeesController {
   replaceEmployeeRoles(
     @Param() { id }: IDDto,
     @Body() replaceEmployeeRolesDto: ReplaceEmployeeRolesDto,
+    @Employee('employeeId') actorId: string,
   ) {
     return this.employeesService.replaceEmployeeRoles(
       id,
       replaceEmployeeRolesDto,
+      actorId,
     );
   }
 
@@ -67,13 +73,17 @@ export class EmployeesController {
   updateEmployee(
     @Param() { id }: IDDto,
     @Body() updateEmployeeDto: UpdateEmployeeDto,
+    @Employee('employeeId') actorId: string,
   ) {
-    return this.employeesService.updateEmployee(id, updateEmployeeDto);
+    return this.employeesService.updateEmployee(id, updateEmployeeDto, actorId);
   }
 
   @Delete(':id')
   @RequirePermissions(PermissionKeys.EMPLOYEES_DELETE)
-  deleteEmployee(@Param() { id }: IDDto) {
-    return this.employeesService.deleteEmployee(id);
+  deleteEmployee(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') actorId: string,
+  ) {
+    return this.employeesService.deleteEmployee(id, actorId);
   }
 }

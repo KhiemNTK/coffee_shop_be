@@ -8,6 +8,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, SettingValueType } from '@prisma/client';
+import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../../common/consts/online-order-settings';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -30,6 +31,7 @@ export class SystemSettingsService {
   ) {}
 
   async create(employeeId: string, dto: CreateSystemSettingDto) {
+    this.assertWritableKey(dto.key);
     this.assertValueType(dto.valueType, dto.value);
 
     try {
@@ -134,6 +136,7 @@ export class SystemSettingsService {
     employeeId: string,
     { expectedVersion, ...dto }: UpdateSystemSettingDto,
   ) {
+    this.assertWritableKey(key);
     return this.prisma.$transaction(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
       const existing = await tx.systemSetting.findFirst({
@@ -179,6 +182,7 @@ export class SystemSettingsService {
   }
 
   async remove(key: string, employeeId: string, expectedVersion: number) {
+    this.assertWritableKey(key);
     return this.prisma.$transaction(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
       const existing = await tx.systemSetting.findFirst({
@@ -225,6 +229,14 @@ export class SystemSettingsService {
   private readonly settingInclude = {
     updatedBy: { select: { id: true, fullName: true } },
   } as const;
+
+  private assertWritableKey(key: string) {
+    if (key === ONLINE_ORDER_INTAKE_SETTING_KEY) {
+      throw new ForbiddenException(
+        'Use the online-order intake endpoint to change this setting.',
+      );
+    }
+  }
 
   private assertValueType(valueType: SettingValueType, value: unknown) {
     const isValid =

@@ -2,7 +2,12 @@ import { SYSTEM_ERRORS } from './../../consts/message';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { type CellValue, Workbook, type Worksheet } from 'exceljs';
 import { File, GenerateExcelParams } from './dto/excel-util.interface';
-import { camelCase } from 'es-toolkit';
+
+const toCamelCase = (str: string): string =>
+  str
+    .trim()
+    .replace(/[-_\s]+(.)?/g, (_, c) => (c ? c.toUpperCase() : ''))
+    .replace(/^(.)/, (c) => c.toLowerCase());
 
 const toStartCase = (str: string) =>
   str
@@ -117,7 +122,7 @@ export class ExcelUtilService {
         const headerMap = new Map<number, string>();
         worksheet.getRow(1).eachCell((cell, colNumber) => {
           if (cell.text) {
-            headerMap.set(colNumber, camelCase(String(cell.text)));
+            headerMap.set(colNumber, toCamelCase(String(cell.text)));
           }
         });
         worksheet.eachRow((row, rowNumber) => {

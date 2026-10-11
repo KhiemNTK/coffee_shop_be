@@ -20,6 +20,7 @@ import { DomainEventBusService } from './domain-event-bus.service';
 const QUEUE_NAME = 'domain-outbox';
 const POLL_INTERVAL_MS = 1_000;
 const LOCK_TIMEOUT_MS = 15 * 60 * 1_000;
+const HOUSEKEEPING_INTERVAL_MS = 5 * 60 * 1_000;
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 50;
 const REDIS_CLOSE_TIMEOUT_MS = 3_000;
@@ -34,6 +35,7 @@ export class OutboxDispatcherService
   private worker?: Worker<ClaimedOutboxEvent, void, 'publish'>;
   private timer?: NodeJS.Timeout;
   private draining = false;
+  private lastHousekeepingAt = 0;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -69,18 +71,12 @@ export class OutboxDispatcherService
     if (this.draining) return;
     this.draining = true;
     try {
-      await this.recoverAbandonedEvents();
+      await this.runHousekeepingIfNeeded();
       const events = await this.claimBatch();
       for (const event of events) {
         if (this.queue) await this.enqueue(event);
         else await this.deliverWithoutRedis(event);
       }
-      await this.prisma.idempotencyRequest.deleteMany({
-        where: {
-          status: 'COMPLETED',
-          expiresAt: { lt: new Date() },
-        },
-      });
     } catch (error) {
       this.logger.error(
         'Outbox dispatch cycle failed.',
@@ -89,6 +85,20 @@ export class OutboxDispatcherService
     } finally {
       this.draining = false;
     }
+  }
+
+  private async runHousekeepingIfNeeded() {
+    const now = Date.now();
+    if (now - this.lastHousekeepingAt < HOUSEKEEPING_INTERVAL_MS) return;
+    this.lastHousekeepingAt = now;
+
+    await this.recoverAbandonedEvents();
+    await this.prisma.idempotencyRequest.deleteMany({
+      where: {
+        status: 'COMPLETED',
+        expiresAt: { lt: new Date() },
+      },
+    });
   }
 
   private startBullMq(redisUrl: string) {

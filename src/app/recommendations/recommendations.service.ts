@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import {
   BadRequestException,
   ConflictException,
@@ -96,12 +97,13 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
+        // shortcut: partial refunds have no item attribution; retain non-cancelled lines until line-level refunds exist.
         await tx.$executeRaw`
           WITH eligible AS (
             SELECT DISTINCT oi."invoiceId", oi."menuItemId"
             FROM "OrderItem" oi
             JOIN "Invoice" i ON i."id" = oi."invoiceId"
-            WHERE i."paymentStatus" = 'PAID'
+            WHERE i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED')
               AND i."createdAt" >= ${new Date(now.getTime() - TRAINING_WINDOW_MS)}
               AND oi."serveStatus" <> 'CANCELLED'
           ), pairs AS (
@@ -233,13 +235,16 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  // Exposure-time cohort: paidOrders counts purchases even after a full refund.
+  // attachedOrders counts non-cancelled candidate purchases, not items retained after refunds.
+  // Refunds lack item attribution; revenue and its averages use current net invoice receipts.
   async getExperiment(from: Date, to: Date) {
     if (from.getTime() < Date.now() - TRAINING_WINDOW_MS) {
       throw new BadRequestException(
         'Recommendation metrics are retained for 90 days.',
       );
     }
-    const rows = await this.prisma.$queryRaw<ExperimentRow[]>`
+    const rows = await this.prisma.$queryRaw<ExperimentRow[]>(Prisma.sql`
       WITH outcomes AS (
         SELECT e."variant", r."id" AS "requestId",
                jsonb_array_length(e."candidateIds") AS "candidateCount",
@@ -249,7 +254,7 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
                  SELECT 1 FROM "OrderItem" oi
                  JOIN "Invoice" i ON i."id" = oi."invoiceId"
                  WHERE oi."orderSessionId" = r."orderSessionId"
-                   AND i."paymentStatus" = 'PAID'
+                   AND i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
                    AND oi."serveStatus" <> 'CANCELLED'
                    AND e."candidateIds" ? oi."menuItemId"
                ) AS attached
@@ -258,10 +263,15 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
           ON r."clientRequestId" = e."clientRequestId"
         LEFT JOIN LATERAL (
           SELECT COUNT(*)::integer AS count,
-                 COALESCE(SUM(i."totalAmount"), 0)::numeric AS revenue
+                 COALESCE(SUM(i."totalAmount" - COALESCE(refunds."amount", 0)), 0)::numeric AS revenue
           FROM "Invoice" i
+          LEFT JOIN LATERAL (
+            SELECT SUM(pr."amount") AS "amount"
+            FROM (${INVOICE_REFUNDS_SQL}) pr
+            WHERE pr."invoiceId" = i."id" AND pr."status" = 'SUCCEEDED'
+          ) refunds ON TRUE
           WHERE i."orderSessionId" = r."orderSessionId"
-            AND i."paymentStatus" = 'PAID'
+            AND i."paymentStatus" IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
         ) paid ON TRUE
         WHERE e."createdAt" >= ${from} AND e."createdAt" < ${to}
       )
@@ -272,7 +282,7 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
              COUNT(*) FILTER (WHERE paid AND attached) AS "attachedOrders",
              COALESCE(SUM(revenue), 0)::numeric AS revenue
       FROM outcomes GROUP BY "variant"
-    `;
+    `);
     return {
       from,
       to,

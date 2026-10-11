@@ -145,8 +145,8 @@ separate staging rehearsal before go-live.
   `POST /api/v1/online-orders/requests`; generate a new ID if the basket's
   starting items change. `CONTROL` intentionally returns no suggestions;
   `TREATMENT` returns up to three currently saleable items with current base
-  prices. The client must never auto-add them. Pairs come from paid, non-refunded
-  invoices in the past 90 days, require at least three distinct invoices, and
+  prices. The client must never auto-add them. Pairs come from paid or partially
+  refunded invoices in the past 90 days (not fully refunded invoices), require at least three distinct invoices, and
   refresh in the background every six hours. Availability is still checked on
   each response; stock is not reserved. The public endpoint is rate-limited
   and stores only the checkout UUID, basket hash, cohort and suggested IDs,
@@ -154,7 +154,10 @@ separate staging rehearsal before go-live.
   changing the basket with that ID returns 409. Staff with `/reports_read` use
   `GET /api/v1/recommendations/experiment?from=<ISO>&to=<ISO>` for the last
   90 days. `assignments` means API responses assigned to a cohort, not verified
-  screen views; `attachedOrders` counts suggested items in paid orders. Compare
+  screen views; `attachedOrders` counts purchased suggested items, not retained
+  items after refunds. Invoice-level refunds cannot identify returned lines.
+  Conversion retains previously paid orders after refunds; `revenue` subtracts
+  only successful refunds. Compare
   paid conversion and revenue per assignment before enabling suggestions for
   everyone. No recommendation is shown until enough paid history exists.
   POS staff with `/orders_sessions_read` can call
@@ -284,3 +287,26 @@ separate staging rehearsal before go-live.
 Deploy the new migrations before calling the reservation-request API. Apply
 permission seed changes to the intended database in a controlled release; code
 deployment alone does not grant existing roles the new audit permission.
+
+## Scheduled Online Orders And Intake Control
+
+Scheduled takeaway tickets and print jobs are held until their persisted release
+time. Managers can pause new online intake with an expiring, versioned setting;
+existing orders and identical retries remain available. See
+[API contracts, KDS polling and migration checks](docs/online-order-preparation.md)
+before deployment or seeding `/online-orders_manage-intake`.
+
+## Optional Manager AI Insights
+
+Business analysis runs asynchronously in the existing application, never in POS
+checkout or public recommendations. It is disabled by default. See
+[configuration, API and activation checks](docs/business-insights.md) before
+enabling Gemini or seeding `/reports_insights_generate` on the intended database.
+
+## Cash Refunds And Order Remakes
+
+Cash refunds post an audited payout in the operator's current cash shift. Full-line
+remakes create nonbillable kitchen work with recipe snapshots and inventory waste,
+without altering the original receipt. See
+[API contracts, limits and accounting behavior](docs/cash-refunds-remakes.md)
+before enabling frontend actions.

@@ -590,6 +590,8 @@ model Employee {
   importedBankStatements      BankStatementImport[]
   paymentAttempts             PaymentAttempt[]                @relation("PaymentAttemptCreatedBy")
   requestedPaymentRefunds     PaymentRefund[]                 @relation("PaymentRefundRequestedBy")
+  cashRefunds                 CashRefund[]
+  orderRemakes                OrderRemake[]
   resolvedPaymentIncidents    PaymentReconciliationIncident[] @relation("PaymentIncidentResolvedBy")
   idempotencyRequests         IdempotencyRequest[]
   requestedPrintJobs          PrintJob[]                      @relation("PrintJobRequestedBy")
@@ -1181,6 +1183,8 @@ model OrderItem {
   recipeIngredients     OrderItemRecipeIngredient[]
   inventoryTransactions InventoryTransaction[]
   kitchenTicketItem     KitchenTicketItem?
+  originalRemake        OrderRemake? @relation("RemakeOriginal")
+  replacementRemake     OrderRemake? @relation("RemakeReplacement")
 
   @@index([orderSessionId])
   @@index([menuItemId])
@@ -1225,11 +1229,50 @@ model Invoice {
   paymentAttempts PaymentAttempt[]
   printJobs       PrintJob[]
   takeawayFeedback TakeawayFeedback?
+  cashRefunds      CashRefund[]
 
   @@index([orderSessionId])
   @@index([employeeId])
   @@index([shiftId])
   @@index([paymentStatus, createdAt])
+  @@index([createdAt])
+}
+
+model CashRefund {
+  id                String @id @default(uuid())
+  amount            Decimal @db.Decimal(18, 2)
+  reason            String @db.VarChar(500)
+  idempotencyKey    String @db.VarChar(120)
+  requestHash       String @db.VarChar(64)
+  completedAt       DateTime @default(now())
+
+  invoiceId         String
+  invoice           Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  requestedById     String
+  requestedBy       Employee @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+  cashTransactionId String @unique
+  cashTransaction   CashTransaction @relation(fields: [cashTransactionId], references: [id], onDelete: Restrict)
+
+  @@unique([requestedById, idempotencyKey])
+  @@index([invoiceId, completedAt])
+  @@index([completedAt])
+}
+
+model OrderRemake {
+  id                String @id @default(uuid())
+  reason            String @db.VarChar(500)
+  idempotencyKey    String @db.VarChar(120)
+  requestHash       String @db.VarChar(64)
+  createdAt         DateTime @default(now())
+
+  originalItemId    String @unique
+  originalItem      OrderItem @relation("RemakeOriginal", fields: [originalItemId], references: [id], onDelete: Restrict)
+  replacementItemId String @unique
+  replacementItem   OrderItem @relation("RemakeReplacement", fields: [replacementItemId], references: [id], onDelete: Restrict)
+  requestedById     String
+  requestedBy       Employee @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@unique([requestedById, idempotencyKey])
   @@index([createdAt])
 }
 
@@ -1287,10 +1330,11 @@ model KitchenStation {
 }
 
 model KitchenTicket {
-  id        String   @id @default(uuid())
-  sequence  Int      @unique @default(autoincrement())
-  dueAt     DateTime
-  createdAt DateTime @default(now())
+  id          String    @id @default(uuid())
+  sequence    Int       @unique @default(autoincrement())
+  dueAt       DateTime
+  availableAt DateTime?
+  createdAt   DateTime  @default(now())
 
   stationId String
   station   KitchenStation @relation(fields: [stationId], references: [id], onDelete: Restrict)
@@ -1302,6 +1346,7 @@ model KitchenTicket {
   printJobs PrintJob[]
 
   @@index([stationId, dueAt, createdAt])
+  @@index([availableAt, stationId])
   @@index([createdAt, stationId])
   @@index([orderSessionId, createdAt])
 }
@@ -1604,6 +1649,7 @@ model CashTransaction {
   invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
 
   expenseRequest CashExpenseRequest?
+  cashRefund     CashRefund?
 
   sourceHandover      CashHandover? @relation("CashHandoverSourceTransaction")
   destinationHandover CashHandover? @relation("CashHandoverDestinationTransaction")

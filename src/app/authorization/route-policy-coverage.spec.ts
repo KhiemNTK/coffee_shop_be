@@ -29,6 +29,7 @@ import { PrintingController } from '../printing/printing.controller';
 import { PromotionsController } from '../promotions/promotions.controller';
 import { RecommendationsController } from '../recommendations/recommendations.controller';
 import { ReportsController } from '../reports/reports.controller';
+import { BusinessInsightsController } from '../reports/business-insights.controller';
 import { ReservationsController } from '../reservations/reservations.controller';
 import { RolesController } from '../roles/roles.controller';
 import { SystemSettingsController } from '../system-settings/system-settings.controller';
@@ -62,6 +63,7 @@ const controllers = [
   PromotionsController,
   RecommendationsController,
   ReportsController,
+  BusinessInsightsController,
   ReservationsController,
   RolesController,
   SystemSettingsController,

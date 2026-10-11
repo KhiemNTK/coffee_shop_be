@@ -86,13 +86,8 @@ export class PrismaService
                 safeArgs.where.deletedAt = null;
               }
 
-              const targetOperation =
-                operation === 'findUnique' ? 'findFirst' : 'findFirstOrThrow';
-
-              const result = await (prismaClient as any)[model][
-                targetOperation
-              ](safeArgs);
-              return result;
+              // Prisma 6 supports non-unique filters; keep the transaction-bound query.
+              return query(safeArgs as typeof args);
             }
 
             if (operation === 'delete') {

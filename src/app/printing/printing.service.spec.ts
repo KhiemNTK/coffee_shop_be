@@ -142,6 +142,30 @@ describe('PrintingService leases', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('cannot release a future kitchen ticket early through admin retry', async () => {
+    const availableAt = new Date(Date.now() + 60_000);
+    const tx = {
+      employee: { findFirst: jest.fn().mockResolvedValue({ id: 'employee' }) },
+      printJob: {
+        findUnique: jest.fn().mockResolvedValue({
+          status: PrintJobStatus.PENDING,
+          deviceId: null,
+          kitchenTicket: { availableAt },
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({}),
+      },
+      actionLog: { create: jest.fn() },
+    };
+    const service = createService({ $transaction: jest.fn((fn) => fn(tx)) });
+    await service.retryJob('job', 'employee', {});
+    expect(tx.printJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ availableAt }),
+      }),
+    );
+  });
+
   it('moves an exhausted failed lease to terminal failed state', async () => {
     const tx = {
       printJob: {

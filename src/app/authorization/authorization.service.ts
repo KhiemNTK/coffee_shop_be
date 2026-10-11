@@ -1,10 +1,19 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import {
   type ExtendedPrismaClient,
   PRISMA_SERVICE_TOKEN,
 } from '../../common/prisma/prisma.service';
-import { AUTH_ERRORS } from '../../common/consts/message';
-import type { AuthorizationContext, PermissionKey } from '../../common/types';
+import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
+import type {
+  AuthorizationContext,
+  ExtendedPrismaTransactionClient,
+  PermissionKey,
+} from '../../common/types';
 import { PermissionCacheService } from './permission-cache.service';
 
 @Injectable()
@@ -21,7 +30,7 @@ export class AuthorizationService {
     const cached = await this.permissionCacheService.get(employeeId);
     if (cached) return cached;
 
-    const context = await this.loadAuthorizationContext(employeeId);
+    const context = await this.getFreshAuthorizationContext(employeeId);
     await this.permissionCacheService.set(employeeId, context);
     return context;
   }
@@ -52,15 +61,31 @@ export class AuthorizationService {
     await this.permissionCacheService.invalidateAll();
   }
 
-  private async loadAuthorizationContext(
+  canGrantPermissions(context: AuthorizationContext, keys: readonly string[]) {
+    const granted = new Set<string>(context.permissionKeys);
+    return keys.every((key) => granted.has(key));
+  }
+
+  assertCanGrantPermissions(
+    context: AuthorizationContext,
+    keys: readonly string[],
+  ) {
+    if (!this.canGrantPermissions(context, keys)) {
+      throw new ForbiddenException(AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE);
+    }
+  }
+
+  async getFreshAuthorizationContext(
     employeeId: string,
+    client: ExtendedPrismaTransactionClient = this.prisma,
   ): Promise<AuthorizationContext> {
-    const employee = await this.prisma.employee.findUnique({
-      where: { id: employeeId },
+    const employee = await client.employee.findUnique({
+      where: { id: employeeId, deletedAt: null },
       select: {
         id: true,
         email: true,
         isActive: true,
+        deletedAt: true,
         employeeRoles: {
           where: {
             role: { deletedAt: null },
@@ -86,7 +111,7 @@ export class AuthorizationService {
       },
     });
 
-    if (!employee || !employee.isActive) {
+    if (!employee || !employee.isActive || employee.deletedAt) {
       throw new UnauthorizedException(AUTH_ERRORS.INACTIVE_EMPLOYEE);
     }
 

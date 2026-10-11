@@ -1,7 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { kebabCase } from 'es-toolkit/compat';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
+
+const toKebabCase = (text: string): string =>
+  text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .replace(/[^a-zA-Z0-9\s-_]/g, '')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .toLowerCase();
+
 @Injectable()
 export class StringUtilService {
   removeSpace(value: string) {
@@ -9,12 +19,7 @@ export class StringUtilService {
   }
 
   toSlug(text: string): string {
-    return kebabCase(
-      text
-        .normalize('NFD') // split VietNamese characters
-        .replace(/[\u0300-\u036f]/g, '') //delete the split characters
-        .replace(/[đĐ]/g, 'd'), //đ to d
-    );
+    return toKebabCase(text);
   }
 
   async hash(value: string) {

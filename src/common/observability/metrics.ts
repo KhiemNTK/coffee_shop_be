@@ -8,6 +8,19 @@ import {
 
 export const metricsRegistry = new Registry();
 
+export const aiInsightRequestsTotal = new Counter({
+  name: 'coffee_shop_ai_insight_requests_total',
+  help: 'Gemini insight requests by bounded outcome.',
+  labelNames: ['outcome'] as const,
+  registers: [metricsRegistry],
+});
+
+export const aiInsightTokensTotal = new Counter({
+  name: 'coffee_shop_ai_insight_tokens_total',
+  help: 'Provider-reported tokens consumed by business insights.',
+  registers: [metricsRegistry],
+});
+
 metricsRegistry.setDefaultLabels({
   service: process.env.APP_NAME ?? 'coffee_shop_be',
 });

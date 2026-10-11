@@ -13,6 +13,10 @@ export const AUTH_ERRORS = {
 
 export const AUTHORIZATION_ERRORS = {
   PERMISSION_DENIED: 'Permission denied',
+  GRANT_OUTSIDE_SCOPE: 'Cannot manage permissions outside your delegated scope',
+  SELF_ACCESS_CHANGE:
+    'Cannot change your own roles or disable your own account',
+  LAST_OWNER: 'At least one active owner must remain',
   POLICY_NOT_CONFIGURED: 'Authorization policy is not configured',
   PERMISSION_NOT_FOUND: 'Permission not found',
   PERMISSION_KEY_EXISTS: 'Permission key already exists',
