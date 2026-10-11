@@ -28,7 +28,9 @@ import {
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import { ONLINE_ORDER_NO_SHOW_GRACE_MS } from '../../common/consts/online-order-settings';
 import { TurnstileService } from '../auth/turnstile.service';
+import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OrdersService } from '../orders/orders.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
@@ -62,7 +64,6 @@ import {
 
 const REVIEW_WINDOW_MS = 30 * 60 * 1000;
 const REORDER_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
-const NO_SHOW_GRACE_MS = 15 * 60 * 1000;
 const CUSTOMER_CANCELLATION_REASON = 'Customer cancelled before preparation.';
 
 const publicRequestSelect = {
@@ -110,6 +111,7 @@ export class OnlineOrdersService {
     private readonly pagination: PaginationUtilService,
     config: ConfigService,
     private readonly turnstile: TurnstileService,
+    private readonly intake: OnlineOrderIntakeService,
   ) {
     this.pickupSchedule = readPickupSchedule(config);
     this.telegramBotUsername = config.get<string>('TELEGRAM_BOT_USERNAME');
@@ -181,20 +183,32 @@ export class OnlineOrdersService {
     }
 
     try {
-      const created = await this.prisma.onlineOrderRequest.create({
-        data: {
-          clientRequestId: dto.clientRequestId,
-          requestHash,
-          reorderNonce: randomBytes(32).toString('hex'),
-          pickupName: dto.pickupName,
-          phoneNumber: dto.phoneNumber,
-          quotedSubtotal,
-          pickupAt: dto.pickupAt,
-          expiresAt: new Date(Date.now() + REVIEW_WINDOW_MS),
-          items: { create: items },
+      const created = await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+          const replay = await tx.onlineOrderRequest.findUnique({
+            where: { clientRequestId: dto.clientRequestId },
+            select: publicRequestSelect,
+          });
+          if (replay) return replay;
+          await this.intake.assertAccepting(tx);
+          return tx.onlineOrderRequest.create({
+            data: {
+              clientRequestId: dto.clientRequestId,
+              requestHash,
+              reorderNonce: randomBytes(32).toString('hex'),
+              pickupName: dto.pickupName,
+              phoneNumber: dto.phoneNumber,
+              quotedSubtotal,
+              pickupAt: dto.pickupAt,
+              expiresAt: new Date(Date.now() + REVIEW_WINDOW_MS),
+              items: { create: items },
+            },
+            select: publicRequestSelect,
+          });
         },
-        select: publicRequestSelect,
-      });
+        { loggerContext: 'Online order submission' },
+      );
       return this.replay(created, requestHash);
     } catch (error) {
       if (
@@ -216,6 +230,8 @@ export class OnlineOrdersService {
     const schedule = this.pickupSchedule;
     if (!schedule)
       return { date, timeZone: 'Asia/Ho_Chi_Minh', enabled: false, slots: [] };
+    if (!(await this.intake.getAvailability()).acceptingOrders)
+      return { date, timeZone: 'Asia/Ho_Chi_Minh', enabled: true, slots: [] };
     const slots = pickupSlotsForDate(date, schedule, new Date());
     if (slots.length === 0)
       return { date, timeZone: 'Asia/Ho_Chi_Minh', enabled: true, slots: [] };
@@ -264,6 +280,7 @@ export class OnlineOrdersService {
           select: {
             orderItems: {
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              where: { replacementRemake: { is: null } },
               select: {
                 id: true,
                 menuItemId: true,
@@ -732,7 +749,9 @@ export class OnlineOrdersService {
 
   async findFulfillment(query: GetPendingOnlineOrdersDto) {
     const now = new Date();
-    const overdueBefore = new Date(now.getTime() - NO_SHOW_GRACE_MS);
+    const overdueBefore = new Date(
+      now.getTime() - ONLINE_ORDER_NO_SHOW_GRACE_MS,
+    );
     const where: Prisma.OnlineOrderRequestWhereInput = {
       status: OnlineOrderStatus.ACCEPTED,
       ...(query.overdueOnly ? { pickupAt: { lt: overdueBefore } } : {}),
@@ -740,6 +759,7 @@ export class OnlineOrdersService {
         is: {
           orderItems: {
             some: {
+              replacementRemake: { is: null },
               serveStatus: {
                 in: [
                   ServeStatus.PENDING,
@@ -773,6 +793,7 @@ export class OnlineOrdersService {
               sessionStatus: true,
               orderItems: {
                 orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+                where: { replacementRemake: { is: null } },
                 select: {
                   id: true,
                   quantity: true,
@@ -833,6 +854,7 @@ export class OnlineOrdersService {
             sessionStatus: true,
             orderItems: {
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              where: { replacementRemake: { is: null } },
               select: {
                 id: true,
                 quantity: true,
@@ -1286,7 +1308,7 @@ export class OnlineOrdersService {
     );
     return (
       now.getTime() >=
-      Math.max(pickupAt.getTime(), lastReadyAt) + NO_SHOW_GRACE_MS
+      Math.max(pickupAt.getTime(), lastReadyAt) + ONLINE_ORDER_NO_SHOW_GRACE_MS
     );
   }
 
@@ -1351,6 +1373,7 @@ export class OnlineOrdersService {
             ),
           })),
           quotes,
+          request.pickupAt ?? undefined,
         );
         const updated = await tx.onlineOrderRequest.updateMany({
           where: {

@@ -11,6 +11,7 @@ import type { InvoicesService } from '../invoices/invoices.service';
 import type { OrdersService } from '../orders/orders.service';
 import type { TurnstileService } from '../auth/turnstile.service';
 import { OnlineOrdersService } from './online-orders.service';
+import type { OnlineOrderIntakeService } from './online-order-intake.service';
 
 describe('OnlineOrdersService Telegram link', () => {
   const requestId = 'd1ebfac7-36dc-442d-9cb0-68be76a5aa9c';
@@ -45,6 +46,7 @@ describe('OnlineOrdersService Telegram link', () => {
     {} as PaginationUtilService,
     config as unknown as ConfigService,
     {} as TurnstileService,
+    {} as OnlineOrderIntakeService,
   );
 
   beforeEach(() => jest.clearAllMocks());

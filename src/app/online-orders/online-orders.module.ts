@@ -6,6 +6,7 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { TurnstileModule } from '../auth/turnstile.module';
 import { OnlineOrdersController } from './online-orders.controller';
 import { OnlineOrdersService } from './online-orders.service';
+import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
 
 @Module({
@@ -17,6 +18,10 @@ import { TelegramNotificationsService } from './telegram-notifications.service';
     PaginationUtilModule,
   ],
   controllers: [OnlineOrdersController],
-  providers: [OnlineOrdersService, TelegramNotificationsService],
+  providers: [
+    OnlineOrdersService,
+    TelegramNotificationsService,
+    OnlineOrderIntakeService,
+  ],
 })
 export class OnlineOrdersModule {}

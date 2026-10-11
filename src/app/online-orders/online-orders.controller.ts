@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   Req,
 } from '@nestjs/common';
@@ -29,8 +30,10 @@ import {
   ReorderTemplateDto,
   RejectOnlineOrderDto,
   RevokeReorderKeyDto,
+  UpdateOnlineOrderIntakeDto,
 } from './dto';
 import { OnlineOrdersService } from './online-orders.service';
+import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
 
 @ApiTags('Online Orders')
@@ -39,7 +42,33 @@ export class OnlineOrdersController {
   constructor(
     private readonly onlineOrders: OnlineOrdersService,
     private readonly telegram: TelegramNotificationsService,
+    private readonly intake: OnlineOrderIntakeService,
   ) {}
+
+  @Get('availability')
+  @SkipAuth()
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  getAvailability() {
+    return this.intake.getAvailability();
+  }
+
+  @Get('intake')
+  @RequirePermissions(PermissionKeys.ONLINE_ORDERS_MANAGE_INTAKE)
+  @Header('Cache-Control', 'no-store')
+  getIntake() {
+    return this.intake.getStatus();
+  }
+
+  @Put('intake')
+  @RequirePermissions(PermissionKeys.ONLINE_ORDERS_MANAGE_INTAKE)
+  @Header('Cache-Control', 'no-store')
+  updateIntake(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: UpdateOnlineOrderIntakeDto,
+  ) {
+    return this.intake.update(employeeId, dto);
+  }
 
   @Post('telegram/webhook')
   @SkipAuth()
