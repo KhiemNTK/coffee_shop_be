@@ -4,7 +4,13 @@ import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import { ThrottlerGuard } from '@nestjs/throttler';
-import { OnlineOrderStatus, PaymentStatus, ServeStatus } from '@prisma/client';
+import {
+  OnlineOrderStatus,
+  PaymentAttemptStatus,
+  PaymentRefundStatus,
+  PaymentStatus,
+  ServeStatus,
+} from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
@@ -23,6 +29,52 @@ describe('Online item recommendations (e2e)', () => {
   const invoices: string[] = [];
   const clients: string[] = [];
   const ids: Record<string, string> = {};
+
+  const createPaymentAttempt = (invoiceId: string) => {
+    const id = randomUUID();
+    return prisma.paymentAttempt.create({
+      data: {
+        invoiceId,
+        status: PaymentAttemptStatus.SUCCEEDED,
+        amount: 35_000,
+        merchantReference: id,
+        providerTransactionNo: id,
+        idempotencyKey: id,
+        requestHash: 'a'.repeat(64),
+        expiresAt: new Date(Date.now() + 60_000),
+        completedAt: new Date(),
+        createdById: ids.employee,
+        shiftId: ids.shift,
+      },
+    });
+  };
+
+  const createRefund = (
+    paymentAttemptId: string,
+    amount: number,
+    status: PaymentRefundStatus,
+  ) => {
+    const id = randomUUID();
+    return prisma.paymentRefund.create({
+      data: {
+        paymentAttemptId,
+        requestedById: ids.employee,
+        type: amount === 35_000 ? 'FULL' : 'PARTIAL',
+        status,
+        amount,
+        reason: 'Recommendation test refund',
+        idempotencyKey: id,
+        requestHash: 'b'.repeat(64),
+        providerRequestId: id,
+        completedAt:
+          status === PaymentRefundStatus.SUCCEEDED ||
+          status === PaymentRefundStatus.FAILED ||
+          status === PaymentRefundStatus.REJECTED
+            ? new Date()
+            : null,
+      },
+    });
+  };
 
   beforeAll(async () => {
     throttleSpy = jest
@@ -55,6 +107,11 @@ describe('Online item recommendations (e2e)', () => {
         },
       })
     ).id;
+    ids.shift = (
+      await prisma.cashierShift.create({
+        data: { employeeId: ids.employee, startingCash: 0 },
+      })
+    ).id;
     ids.category = (
       await prisma.menuCategory.create({
         data: { name: `Recommendation category ${suffix}` },
@@ -79,7 +136,16 @@ describe('Online item recommendations (e2e)', () => {
       })
     ).id;
 
-    for (let index = 0; index < 4; index++) {
+    const paymentStatuses = [
+      PaymentStatus.PAID,
+      PaymentStatus.PAID,
+      PaymentStatus.PARTIALLY_REFUNDED,
+      PaymentStatus.REFUNDED,
+      PaymentStatus.PAID,
+      PaymentStatus.UNPAID,
+      PaymentStatus.VOIDED,
+    ];
+    for (const [index, paymentStatus] of paymentStatuses.entries()) {
       const session = await prisma.orderSession.create({
         data: { employeeId: ids.employee },
       });
@@ -91,8 +157,7 @@ describe('Online item recommendations (e2e)', () => {
           employeeId: ids.employee,
           subTotal: 35_000,
           totalAmount: 35_000,
-          paymentStatus:
-            index === 3 ? PaymentStatus.REFUNDED : PaymentStatus.PAID,
+          paymentStatus,
         },
       });
       invoices.push(invoice.id);
@@ -103,10 +168,23 @@ describe('Online item recommendations (e2e)', () => {
           invoiceId: invoice.id,
           quantity: 1,
           priceAtTime: menuItemId === ids.anchor ? 25_000 : 10_000,
-          serveStatus: ServeStatus.SERVED,
-          isPaid: true,
+          serveStatus:
+            index === 4 && menuItemId === ids.candidate
+              ? ServeStatus.CANCELLED
+              : ServeStatus.SERVED,
+          isPaid:
+            paymentStatus !== PaymentStatus.UNPAID &&
+            paymentStatus !== PaymentStatus.VOIDED,
         })),
       });
+      if (index === 2 || index === 3) {
+        const attempt = await createPaymentAttempt(invoice.id);
+        await createRefund(
+          attempt.id,
+          index === 2 ? 5_000 : 35_000,
+          PaymentRefundStatus.SUCCEEDED,
+        );
+      }
     }
   });
 
@@ -121,8 +199,17 @@ describe('Online item recommendations (e2e)', () => {
       await prisma.orderItem.deleteMany({
         where: { orderSessionId: { in: sessions } },
       });
+      await prisma.paymentRefund.deleteMany({
+        where: { paymentAttempt: { invoiceId: { in: invoices } } },
+      });
+      await prisma.paymentAttempt.deleteMany({
+        where: { invoiceId: { in: invoices } },
+      });
       await prisma.invoice.deleteMany({ where: { id: { in: invoices } } });
       await prisma.orderSession.deleteMany({ where: { id: { in: sessions } } });
+      if (ids.shift) {
+        await prisma.cashierShift.delete({ where: { id: ids.shift } });
+      }
       await prisma.menuItem.deleteMany({
         where: { id: { in: [ids.anchor, ids.candidate] } },
       });
@@ -135,7 +222,7 @@ describe('Online item recommendations (e2e)', () => {
     }
   });
 
-  it('builds paid-order pairs, assigns stable cohorts and counts paid attachment', async () => {
+  it('trains on paid and partial-refund purchases, assigns stable cohorts and counts attachment', async () => {
     const from = new Date(Date.now() - 10_000);
     expect(await recommendations.refreshPairs(true)).toBe(true);
     expect(
@@ -302,5 +389,83 @@ describe('Online item recommendations (e2e)', () => {
         `${prefix}/recommendations/experiment?from=${from.toISOString()}&to=${new Date().toISOString()}`,
       )
       .expect(401);
+  });
+
+  it('keeps purchase conversion and attachment stable while successful refunds restate net revenue', async () => {
+    const from = new Date(Date.now() - 24 * 60 * 60 * 1_000);
+    const to = new Date(from.getTime() + 1);
+    for (const index of [1, 4, 5, 6]) {
+      const clientRequestId = randomUUID();
+      clients.push(clientRequestId);
+      await prisma.recommendationExposure.create({
+        data: {
+          clientRequestId,
+          basketHash: 'c'.repeat(64),
+          variant: 'TREATMENT',
+          candidateIds: [ids.candidate],
+          createdAt: from,
+        },
+      });
+      await prisma.onlineOrderRequest.create({
+        data: {
+          clientRequestId,
+          requestHash: 'd'.repeat(64),
+          pickupName: 'Refund metrics test',
+          phoneNumber: '0901234567',
+          quotedSubtotal: 35_000,
+          expiresAt: new Date(Date.now() + 60_000),
+          status: OnlineOrderStatus.ACCEPTED,
+          reviewedAt: new Date(),
+          reviewedById: ids.employee,
+          orderSessionId: sessions[index],
+        },
+      });
+    }
+    const attempt = await createPaymentAttempt(invoices[1]);
+    for (const status of [
+      PaymentRefundStatus.PENDING,
+      PaymentRefundStatus.PROCESSING,
+      PaymentRefundStatus.FAILED,
+      PaymentRefundStatus.REJECTED,
+      PaymentRefundStatus.REQUIRES_REVIEW,
+    ]) {
+      await createRefund(attempt.id, 1_000, status);
+    }
+    const expectMetrics = async (
+      revenue: string,
+      average: string,
+      perAssignment: string,
+    ) => {
+      const report = await recommendations.getExperiment(from, to);
+      expect(report.variants[1]).toEqual({
+        variant: 'TREATMENT',
+        assignments: 4,
+        offersWithCandidates: 4,
+        requests: 4,
+        paidOrders: 2,
+        attachedOrders: 1,
+        revenue,
+        paidConversionRate: 0.5,
+        attachedPaidOrderRate: 0.5,
+        revenuePerAssignment: perAssignment,
+        averageOrderValue: average,
+      });
+    };
+
+    await expectMetrics('70000.00', '35000.00', '17500.00');
+    await createRefund(attempt.id, 2_500, PaymentRefundStatus.SUCCEEDED);
+    await createRefund(attempt.id, 7_500, PaymentRefundStatus.SUCCEEDED);
+    await prisma.invoice.update({
+      where: { id: invoices[1] },
+      data: { paymentStatus: PaymentStatus.PARTIALLY_REFUNDED },
+    });
+    await expectMetrics('60000.00', '30000.00', '15000.00');
+
+    await createRefund(attempt.id, 25_000, PaymentRefundStatus.SUCCEEDED);
+    await prisma.invoice.update({
+      where: { id: invoices[1] },
+      data: { paymentStatus: PaymentStatus.REFUNDED },
+    });
+    await expectMetrics('35000.00', '17500.00', '8750.00');
   });
 });

@@ -33,7 +33,18 @@ describe('Public menu and reservation request (e2e)', () => {
       .mockResolvedValue(true);
     const module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(TurnstileService)
+      .useValue(
+        new TurnstileService(
+          new ConfigService({
+            NODE_ENV: 'test',
+            TURNSTILE_SECRET_KEY: '',
+            FE_URL: 'http://localhost:3001',
+          }),
+        ),
+      )
+      .compile();
     const expressApp = module.createNestApplication<NestExpressApplication>();
     initApp(expressApp);
     app = expressApp;

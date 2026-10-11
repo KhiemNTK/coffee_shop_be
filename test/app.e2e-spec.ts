@@ -7,6 +7,7 @@ import bcrypt from 'bcrypt';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
+import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
 
@@ -37,7 +38,18 @@ describe('Application security baseline (e2e)', () => {
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(TurnstileService)
+      .useValue(
+        new TurnstileService(
+          new ConfigService({
+            NODE_ENV: 'test',
+            TURNSTILE_SECRET_KEY: '',
+            FE_URL: 'http://localhost:3001',
+          }),
+        ),
+      )
+      .compile();
 
     const expressApp =
       moduleFixture.createNestApplication<NestExpressApplication>();

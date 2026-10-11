@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -7,6 +8,8 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 import {
   FundType,
   OnlineOrderStatus,
+  PrintDeviceStatus,
+  PrintDeviceType,
   PrintJobStatus,
   Prisma,
   ServeStatus,
@@ -17,6 +20,10 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
 import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { OnlineOrdersService } from '../src/app/online-orders/online-orders.service';
+import { OnlineOrderIntakeService } from '../src/app/online-orders/online-order-intake.service';
+import { KitchenService } from '../src/app/kitchen/kitchen.service';
+import { PrintingService } from '../src/app/printing/printing.service';
+import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../src/common/consts/online-order-settings';
 import { vietnamDate } from '../src/app/online-orders/pickup-schedule';
 import { MenuService } from '../src/app/menu/menu.service';
 import { OrdersService } from '../src/app/orders/orders.service';
@@ -24,6 +31,8 @@ import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
 import { ReportsService } from '../src/app/reports/reports.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { PRISMA_SERVICE_TOKEN } from '../src/common/prisma/prisma.service';
+import type { ExtendedPrismaClient } from '../src/common/types';
 import { initApp } from '../src/init';
 
 describe('Remote takeaway orders (e2e)', () => {
@@ -50,12 +59,31 @@ describe('Remote takeaway orders (e2e)', () => {
   });
 
   beforeAll(async () => {
+    const databaseUrl = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['postgres:', 'postgresql:'].includes(databaseUrl.protocol) &&
+        ['127.0.0.1', 'localhost'].includes(databaseUrl.hostname) &&
+        decodeURIComponent(databaseUrl.pathname).endsWith('_test'),
+      'Use a loopback test database, never the business database.',
+    );
     throttleSpy = jest
       .spyOn(ThrottlerGuard.prototype, 'canActivate')
       .mockResolvedValue(true);
     const module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(TurnstileService)
+      .useValue(
+        new TurnstileService(
+          new ConfigService({
+            NODE_ENV: 'test',
+            TURNSTILE_SECRET_KEY: '',
+            FE_URL: 'http://localhost:3001',
+          }),
+        ),
+      )
+      .compile();
     const expressApp = module.createNestApplication<NestExpressApplication>();
     initApp(expressApp);
     app = expressApp;
@@ -182,6 +210,16 @@ describe('Remote takeaway orders (e2e)', () => {
           where: { id: ids.inventoryCategory },
         });
       if (ids.unit) await prisma.unit.deleteMany({ where: { id: ids.unit } });
+      if (ids.releaseInventory)
+        await prisma.inventoryItem.deleteMany({
+          where: { id: ids.releaseInventory },
+        });
+      if (ids.releaseCategory)
+        await prisma.inventoryCategory.deleteMany({
+          where: { id: ids.releaseCategory },
+        });
+      if (ids.releaseUnit)
+        await prisma.unit.deleteMany({ where: { id: ids.releaseUnit } });
       if (ids.station)
         await prisma.kitchenStation.deleteMany({
           where: { id: ids.station },
@@ -189,6 +227,10 @@ describe('Remote takeaway orders (e2e)', () => {
       if (ids.printDevice)
         await prisma.printDevice.deleteMany({
           where: { id: ids.printDevice },
+        });
+      if (ids.releasePrinter)
+        await prisma.printDevice.deleteMany({
+          where: { id: ids.releasePrinter },
         });
       if (ids.category)
         await prisma.menuCategory.deleteMany({
@@ -1099,6 +1141,391 @@ describe('Remote takeaway orders (e2e)', () => {
     ).toBe(OnlineOrderStatus.ACCEPTED);
   });
 
+  it('holds scheduled preparation and printing, then releases without a scheduler', async () => {
+    const kitchen = app.get(KitchenService);
+    const printing = app.get(PrintingService);
+    const date = vietnamDate(new Date(Date.now() + 24 * 60 * 60_000));
+    const slot = (await onlineOrders.getPickupSlots(date)).slots.find(
+      (entry) => entry.remaining > 0,
+    )!;
+    const dto = { ...createDto(), pickupAt: new Date(slot.pickupAt) };
+    clientRequestIds.push(dto.clientRequestId);
+    ids.releaseUnit = (
+      await prisma.unit.create({ data: { name: `release-ml-${suffix}` } })
+    ).id;
+    ids.releaseCategory = (
+      await prisma.inventoryCategory.create({
+        data: { name: `Release ingredients ${suffix}` },
+      })
+    ).id;
+    ids.releaseInventory = (
+      await prisma.inventoryItem.create({
+        data: {
+          name: `Release milk ${suffix}`,
+          categoryId: ids.releaseCategory,
+          unitId: ids.releaseUnit,
+          stock: 10,
+        },
+      })
+    ).id;
+    await prisma.menuItemIngredient.create({
+      data: {
+        menuItemId: ids.menuItem,
+        inventoryItemId: ids.releaseInventory,
+        quantity: '0.1',
+      },
+    });
+    ids.releasePrinter = (
+      await prisma.printDevice.create({
+        data: {
+          name: `Release printer ${suffix}`,
+          type: 'KITCHEN',
+          paperSize: '80mm',
+          apiKeyHash: randomBytes(32).toString('hex'),
+        },
+      })
+    ).id;
+    await prisma.kitchenStation.update({
+      where: { id: ids.station },
+      data: { printDeviceId: ids.releasePrinter },
+    });
+    try {
+      const before = (await kitchen.getWorkload()).stations.find(
+        (station) => station.stationId === ids.station,
+      )!;
+      const created = await onlineOrders.createPublicRequest(dto);
+      const accepted = await onlineOrders.accept(
+        created.requestId,
+        ids.employee,
+      );
+      const ticket = await prisma.kitchenTicket.findFirstOrThrow({
+        where: { orderSessionId: accepted.orderSessionId },
+        include: { items: true, printJobs: true },
+      });
+      const releaseAt = new Date(dto.pickupAt.getTime() - 900_000);
+      expect(ticket.availableAt).toEqual(releaseAt);
+      expect(ticket.dueAt).toEqual(dto.pickupAt);
+      expect(ticket.printJobs).toHaveLength(1);
+      expect(ticket.printJobs[0].availableAt).toEqual(releaseAt);
+      const cancelledDto = { ...dto, clientRequestId: randomUUID() };
+      clientRequestIds.push(cancelledDto.clientRequestId);
+      const cancelled = await onlineOrders.createPublicRequest(cancelledDto);
+      const cancelledSession = await onlineOrders.accept(
+        cancelled.requestId,
+        ids.employee,
+      );
+      await onlineOrders.cancelPublicRequest({
+        requestId: cancelled.requestId,
+        accessToken: cancelled.accessToken,
+      });
+      expect(
+        await prisma.printJob.count({
+          where: {
+            kitchenTicket: { orderSessionId: cancelledSession.orderSessionId },
+            status: PrintJobStatus.CANCELLED,
+          },
+        }),
+      ).toBe(1);
+      const query = {
+        page: 1,
+        itemPerPage: 100,
+        includeCompleted: false,
+        includeScheduled: false,
+        stationId: ids.station,
+      };
+      expect(
+        (await kitchen.getTickets(query)).list.map((entry) => entry.id),
+      ).not.toContain(ticket.id);
+      expect(
+        (await kitchen.getTickets({ ...query, includeScheduled: true })).list,
+      ).toContainEqual(
+        expect.objectContaining({ id: ticket.id, isScheduled: true }),
+      );
+      expect(
+        (await kitchen.getWorkload()).stations.find(
+          (station) => station.stationId === ids.station,
+        )!.openTicketCount,
+      ).toBe(before.openTicketCount);
+      const itemId = ticket.items[0].orderItemId;
+      await expect(
+        orders.updateItemStatus(itemId, ids.employee, {
+          serveStatus: ServeStatus.COOKING,
+        }),
+      ).rejects.toThrow('Scheduled preparation is not due yet.');
+      expect(
+        await prisma.inventoryTransaction.count({
+          where: { orderItemId: itemId },
+        }),
+      ).toBe(0);
+      expect(
+        (
+          await prisma.inventoryItem.findUniqueOrThrow({
+            where: { id: ids.releaseInventory },
+          })
+        ).stock.toFixed(4),
+      ).toBe('10.0000');
+      const device = {
+        id: ids.releasePrinter,
+        type: PrintDeviceType.KITCHEN,
+        status: PrintDeviceStatus.READY,
+      };
+      await printing.retryJob(ticket.printJobs[0].id, ids.employee, {});
+      expect(
+        (await printing.claimJobs(device, { limit: 10 })).jobs,
+      ).toHaveLength(0);
+      await prisma.kitchenStation.update({
+        where: { id: ids.station },
+        data: { prepSlaSeconds: 30 },
+      });
+      expect(
+        (
+          await prisma.kitchenTicket.findUniqueOrThrow({
+            where: { id: ticket.id },
+          })
+        ).availableAt,
+      ).toEqual(releaseAt);
+
+      const now = new Date(Date.now() - 1_000);
+      // Advance only this fixture's release, not the application clock or business data.
+      await prisma.kitchenTicket.update({
+        where: { id: ticket.id },
+        data: { availableAt: now },
+      });
+      await prisma.printJob.update({
+        where: { id: ticket.printJobs[0].id },
+        data: { availableAt: now },
+      });
+      expect(
+        (await kitchen.getTickets(query)).list.map((entry) => entry.id),
+      ).toContain(ticket.id);
+      const claims = await printing.claimJobs(device, { limit: 10 });
+      expect(claims.jobs).toHaveLength(1);
+      await printing.completeJob(
+        device.id,
+        claims.jobs[0].id,
+        claims.jobs[0].leaseToken,
+      );
+      await orders.updateItemStatus(itemId, ids.employee, {
+        serveStatus: ServeStatus.COOKING,
+      });
+      const consumed = await prisma.inventoryTransaction.count({
+        where: { orderItemId: itemId },
+      });
+      expect(consumed).toBeGreaterThan(0);
+      expect(
+        (
+          await prisma.inventoryItem.findUniqueOrThrow({
+            where: { id: ids.releaseInventory },
+          })
+        ).stock.toFixed(4),
+      ).toBe('9.8000');
+      await orders.updateItemStatus(itemId, ids.employee, {
+        serveStatus: ServeStatus.COOKING,
+      });
+      expect(
+        await prisma.inventoryTransaction.count({
+          where: { orderItemId: itemId },
+        }),
+      ).toBe(consumed);
+      await orders.updateItemStatus(itemId, ids.employee, {
+        serveStatus: ServeStatus.READY,
+      });
+
+      const historical = new Date('2002-01-01T00:00:00.000Z');
+      const availableAt = new Date(historical.getTime() + 11 * 60_000);
+      await prisma.kitchenTicket.update({
+        where: { id: ticket.id },
+        data: {
+          createdAt: historical,
+          availableAt,
+          dueAt: new Date(historical.getTime() + 16 * 60_000),
+        },
+      });
+      await prisma.orderItem.update({
+        where: { id: itemId },
+        data: { readyAt: new Date(historical.getTime() + 12 * 60_000) },
+      });
+      await prisma.onlineOrderRequest.update({
+        where: { id: created.requestId },
+        data: {
+          createdAt: historical,
+          reviewedAt: new Date(historical.getTime() + 60_000),
+        },
+      });
+      const period = {
+        from: historical,
+        to: new Date(historical.getTime() + 60 * 60_000),
+        timeZone: 'Asia/Ho_Chi_Minh',
+      };
+      expect(
+        (await reports.getKitchenSla({ ...period, stationId: ids.station }))
+          .stations[0].averageTicketToReadySeconds,
+      ).toBe(60);
+      expect(
+        (await reports.getOnlineOrderJourney(period)).summary
+          .averagePrepSeconds,
+      ).toBe(60);
+    } finally {
+      await prisma.kitchenStation.update({
+        where: { id: ids.station },
+        data: { printDeviceId: null, prepSlaSeconds: 900 },
+      });
+      await prisma.menuItemIngredient.deleteMany({
+        where: { inventoryItemId: ids.releaseInventory },
+      });
+    }
+  });
+
+  it('rolls back acceptance when a scheduled item has no kitchen route', async () => {
+    const date = vietnamDate(new Date(Date.now() + 2 * 24 * 60 * 60_000));
+    const slot = (await onlineOrders.getPickupSlots(date)).slots.find(
+      (entry) => entry.remaining > 0,
+    )!;
+    const dto = { ...createDto(), pickupAt: new Date(slot.pickupAt) };
+    clientRequestIds.push(dto.clientRequestId);
+    const created = await onlineOrders.createPublicRequest(dto);
+    const before = await prisma.orderSession.count({
+      where: { employeeId: ids.employee },
+    });
+    await prisma.menuItem.update({
+      where: { id: ids.menuItem },
+      data: { kitchenStationId: null },
+    });
+    try {
+      await expect(
+        onlineOrders.accept(created.requestId, ids.employee),
+      ).rejects.toThrow('Scheduled orders require a kitchen station');
+      expect(
+        await prisma.orderSession.count({
+          where: { employeeId: ids.employee },
+        }),
+      ).toBe(before);
+      expect(
+        (
+          await prisma.onlineOrderRequest.findUniqueOrThrow({
+            where: { id: created.requestId },
+          })
+        ).status,
+      ).toBe(OnlineOrderStatus.PENDING);
+    } finally {
+      await prisma.menuItem.update({
+        where: { id: ids.menuItem },
+        data: { kitchenStationId: ids.station },
+      });
+    }
+  });
+
+  it('keeps extended soft-delete reads inside the transaction and preserves rollback', async () => {
+    const db = app.get<ExtendedPrismaClient>(PRISMA_SERVICE_TOKEN);
+    const key = `test.intake.${randomUUID()}`;
+    await expect(
+      db.$transaction(async (tx) => {
+        const setting = await tx.systemSetting.create({
+          data: { key, value: {}, valueType: 'JSON' },
+        });
+        expect(
+          (await tx.systemSetting.findUnique({ where: { key } }))?.id,
+        ).toBe(setting.id);
+        await tx.systemSetting.update({
+          where: { key },
+          data: { deletedAt: new Date() },
+        });
+        expect(
+          await tx.systemSetting.findUnique({ where: { key } }),
+        ).toBeNull();
+        await expect(
+          tx.systemSetting.findUniqueOrThrow({ where: { key } }),
+        ).rejects.toMatchObject({ code: 'P2025' });
+        throw new Error('rollback fixture');
+      }),
+    ).rejects.toThrow('rollback fixture');
+    expect(
+      await prisma.systemSetting.findUnique({ where: { key } }),
+    ).toBeNull();
+  });
+
+  it('pauses only new intake, preserves retries, and rejects concurrent stale manager updates', async () => {
+    const intake = app.get(OnlineOrderIntakeService);
+    expect((await intake.getStatus()).version).toBe(0);
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const created = await onlineOrders.createPublicRequest(dto);
+    const newDto = createDto();
+    clientRequestIds.push(newDto.clientRequestId);
+    try {
+      await intake.update(ids.employee, {
+        expectedVersion: 0,
+        pausedUntil: new Date(Date.now() + 60_000).toISOString(),
+        reason: 'Kitchen busy',
+      });
+      const availability = await request(app.getHttpServer())
+        .get(`${prefix}/online-orders/availability`)
+        .expect(200);
+      expect(availability.headers['cache-control']).toBe('no-store');
+      expect(availability.body.data).toMatchObject({
+        acceptingOrders: false,
+        reason: 'Kitchen busy',
+      });
+      await request(app.getHttpServer())
+        .put(`${prefix}/online-orders/intake`)
+        .send({ expectedVersion: 1, pausedUntil: null, reason: null })
+        .expect(401);
+      await expect(onlineOrders.createPublicRequest(newDto)).rejects.toThrow(
+        'Online ordering is temporarily paused.',
+      );
+      expect(await onlineOrders.createPublicRequest(dto)).toEqual(created);
+      expect(
+        (await onlineOrders.accept(created.requestId, ids.employee)).status,
+      ).toBe(OnlineOrderStatus.ACCEPTED);
+      const race = await Promise.allSettled(
+        [0, 1].map(() =>
+          intake.update(ids.employee, {
+            expectedVersion: 1,
+            pausedUntil: null,
+            reason: null,
+          }),
+        ),
+      );
+      expect(race.filter((entry) => entry.status === 'fulfilled')).toHaveLength(
+        1,
+      );
+      expect(race.filter((entry) => entry.status === 'rejected')).toHaveLength(
+        1,
+      );
+      expect((await intake.getStatus()).version).toBe(2);
+      expect(
+        await prisma.systemSettingRevision.count({
+          where: { setting: { key: ONLINE_ORDER_INTAKE_SETTING_KEY } },
+        }),
+      ).toBe(2);
+      await onlineOrders.createPublicRequest(newDto);
+      await prisma.systemSetting.update({
+        where: { key: ONLINE_ORDER_INTAKE_SETTING_KEY },
+        data: {
+          value: {
+            pausedUntil: new Date(Date.now() - 1_000).toISOString(),
+            reason: 'Expired pause',
+          },
+        },
+      });
+      expect((await intake.getAvailability()).acceptingOrders).toBe(true);
+      await prisma.systemSetting.update({
+        where: { key: ONLINE_ORDER_INTAKE_SETTING_KEY },
+        data: { deletedAt: new Date() },
+      });
+      await expect(intake.getStatus()).rejects.toThrow(
+        'Online intake configuration is invalid.',
+      );
+    } finally {
+      await prisma.systemSettingRevision.deleteMany({
+        where: { setting: { key: ONLINE_ORDER_INTAKE_SETTING_KEY } },
+      });
+      await prisma.systemSetting.deleteMany({
+        where: { key: ONLINE_ORDER_INTAKE_SETTING_KEY },
+      });
+    }
+  });
+
   it('records no-show only after the scheduled and kitchen-ready grace periods', async () => {
     const date = vietnamDate(new Date(Date.now() + 24 * 60 * 60 * 1000));
     const slots = await onlineOrders.getPickupSlots(date);
@@ -1110,6 +1537,10 @@ describe('Remote takeaway orders (e2e)', () => {
     const accepted = await onlineOrders.accept(created.requestId, ids.employee);
     const item = await prisma.orderItem.findFirstOrThrow({
       where: { orderSessionId: accepted.orderSessionId },
+    });
+    await prisma.kitchenTicket.updateMany({
+      where: { orderSessionId: accepted.orderSessionId },
+      data: { availableAt: new Date(Date.now() - 60_000) },
     });
     await orders.updateItemStatus(item.id, ids.employee, {
       serveStatus: ServeStatus.COOKING,
