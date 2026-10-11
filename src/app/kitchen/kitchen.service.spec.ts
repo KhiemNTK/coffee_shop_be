@@ -4,7 +4,11 @@ import { KitchenService } from './kitchen.service';
 
 describe('KitchenService ticket state', () => {
   const prisma = {
-    kitchenTicket: { findUnique: jest.fn() },
+    kitchenTicket: {
+      findUnique: jest.fn(),
+      count: jest.fn(),
+      findMany: jest.fn(),
+    },
     kitchenStation: { count: jest.fn(), findMany: jest.fn() },
     $queryRaw: jest.fn(),
   };
@@ -32,6 +36,44 @@ describe('KitchenService ticket state', () => {
   });
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('keeps scheduled tickets out of the active queue unless explicitly requested', async () => {
+    prisma.kitchenTicket.count.mockResolvedValue(0);
+    prisma.kitchenTicket.findMany.mockResolvedValue([]);
+    await service.getTickets({
+      page: 1,
+      itemPerPage: 50,
+      includeCompleted: false,
+      includeScheduled: false,
+    });
+    expect(prisma.kitchenTicket.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { availableAt: null },
+            { availableAt: { lte: expect.any(Date) } },
+          ],
+        }),
+      }),
+    );
+    await service.getTickets({
+      page: 1,
+      itemPerPage: 50,
+      includeCompleted: false,
+      includeScheduled: true,
+    });
+    expect(
+      prisma.kitchenTicket.findMany.mock.calls[1][0].where,
+    ).not.toHaveProperty('OR');
+    prisma.kitchenTicket.findUnique.mockResolvedValue({
+      ...ticket([ServeStatus.PENDING]),
+      availableAt: new Date(Date.now() + 60_000),
+    });
+    expect(await service.getTicket('ticket-id')).toMatchObject({
+      state: 'PENDING',
+      isScheduled: true,
+    });
+  });
 
   it('uses the same active keyword scope for station count and paginated lookup', async () => {
     prisma.kitchenStation.count.mockResolvedValue(51);

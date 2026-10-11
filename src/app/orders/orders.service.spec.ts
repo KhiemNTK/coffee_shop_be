@@ -281,6 +281,25 @@ describe('OrdersService', () => {
     expect(result.serveStatus).toBe(ServeStatus.COOKING);
   });
 
+  it('does not mutate status, consume stock or publish before scheduled release', async () => {
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'order-item-id',
+      serveStatus: ServeStatus.PENDING,
+      orderSession: { sessionStatus: SessionStatus.ACTIVE, tableId: null },
+      kitchenTicketItem: {
+        ticket: { availableAt: new Date(Date.now() + 60_000) },
+      },
+    });
+    await expect(
+      service.updateItemStatus('order-item-id', 'employee-id', {
+        serveStatus: ServeStatus.COOKING,
+      }),
+    ).rejects.toThrow('Scheduled preparation is not due yet.');
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
   it('treats a repeated cooking status request as a no-op', async () => {
     const cookingItem = {
       id: 'order-item-id',
@@ -1034,9 +1053,12 @@ describe('OrdersService', () => {
             is: {
               tableId: null,
               sessionStatus: { not: SessionStatus.CANCELLED },
-              onlineOrderRequest: { is: null },
             },
           },
+          OR: [
+            { orderSession: { is: { onlineOrderRequest: { is: null } } } },
+            { replacementRemake: { isNot: null } },
+          ],
         },
         take: 20,
       }),

@@ -3,6 +3,96 @@ import { KitchenRoutingService } from './kitchen-routing.service';
 import { PrintingService } from '../printing/printing.service';
 
 describe('KitchenRoutingService', () => {
+  it('snapshots station-specific release times and holds printing until release', async () => {
+    const pickupAt = new Date(Date.now() + 60 * 60_000);
+    const printing = { enqueueKitchenTicket: jest.fn() };
+    const tx = {
+      orderSession: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({ table: null }),
+      },
+      kitchenTicket: {
+        create: jest.fn(({ data }) =>
+          Promise.resolve({
+            ...data,
+            id: data.stationId,
+            sequence: 1,
+            items: [],
+          }),
+        ),
+      },
+    };
+    const station = (id: string, prepSlaSeconds: number) => ({
+      id,
+      code: id,
+      name: id,
+      prepSlaSeconds,
+      printDevice: { id: 'printer', isActive: true, deletedAt: null },
+    });
+    const input = {
+      orderSessionId: 'session',
+      pickupAt,
+      menuItems: [
+        {
+          id: 'coffee',
+          name: 'Coffee',
+          price: new Prisma.Decimal(1),
+          kitchenStation: station('bar', 300),
+        },
+        {
+          id: 'cake',
+          name: 'Cake',
+          price: new Prisma.Decimal(1),
+          kitchenStation: station('bakery', 600),
+        },
+      ],
+      orderItems: [
+        {
+          id: 'coffee-order',
+          menuItemId: 'coffee',
+          quantity: 1,
+          note: null,
+          selectedOptions: [],
+        },
+        {
+          id: 'cake-order',
+          menuItemId: 'cake',
+          quantity: 1,
+          note: null,
+          selectedOptions: [],
+        },
+      ],
+    };
+    const service = new KitchenRoutingService(printing as never);
+    await service.createTickets(tx as never, input);
+    expect(
+      tx.kitchenTicket.create.mock.calls.map(([call]) => call.data.availableAt),
+    ).toEqual([
+      new Date(pickupAt.getTime() - 300_000),
+      new Date(pickupAt.getTime() - 600_000),
+    ]);
+    expect(printing.enqueueKitchenTicket).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        availableAt: new Date(pickupAt.getTime() - 300_000),
+      }),
+    );
+    await expect(
+      service.createTickets(tx as never, {
+        ...input,
+        pickupAt: new Date(Date.now() - 1),
+      }),
+    ).rejects.toThrow('Pickup time has elapsed.');
+    await expect(
+      service.createTickets(tx as never, {
+        ...input,
+        menuItems: input.menuItems.map((item) => ({
+          ...item,
+          kitchenStation: null,
+        })),
+      }),
+    ).rejects.toThrow('Scheduled orders require a kitchen station');
+  });
+
   it('creates one ticket per station and only enqueues configured printers', async () => {
     const printing = {
       enqueueKitchenTicket: jest.fn().mockResolvedValue({ id: 'print-job' }),

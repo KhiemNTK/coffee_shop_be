@@ -33,6 +33,9 @@ const KITCHEN_TICKET_INCLUDE = {
       orderItem: {
         select: {
           serveStatus: true,
+          replacementRemake: {
+            select: { id: true, originalItemId: true, reason: true },
+          },
           orderSession: {
             select: { table: { select: { id: true, name: true } } },
           },
@@ -207,12 +210,13 @@ export class KitchenService {
     const dueSoonAt = new Date(asOf.getTime() + DUE_SOON_WINDOW_MS);
     const rows = await this.prisma.$queryRaw<KitchenWorkloadRow[]>(Prisma.sql`
       WITH active_tickets AS (
-        SELECT kt."id", kt."stationId", kt."createdAt", kt."dueAt",
+        SELECT kt."id", kt."stationId", COALESCE(kt."availableAt", kt."createdAt") AS "createdAt", kt."dueAt",
                SUM(ti."quantity")::bigint AS "openUnits"
         FROM "OrderItem" oi
         JOIN "KitchenTicketItem" ti ON ti."orderItemId" = oi."id"
         JOIN "KitchenTicket" kt ON kt."id" = ti."ticketId"
         WHERE oi."serveStatus" IN ('PENDING', 'COOKING')
+          AND (kt."availableAt" IS NULL OR kt."availableAt" <= ${asOf})
         GROUP BY kt."id", kt."stationId", kt."createdAt", kt."dueAt"
       )
       SELECT s."id" AS "stationId", s."code" AS "stationCode",
@@ -261,6 +265,11 @@ export class KitchenService {
   ): Prisma.KitchenTicketWhereInput {
     return {
       ...(query.stationId ? { stationId: query.stationId } : {}),
+      ...(query.includeScheduled
+        ? {}
+        : {
+            OR: [{ availableAt: null }, { availableAt: { lte: new Date() } }],
+          }),
       ...(query.includeCompleted
         ? {}
         : {
@@ -289,6 +298,10 @@ export class KitchenService {
         (state === 'PENDING' || state === 'IN_PROGRESS') &&
         ticket.dueAt.getTime() < Date.now(),
       dueAt: ticket.dueAt,
+      availableAt: ticket.availableAt ?? ticket.createdAt,
+      isScheduled: Boolean(
+        ticket.availableAt && ticket.availableAt > new Date(),
+      ),
       createdAt: ticket.createdAt,
       station: ticket.station,
       orderSessionId: ticket.orderSessionId,
@@ -301,6 +314,7 @@ export class KitchenService {
         note: item.note,
         selectedOptions: item.selectedOptions,
         serveStatus: item.orderItem.serveStatus,
+        remake: item.orderItem.replacementRemake ?? null,
         currentTable: item.orderItem.orderSession.table,
       })),
     };

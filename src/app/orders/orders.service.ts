@@ -1,4 +1,9 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -21,6 +26,7 @@ import {
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  RemakeOrderItemDto,
   GetHandoffItemsDto,
   GetOpenTakeawayFeedbackCasesDto,
   GetTakeawayFeedbackDto,
@@ -42,6 +48,7 @@ import type {
   ExtendedPrismaTransactionClient,
   OpenSessionInput,
   OrderEventBase,
+  OrderEventPayloadMap,
   SplittableOrderItem,
 } from '../../common/types';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
@@ -130,6 +137,12 @@ export class OrdersService {
     orderItems: {
       include: {
         menuItem: true,
+        originalRemake: {
+          select: { id: true, replacementItemId: true, reason: true },
+        },
+        replacementRemake: {
+          select: { id: true, originalItemId: true, reason: true },
+        },
       },
       orderBy: {
         createdAt: 'asc' as const,
@@ -376,9 +389,12 @@ export class OrdersService {
         is: {
           tableId: null,
           sessionStatus: { not: SessionStatus.CANCELLED },
-          onlineOrderRequest: { is: null },
         },
       },
+      OR: [
+        { orderSession: { is: { onlineOrderRequest: { is: null } } } },
+        { replacementRemake: { isNot: null } },
+      ],
     };
     const totalItems = await this.prisma.orderItem.count({ where });
     const paging = this.pagination.paging({ ...query, totalItems });
@@ -392,6 +408,9 @@ export class OrdersService {
         quantity: true,
         readyAt: true,
         orderSessionId: true,
+        replacementRemake: {
+          select: { id: true, originalItemId: true, reason: true },
+        },
         menuItem: { select: { name: true } },
         kitchenTicketItem: {
           select: {
@@ -883,9 +902,16 @@ export class OrdersService {
       unitPrice: Prisma.Decimal;
       selectedOptions: SelectedMenuOption[];
     }>,
+    pickupAt?: Date,
   ) {
     const session = await this.createOrderSession(tx, { employeeId });
-    await this.addOrderItemsInTransaction(tx, session.id, items, quotes);
+    await this.addOrderItemsInTransaction(
+      tx,
+      session.id,
+      items,
+      quotes,
+      pickupAt,
+    );
     return session.id;
   }
 
@@ -897,6 +923,7 @@ export class OrdersService {
       unitPrice: Prisma.Decimal;
       selectedOptions: SelectedMenuOption[];
     }>,
+    pickupAt?: Date,
   ) {
     const menuItemIds = [...new Set(items.map((item) => item.menuItemId))];
     const session = await tx.orderSession.findUnique({
@@ -1007,6 +1034,7 @@ export class OrdersService {
       orderSessionId,
       menuItems,
       orderItems: createdItems,
+      pickupAt,
     });
 
     const updatedSession = await tx.orderSession.findUnique({
@@ -1048,6 +1076,178 @@ export class OrdersService {
     return this.changeItemStatus(id, employeeId, ServeStatus.SERVED, true);
   }
 
+  remakeItem(
+    originalItemId: string,
+    employeeId: string,
+    dto: RemakeOrderItemDto,
+  ) {
+    const request = { originalItemId, reason: dto.reason };
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify(request))
+      .digest('hex');
+    return this.idempotency
+      .execute(
+        {
+          employeeId,
+          operation: 'order-item.remake',
+          key: dto.idempotencyKey,
+          request,
+        },
+        async (tx) => {
+          await this.assertActiveEmployee(tx, employeeId);
+          const replay = await tx.orderRemake.findUnique({
+            where: {
+              requestedById_idempotencyKey: {
+                requestedById: employeeId,
+                idempotencyKey: dto.idempotencyKey,
+              },
+            },
+            include: { replacementItem: true },
+          });
+          if (replay) {
+            if (replay.requestHash !== requestHash)
+              throw new ConflictException(
+                'Idempotency key was used for a different remake.',
+              );
+            return replay;
+          }
+          const original = await tx.orderItem.findUnique({
+            where: { id: originalItemId },
+            include: {
+              orderSession: true,
+              invoice: true,
+              originalRemake: true,
+              replacementRemake: true,
+              recipeIngredients: true,
+              ingredientSnapshots: true,
+              menuItem: {
+                include: { kitchenStation: { include: { printDevice: true } } },
+              },
+            },
+          });
+          if (!original) throw new NotFoundException('Order item not found.');
+          if (
+            !original.isPaid ||
+            original.serveStatus !== ServeStatus.SERVED ||
+            original.invoice?.paymentStatus !== PaymentStatus.PAID ||
+            original.orderSession.sessionStatus === SessionStatus.CANCELLED ||
+            (original.orderSession.tableId !== null &&
+              original.orderSession.sessionStatus !== SessionStatus.ACTIVE)
+          ) {
+            throw new ConflictException(
+              'Only a handed-off item on a paid invoice can be remade.',
+            );
+          }
+          if (original.originalRemake || original.replacementRemake)
+            throw new ConflictException(
+              'This order line has already been remade.',
+            );
+          const station = original.menuItem.kitchenStation;
+          if (
+            original.menuItem.deletedAt ||
+            !station ||
+            station.deletedAt ||
+            !station.isActive
+          ) {
+            throw new ConflictException(
+              'An active menu item and kitchen station are required.',
+            );
+          }
+          if (
+            !original.recipeSnapshottedAt &&
+            original.ingredientSnapshots.length === 0
+          ) {
+            throw new ConflictException(
+              'The original recipe snapshot is unavailable.',
+            );
+          }
+          const recipe = original.recipeSnapshottedAt
+            ? original.recipeIngredients
+            : original.ingredientSnapshots;
+          const replacement = await tx.orderItem.create({
+            data: {
+              orderSessionId: original.orderSessionId,
+              menuItemId: original.menuItemId,
+              quantity: original.quantity,
+              priceAtTime: 0,
+              isPaid: true,
+              note: `Remake: ${dto.reason}`,
+              selectedOptions: readSelectedOptions(original.selectedOptions),
+              recipeSnapshottedAt: new Date(),
+              recipeIngredients: {
+                create: recipe.map((ingredient) => ({
+                  inventoryItemId: ingredient.inventoryItemId,
+                  quantityPerItem: ingredient.quantityPerItem,
+                })),
+              },
+            },
+          });
+          const remake = await tx.orderRemake.create({
+            data: {
+              originalItemId,
+              replacementItemId: replacement.id,
+              requestedById: employeeId,
+              reason: dto.reason,
+              idempotencyKey: dto.idempotencyKey,
+              requestHash,
+            },
+            include: { replacementItem: true },
+          });
+          await this.inventoryConsumption.recordWaste(tx, {
+            orderItemId: originalItemId,
+            employeeId,
+            reason: dto.reason,
+          });
+          const tickets = await this.kitchenRouting.createTickets(tx, {
+            orderSessionId: original.orderSessionId,
+            menuItems: [original.menuItem],
+            orderItems: [replacement],
+          });
+          await tx.actionLog.create({
+            data: {
+              employeeId,
+              actionType: 'ORDER_ITEM_REMADE',
+              details: {
+                remakeId: remake.id,
+                originalItemId,
+                replacementItemId: replacement.id,
+                invoiceId: original.invoiceId,
+                quantity: original.quantity,
+                reason: dto.reason,
+              },
+            },
+          });
+          await this.enqueueOrderEvent(
+            tx,
+            ORDER_EVENTS.ITEMS_ADDED,
+            'OrderRemake',
+            remake.id,
+            {
+              ...this.createEventBase([original.orderSession.tableId]),
+              sessionId: original.orderSessionId,
+              tableId: original.orderSession.tableId,
+              orderItemIds: [replacement.id],
+              kitchenTicketIds: tickets.map(({ id }) => id),
+            },
+          );
+          return remake;
+        },
+      )
+      .catch((error: unknown) => {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002' &&
+          Array.isArray(error.meta?.target) &&
+          error.meta.target.includes('originalItemId')
+        ) {
+          throw new ConflictException(
+            'This order line has already been remade.',
+          );
+        }
+        throw error;
+      });
+  }
+
   private async changeItemStatus(
     id: string,
     employeeId: string,
@@ -1063,7 +1263,11 @@ export class OrdersService {
           orderSession: {
             include: { onlineOrderRequest: { select: { id: true } } },
           },
+          kitchenTicketItem: {
+            select: { ticket: { select: { availableAt: true } } },
+          },
           menuItem: true,
+          replacementRemake: { select: { id: true } },
           invoice: {
             select: {
               paymentStatus: true,
@@ -1082,7 +1286,8 @@ export class OrdersService {
       if (
         item.orderSession.sessionStatus === SessionStatus.CANCELLED ||
         (item.orderSession.sessionStatus === SessionStatus.COMPLETED &&
-          !item.invoiceId)
+          !item.invoiceId &&
+          !item.replacementRemake)
       ) {
         throw new BadRequestException(
           'Cannot update item status in this order session.',
@@ -1094,6 +1299,7 @@ export class OrdersService {
       if (
         serveStatus === ServeStatus.SERVED &&
         item.orderSession.onlineOrderRequest &&
+        !item.replacementRemake &&
         !pickup
       ) {
         throw new ConflictException(
@@ -1139,6 +1345,14 @@ export class OrdersService {
         item.serveStatus,
         serveStatus,
       );
+
+      if (
+        serveStatus === ServeStatus.COOKING &&
+        item.kitchenTicketItem?.ticket.availableAt &&
+        item.kitchenTicketItem.ticket.availableAt > new Date()
+      ) {
+        throw new ConflictException('Scheduled preparation is not due yet.');
+      }
 
       const updateResult = await tx.orderItem.updateMany({
         where: {
@@ -1243,6 +1457,7 @@ export class OrdersService {
         where: { id },
         include: {
           orderSession: true,
+          replacementRemake: { select: { id: true } },
         },
       });
 
@@ -1250,14 +1465,23 @@ export class OrdersService {
         throw new NotFoundException(`Order item with ID ${id} not found.`);
       }
 
-      this.orderPolicy.assertNoPaidOrInvoicedItems(
-        [item],
-        'Cannot cancel a paid or invoiced order item.',
-      );
-      this.orderPolicy.assertActiveSession(
-        item.orderSession.sessionStatus,
-        'Cannot cancel item in an inactive order session.',
-      );
+      if (!item.replacementRemake) {
+        this.orderPolicy.assertNoPaidOrInvoicedItems(
+          [item],
+          'Cannot cancel a paid or invoiced order item.',
+        );
+        this.orderPolicy.assertActiveSession(
+          item.orderSession.sessionStatus,
+          'Cannot cancel item in an inactive order session.',
+        );
+      } else if (
+        item.orderSession.sessionStatus === SessionStatus.CANCELLED ||
+        item.serveStatus === ServeStatus.SERVED
+      ) {
+        throw new ConflictException(
+          'Cannot cancel a handed-off remake or a cancelled session.',
+        );
+      }
 
       if (item.serveStatus === ServeStatus.CANCELLED) {
         throw new BadRequestException('Order item is already cancelled.');
@@ -1280,12 +1504,12 @@ export class OrdersService {
       const updateResult = await tx.orderItem.updateMany({
         where: {
           id,
-          isPaid: false,
+          isPaid: item.replacementRemake ? true : false,
           invoiceId: null,
           serveStatus: item.serveStatus,
           orderSession: {
             is: {
-              sessionStatus: SessionStatus.ACTIVE,
+              sessionStatus: item.orderSession.sessionStatus,
             },
           },
         },
@@ -2023,12 +2247,12 @@ export class OrdersService {
     return result.response;
   }
 
-  private enqueueOrderEvent(
+  private enqueueOrderEvent<K extends keyof OrderEventPayloadMap>(
     tx: ExtendedPrismaTransactionClient,
-    eventName: string,
+    eventName: K,
     aggregateType: string,
     aggregateId: string,
-    payload: unknown,
+    payload: OrderEventPayloadMap[K],
   ) {
     return this.outbox.enqueue(tx, {
       topic: 'order',

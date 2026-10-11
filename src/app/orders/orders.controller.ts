@@ -15,6 +15,7 @@ import { Throttle } from '@nestjs/throttler';
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  RemakeOrderItemDto,
   GetHandoffItemsDto,
   GetOpenTakeawayFeedbackCasesDto,
   GetTakeawayFeedbackDto,
@@ -193,6 +194,16 @@ export class OrdersController {
       employeeId,
       updateItemStatusDto,
     );
+  }
+
+  @Post('items/:id/remake')
+  @RequirePermissions(PermissionKeys.ORDERS_ITEMS_REMAKE)
+  remakeItem(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: RemakeOrderItemDto,
+  ) {
+    return this.ordersService.remakeItem(id, employeeId, dto);
   }
 
   @Post('items/:id/handoff')

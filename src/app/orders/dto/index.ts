@@ -5,6 +5,7 @@ export * from './get-handoff-items.dto';
 export * from './pickup-code.dto';
 export * from './takeaway-feedback.dto';
 export * from './cancel-item.dto';
+export * from './remake-item.dto';
 export * from './transfer-dining-table.dto';
 export * from './merge-dining-table.dto';
 export * from './split-dining-table.dto';
