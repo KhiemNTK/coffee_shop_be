@@ -535,9 +535,14 @@ export class CashierShiftsService {
     });
     const movementGroups = await tx.cashTransaction.groupBy({
       by: ['type'],
-      where: { shiftId: shift.id, invoiceId: null },
+      where: { shiftId: shift.id, invoiceId: null, cashRefund: { is: null } },
       _sum: { amount: true },
     });
+    const cashRefunds = await tx.cashRefund.aggregate({
+      where: { cashTransaction: { shiftId: shift.id } },
+      _sum: { amount: true },
+    });
+    const cashRefundAmount = cashRefunds._sum.amount ?? new Prisma.Decimal(0);
 
     const invoiceTotals = {
       paidInvoiceCount: invoiceGroups.reduce(
@@ -578,10 +583,12 @@ export class CashierShiftsService {
     return {
       ...invoiceTotals,
       ...manualTotals,
+      cashRefundAmount,
       actualEndingCash: shift.expectedStartingCash
         .plus(invoiceTotals.cashSales)
         .plus(manualTotals.manualIncome)
-        .minus(manualTotals.manualExpense),
+        .minus(manualTotals.manualExpense)
+        .minus(cashRefundAmount),
     };
   }
 

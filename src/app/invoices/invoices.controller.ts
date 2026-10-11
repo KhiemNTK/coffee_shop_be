@@ -15,15 +15,37 @@ import { RequirePermissions } from '../authorization/authorization.decorator';
 import {
   CheckoutInvoiceDto,
   CreateInvoiceDto,
+  CreateCashRefundDto,
+  GetCashRefundsDto,
   GetInvoicesPaginationDto,
   UpdateInvoicePaymentDto,
 } from './dto';
 import { InvoicesService } from './invoices.service';
+import { CashRefundsService } from './cash-refunds.service';
 
 @ApiTags('Invoices')
 @Controller('invoices')
 export class InvoicesController {
-  constructor(private readonly invoicesService: InvoicesService) {}
+  constructor(
+    private readonly invoicesService: InvoicesService,
+    private readonly cashRefunds: CashRefundsService,
+  ) {}
+
+  @Post(':id/cash-refunds')
+  @RequirePermissions(PermissionKeys.CASH_REFUNDS_CREATE)
+  createCashRefund(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CreateCashRefundDto,
+  ) {
+    return this.cashRefunds.create(id, employeeId, dto);
+  }
+
+  @Get(':id/cash-refunds')
+  @RequirePermissions(PermissionKeys.PAYMENT_REFUNDS_READ)
+  findCashRefunds(@Param() { id }: IDDto, @Query() query: GetCashRefundsDto) {
+    return this.cashRefunds.find(id, query);
+  }
 
   @Post()
   @RequirePermissions(PermissionKeys.INVOICES_CREATE)

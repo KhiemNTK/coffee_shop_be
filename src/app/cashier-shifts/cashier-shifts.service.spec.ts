@@ -59,6 +59,9 @@ describe('CashierShiftsService', () => {
       paymentRefund: {
         aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
       },
+      cashRefund: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
+      },
       systemSetting: {
         findFirst: jest.fn().mockResolvedValue({ value: 500000 }),
       },

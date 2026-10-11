@@ -65,6 +65,9 @@ export class InvoicesService {
   private readonly invoiceInclude = {
     orderItems: {
       include: {
+        originalRemake: {
+          select: { id: true, replacementItemId: true, reason: true },
+        },
         menuItem: {
           select: {
             id: true,
