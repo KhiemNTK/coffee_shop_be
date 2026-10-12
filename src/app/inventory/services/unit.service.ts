@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { ExtendedPrismaTransactionClient } from '../../../common/types';
 import { PaginationUtilService } from '../../../common/utils/pagination-util/pagination-util.service';
@@ -92,6 +96,24 @@ export class UnitService {
 
     return this.inventoryTransactionService.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
+      const existing = await tx.unit.findFirst({
+        where: { id, deletedAt: null },
+        select: { name: true },
+      });
+      if (!existing)
+        throw new NotFoundException(`Unit with ID ${id} not found.`);
+      if (dto.name !== undefined && dto.name !== existing.name) {
+        // Historical items must retain their measurement meaning after soft deletion.
+        const [usage] = await tx.$queryRaw<{ used: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM "InventoryItem" WHERE "unitId" = ${id}) AS used
+        `;
+        if (usage.used) {
+          throw new ConflictException({
+            code: 'INVENTORY_UNIT_IN_USE',
+            message: 'A unit used by inventory items cannot be renamed.',
+          });
+        }
+      }
       const unit = await tx.unit.update({ where: { id }, data: dto });
       await this.inventoryAuditService.log(tx, {
         employeeId,

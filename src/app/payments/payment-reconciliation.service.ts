@@ -6,6 +6,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
@@ -22,13 +24,20 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
-import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import type {
+  ExtendedPrismaTransactionClient,
+  PaymentConfirmationSource,
+} from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { GetPaymentIncidentsDto, ResolvePaymentIncidentDto } from './dto';
 import { VnpayService } from './vnpay.service';
 import { MomoService } from './momo.service';
+import { PayosService, PAYOS_PAYMENT_NOTIFIED } from './payos.service';
+import { DomainEventBusService } from '../durable/domain-event-bus.service';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
+import { z } from 'zod';
 
 const BATCH_SIZE = 25;
 const RECONCILE_CONCURRENCY = 3;
@@ -42,6 +51,7 @@ const ATTEMPT_INCLUDE = {
       id: true,
       invoiceNumber: true,
       paymentStatus: true,
+      totalAmount: true,
     },
   },
 } as const satisfies Prisma.PaymentAttemptInclude;
@@ -51,8 +61,11 @@ type AttemptView = Prisma.PaymentAttemptGetPayload<{
 }>;
 
 @Injectable()
-export class PaymentReconciliationService {
+export class PaymentReconciliationService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(PaymentReconciliationService.name);
+  private unsubscribe?: () => void;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -62,7 +75,42 @@ export class PaymentReconciliationService {
     private readonly outbox: OutboxService,
     private readonly vnpay: VnpayService,
     private readonly momo: MomoService,
+    private readonly payos: PayosService,
+    private readonly eventBus: DomainEventBusService,
   ) {}
+
+  onModuleInit() {
+    this.unsubscribe = this.eventBus.on(
+      PAYOS_PAYMENT_NOTIFIED,
+      async (payload) => {
+        const { paymentAttemptId, paymentLinkId } = z
+          .object({
+            paymentAttemptId: z.uuid(),
+            paymentLinkId: z.string().regex(/^[a-f0-9]{32}$/),
+          })
+          .parse(payload);
+        const attempt = await this.prisma.paymentAttempt.findUnique({
+          where: { id: paymentAttemptId },
+          select: { provider: true, status: true },
+        });
+        if (
+          !attempt ||
+          attempt.provider !== PaymentProvider.PAYOS ||
+          attempt.status === PaymentAttemptStatus.REQUIRES_REVIEW
+        )
+          return;
+        if (!(await this.claimAttempt(paymentAttemptId)))
+          throw new ConflictException(
+            'Payment reconciliation is already in progress.',
+          );
+        await this.queryProvider(paymentAttemptId, undefined, paymentLinkId);
+      },
+    );
+  }
+
+  onModuleDestroy() {
+    this.unsubscribe?.();
+  }
 
   async reconcileAttempt(id: string, employeeId: string) {
     const attempt = await this.prisma.paymentAttempt.findUnique({
@@ -72,7 +120,9 @@ export class PaymentReconciliationService {
     if (!attempt) {
       throw new NotFoundException(`Payment attempt with ID ${id} not found.`);
     }
-    if (attempt.provider === PaymentProvider.MOMO) {
+    if (attempt.provider === PaymentProvider.PAYOS) {
+      this.payos.assertConfigured();
+    } else if (attempt.provider === PaymentProvider.MOMO) {
       this.momo.assertConfigured();
     } else {
       this.vnpay.assertApiConfigured();
@@ -241,7 +291,11 @@ export class PaymentReconciliationService {
     });
   }
 
-  private async queryProvider(id: string, employeeId?: string) {
+  private async queryProvider(
+    id: string,
+    employeeId?: string,
+    expectedPaymentLinkId?: string,
+  ) {
     const attempt = await this.prisma.paymentAttempt.findUnique({
       where: { id },
       include: ATTEMPT_INCLUDE,
@@ -268,6 +322,13 @@ export class PaymentReconciliationService {
     if (attempt.provider === PaymentProvider.MOMO) {
       return this.queryMomo(attempt, providerRequest.id, requestId, employeeId);
     }
+    if (attempt.provider === PaymentProvider.PAYOS)
+      return this.queryPayos(
+        attempt,
+        providerRequest.id,
+        employeeId,
+        expectedPaymentLinkId,
+      );
 
     let result: Awaited<ReturnType<VnpayService['queryTransaction']>>;
     try {
@@ -289,6 +350,109 @@ export class PaymentReconciliationService {
         },
       });
       return await this.applyQueryResponse(attempt, result, employeeId);
+    } catch (error) {
+      await this.releaseAttempt(attempt.id);
+      throw error;
+    }
+  }
+
+  private async queryPayos(
+    attempt: AttemptView,
+    providerRequestId: string,
+    employeeId?: string,
+    expectedPaymentLinkId?: string,
+  ) {
+    let response: Awaited<ReturnType<PayosService['queryTransaction']>>;
+    try {
+      response = await this.payos.queryTransaction(attempt.merchantReference);
+    } catch (error) {
+      await this.recordQueryFailure(attempt, providerRequestId, error);
+      throw new BadGatewayException('payOS reconciliation request failed.');
+    }
+    try {
+      await this.prisma.paymentProviderRequest.update({
+        where: { id: providerRequestId },
+        data: {
+          status: PaymentProviderRequestStatus.SUCCEEDED,
+          responsePayload: this.toJson(response),
+          transactionStatus: response.status,
+          responseCode: '00',
+          completedAt: new Date(),
+        },
+      });
+      return await runSerializableTransaction(this.prisma, async (tx) => {
+        const current = await tx.paymentAttempt.findUnique({
+          where: { id: attempt.id },
+          include: ATTEMPT_INCLUDE,
+        });
+        if (!current) throw new NotFoundException('Payment attempt not found.');
+        const transactionTotal = response.transactions.reduce(
+          (sum, transaction) => sum.plus(transaction.amount),
+          new Prisma.Decimal(0),
+        );
+        if (
+          current.currency !== 'VND' ||
+          String(response.orderCode) !== current.merchantReference ||
+          !current.amount.equals(response.amount) ||
+          !current.amount.equals(current.invoice.totalAmount) ||
+          response.amountPaid > response.amount ||
+          response.amountRemaining !== response.amount - response.amountPaid ||
+          !transactionTotal.equals(response.amountPaid) ||
+          new Set(
+            response.transactions.map((transaction) => transaction.reference),
+          ).size !== response.transactions.length ||
+          (current.providerPaymentLinkId &&
+            current.providerPaymentLinkId !== response.id) ||
+          (expectedPaymentLinkId && expectedPaymentLinkId !== response.id)
+        ) {
+          return this.markForReview(
+            tx,
+            current,
+            PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+            'payOS link or paid amount does not match the local attempt',
+            this.toJson(response),
+          );
+        }
+        if (response.status === 'PAID') {
+          if (!current.amount.equals(response.amountPaid))
+            return this.markForReview(
+              tx,
+              current,
+              PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+              'payOS marked a link paid without the exact invoice amount',
+              this.toJson(response),
+            );
+          // A link is the capture aggregate; individual bank references remain in webhook/query records.
+          return this.confirmProviderPayment(
+            tx,
+            current,
+            response.id,
+            employeeId,
+            expectedPaymentLinkId ? 'WEBHOOK' : undefined,
+          );
+        }
+        if (['CANCELLED', 'EXPIRED', 'FAILED'].includes(response.status)) {
+          if (response.amountPaid > 0)
+            return this.markForReview(
+              tx,
+              current,
+              PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+              'payOS link ended after receiving a partial payment',
+              this.toJson(response),
+            );
+          return this.confirmProviderFailure(tx, current, response.status);
+        }
+        return this.rescheduleOrReview(
+          tx,
+          current,
+          PaymentReconciliationIncidentType.STALE_ATTEMPT,
+          {
+            provider: PaymentProvider.PAYOS,
+            status: response.status,
+            amountPaid: response.amountPaid,
+          },
+        );
+      });
     } catch (error) {
       await this.releaseAttempt(attempt.id);
       throw error;
@@ -434,6 +598,7 @@ export class PaymentReconciliationService {
     attempt: AttemptView,
     providerTransactionNo: string | undefined,
     employeeId?: string,
+    source: PaymentConfirmationSource = employeeId ? 'MANUAL' : 'SCHEDULED',
   ) {
     if (!providerTransactionNo || providerTransactionNo === '0') {
       return this.markForReview(
@@ -507,6 +672,9 @@ export class PaymentReconciliationService {
       data: {
         status: PaymentAttemptStatus.SUCCEEDED,
         providerTransactionNo,
+        ...(attempt.provider === PaymentProvider.PAYOS
+          ? { providerPaymentLinkId: providerTransactionNo }
+          : {}),
         failureCode: null,
         completedAt,
         lastReconciledAt: completedAt,
@@ -520,7 +688,7 @@ export class PaymentReconciliationService {
     await this.logReconciliation(tx, employeeId ?? attempt.createdById, {
       paymentAttemptId: attempt.id,
       result: 'SUCCEEDED',
-      source: employeeId ? 'MANUAL' : 'SCHEDULED',
+      source,
     });
     await this.enqueue(tx, 'PAYMENT_RECONCILED', updated, {
       result: 'SUCCEEDED',
@@ -548,7 +716,7 @@ export class PaymentReconciliationService {
       data: {
         status: PaymentAttemptStatus.FAILED,
         providerTransactionNo: null,
-        failureCode: `VNPAY_${transactionStatus}`,
+        failureCode: `${attempt.provider}_${transactionStatus}`,
         completedAt,
         lastReconciledAt: completedAt,
         nextReconcileAt: null,

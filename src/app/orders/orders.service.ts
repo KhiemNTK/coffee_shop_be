@@ -1676,7 +1676,11 @@ export class OrdersService {
     return updatedSession;
   }
 
-  async transferTable({ fromTableId, toTableId }: TransferDiningTableDto) {
+  async transferTable({
+    sourceOrderSessionId,
+    fromTableId,
+    toTableId,
+  }: TransferDiningTableDto) {
     const result = await this.runSerializableTransaction(async (tx) => {
       const fromTable = await tx.diningTable.findUnique({
         where: { id: fromTableId },
@@ -1706,14 +1710,15 @@ export class OrdersService {
 
       const activeSession = await tx.orderSession.findFirst({
         where: {
+          id: sourceOrderSessionId,
           tableId: fromTableId,
           sessionStatus: SessionStatus.ACTIVE,
         },
       });
 
       if (!activeSession) {
-        throw new NotFoundException(
-          `No active order session found on table '${fromTable.name}'.`,
+        throw new ConflictException(
+          'Source session changed. Refresh the table before transferring.',
         );
       }
 
@@ -1793,12 +1798,15 @@ export class OrdersService {
   async mergeTables({
     sourceTableIds,
     destinationTableId,
+    sourceOrderSessionIds,
+    destinationOrderSessionId,
   }: MergeDiningTableDto) {
     const uniqueSourceTableIds = [...new Set(sourceTableIds)];
 
     const result = await this.runSerializableTransaction(async (tx) => {
       const targetSession = await tx.orderSession.findFirst({
         where: {
+          id: destinationOrderSessionId,
           tableId: destinationTableId,
           sessionStatus: SessionStatus.ACTIVE,
         },
@@ -1813,13 +1821,14 @@ export class OrdersService {
       });
 
       if (!targetSession) {
-        throw new BadRequestException(
-          'Destination table must have an active session to merge into.',
+        throw new ConflictException(
+          'Destination session changed. Refresh the tables before merging.',
         );
       }
 
       const sourceSessions = await tx.orderSession.findMany({
         where: {
+          id: { in: sourceOrderSessionIds },
           tableId: { in: uniqueSourceTableIds },
           sessionStatus: SessionStatus.ACTIVE,
         },
@@ -1834,8 +1843,8 @@ export class OrdersService {
       });
 
       if (sourceSessions.length !== uniqueSourceTableIds.length) {
-        throw new BadRequestException(
-          'Every source table must have an active session to merge.',
+        throw new ConflictException(
+          'Source sessions changed. Refresh the tables before merging.',
         );
       }
 
@@ -2170,7 +2179,76 @@ export class OrdersService {
     return result.response;
   }
 
-  async clearTable(tableId: string) {
+  async completeSession(id: string, employeeId: string) {
+    return this.runSerializableTransaction(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const session = await tx.orderSession.findUnique({
+        where: { id },
+        select: {
+          tableId: true,
+          sessionStatus: true,
+          orderItems: { select: { isPaid: true, serveStatus: true } },
+        },
+      });
+      if (!session) throw new NotFoundException('Order session not found.');
+      if (!session.tableId) {
+        throw new ConflictException(
+          'Only dine-in sessions can release a table.',
+        );
+      }
+      if (session.sessionStatus === SessionStatus.COMPLETED) {
+        return this.success('Order session already completed.');
+      }
+      if (
+        session.sessionStatus !== SessionStatus.ACTIVE ||
+        session.orderItems.some(
+          (item) =>
+            item.serveStatus !== ServeStatus.CANCELLED &&
+            (!item.isPaid || item.serveStatus !== ServeStatus.SERVED),
+        )
+      ) {
+        throw new ConflictException({
+          code: 'ORDER_SESSION_NOT_COMPLETE',
+          message:
+            'All non-cancelled items must be paid and served before releasing the table.',
+        });
+      }
+      const updated = await tx.orderSession.updateMany({
+        where: { id, sessionStatus: SessionStatus.ACTIVE },
+        data: { sessionStatus: SessionStatus.COMPLETED },
+      });
+      const table = await tx.diningTable.updateMany({
+        where: { id: session.tableId, status: TableStatus.OCCUPIED },
+        data: { status: TableStatus.EMPTY },
+      });
+      if (updated.count !== 1 || table.count !== 1) {
+        throw new ConflictException(
+          'Session or table changed. Refresh before retrying.',
+        );
+      }
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_SESSION_COMPLETED',
+          details: { orderSessionId: id, tableId: session.tableId },
+        },
+      });
+      await this.enqueueOrderEvent(
+        tx,
+        ORDER_EVENTS.SESSION_COMPLETED,
+        'OrderSession',
+        id,
+        {
+          ...this.createEventBase([session.tableId]),
+          sessionId: id,
+          tableId: session.tableId,
+        },
+      );
+      return this.success('Order session completed and table released.');
+    });
+  }
+
+  async clearTable(tableId: string, expectedOrderSessionId: string | null) {
     const result = await this.runSerializableTransaction(async (tx) => {
       const table = await tx.diningTable.findUnique({
         where: { id: tableId },
@@ -2186,6 +2264,12 @@ export class OrdersService {
         where: { tableId, sessionStatus: SessionStatus.ACTIVE },
         include: { orderItems: true },
       });
+
+      if ((activeSession?.id ?? null) !== expectedOrderSessionId) {
+        throw new ConflictException(
+          'Table session changed. Refresh before clearing.',
+        );
+      }
 
       if (activeSession) {
         this.orderPolicy.assertNoPaidOrInvoicedItems(

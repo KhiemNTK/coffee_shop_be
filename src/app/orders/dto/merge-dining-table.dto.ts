@@ -3,6 +3,8 @@ import { z } from 'zod';
 
 export const MergeDiningTableSchema = z
   .object({
+    sourceOrderSessionIds: z.array(z.uuid()).min(1).max(20),
+    destinationOrderSessionId: z.uuid(),
     sourceTableIds: z
       .array(z.uuid({ message: 'Each source table ID must be a valid UUID' }))
       .min(1, {
@@ -16,6 +18,17 @@ export const MergeDiningTableSchema = z
       message: 'destinationTableId must be a valid UUID',
     }),
   })
+  .refine(
+    (data) =>
+      data.sourceOrderSessionIds.length === data.sourceTableIds.length &&
+      new Set(data.sourceOrderSessionIds).size ===
+        data.sourceOrderSessionIds.length &&
+      !data.sourceOrderSessionIds.includes(data.destinationOrderSessionId),
+    {
+      message: 'Provide one distinct session per source table.',
+      path: ['sourceOrderSessionIds'],
+    },
+  )
   .refine((data) => !data.sourceTableIds.includes(data.destinationTableId), {
     message:
       'Destination table cannot be included within the source tables array',

@@ -57,10 +57,8 @@ import {
   readPickupSchedule,
   type PickupSchedule,
 } from './pickup-schedule';
-import {
-  ONLINE_ORDER_ACCESS_WINDOW_MS,
-  ONLINE_ORDER_TELEGRAM_EVENT,
-} from './telegram-events';
+import { ONLINE_ORDER_TELEGRAM_EVENT } from './telegram-events';
+import { onlineOrderAccessExpiresAt } from './online-order-access';
 
 const REVIEW_WINDOW_MS = 30 * 60 * 1000;
 const REORDER_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
@@ -191,7 +189,7 @@ export class OnlineOrdersService {
             select: publicRequestSelect,
           });
           if (replay) return replay;
-          await this.intake.assertAccepting(tx);
+          await this.intake.assertAccepting(tx, Boolean(dto.pickupAt));
           return tx.onlineOrderRequest.create({
             data: {
               clientRequestId: dto.clientRequestId,
@@ -297,7 +295,7 @@ export class OnlineOrdersService {
     });
     if (
       !request ||
-      request.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS < Date.now()
+      onlineOrderAccessExpiresAt(request).getTime() <= Date.now()
     ) {
       throw new NotFoundException('Order request not found.');
     }
@@ -325,6 +323,7 @@ export class OnlineOrdersService {
       pickupAt: request.pickupAt,
       items: request.items,
       fulfillmentStatus,
+      accessExpiresAt: onlineOrderAccessExpiresAt(request),
       isPaid:
         activeItems.length > 0 && activeItems.every((item) => item.isPaid),
       orderItems,
@@ -346,6 +345,7 @@ export class OnlineOrdersService {
       select: {
         createdAt: true,
         reorderNonce: true,
+        pickupAt: true,
         quotedSubtotal: true,
         items: {
           orderBy: { lineNumber: 'asc' },
@@ -362,10 +362,7 @@ export class OnlineOrdersService {
     });
     if (!request) throw new NotFoundException('Order request not found.');
     if (accessToken) {
-      if (
-        request.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS <
-        Date.now()
-      ) {
+      if (onlineOrderAccessExpiresAt(request).getTime() <= Date.now()) {
         throw new NotFoundException('Order request not found.');
       }
     } else {
@@ -454,11 +451,11 @@ export class OnlineOrdersService {
     this.assertAccess(requestId, accessToken);
     const request = await this.prisma.onlineOrderRequest.findUnique({
       where: { id: requestId },
-      select: { createdAt: true, reorderNonce: true },
+      select: { createdAt: true, pickupAt: true, reorderNonce: true },
     });
     if (
       !request ||
-      request.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS < Date.now()
+      onlineOrderAccessExpiresAt(request).getTime() <= Date.now()
     ) {
       throw new NotFoundException('Order request not found.');
     }
@@ -524,12 +521,12 @@ export class OnlineOrdersService {
         expiresAt: true,
         status: true,
         telegramChatId: true,
+        pickupAt: true,
       },
     });
     if (
       !request ||
-      request.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS <
-        now.getTime()
+      onlineOrderAccessExpiresAt(request).getTime() <= now.getTime()
     ) {
       throw new NotFoundException('Order request not found.');
     }
@@ -600,6 +597,7 @@ export class OnlineOrdersService {
             status: true,
             createdAt: true,
             orderSessionId: true,
+            pickupAt: true,
             orderSession: {
               select: {
                 tableId: true,
@@ -625,10 +623,7 @@ export class OnlineOrdersService {
         if (current.status === OnlineOrderStatus.CANCELLED) {
           return { requestId, status: OnlineOrderStatus.CANCELLED };
         }
-        if (
-          current.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS <
-          Date.now()
-        ) {
+        if (onlineOrderAccessExpiresAt(current).getTime() <= Date.now()) {
           throw new NotFoundException('Order request not found.');
         }
         const session = current.orderSession;
@@ -891,12 +886,9 @@ export class OnlineOrdersService {
     this.assertAccess(id, dto.accessToken);
     const access = await this.prisma.onlineOrderRequest.findUnique({
       where: { id },
-      select: { createdAt: true },
+      select: { createdAt: true, pickupAt: true },
     });
-    if (
-      !access ||
-      access.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS < Date.now()
-    ) {
+    if (!access || onlineOrderAccessExpiresAt(access).getTime() <= Date.now()) {
       throw new NotFoundException('Order request not found.');
     }
 
@@ -1463,10 +1455,10 @@ export class OnlineOrdersService {
       pickupAt: request.pickupAt,
       items: request.items,
       accessToken: this.signAccess(request.id),
+      accessExpiresAt: onlineOrderAccessExpiresAt(request),
       reorderToken:
         request.reorderNonce &&
-        request.createdAt.getTime() + ONLINE_ORDER_ACCESS_WINDOW_MS >
-          Date.now() &&
+        onlineOrderAccessExpiresAt(request).getTime() > Date.now() &&
         this.reorderExpiresAt(request.createdAt).getTime() > Date.now()
           ? this.signReorder(request.id, request.reorderNonce)
           : null,

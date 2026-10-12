@@ -2,61 +2,17 @@ import { cleanupOpenApiDoc } from 'nestjs-zod';
 import { INestApplication, RequestMethod } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { applyMiddlewares } from './common/middlewares/common.middleware';
-import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { json, urlencoded, Request, Response, NextFunction } from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
-interface LocalSchemaObject {
-  type?: string;
-  properties?: Record<string, any>;
-  required?: string[];
-  [key: string]: any;
-}
-
-const removeFieldsAndRelations = (document: OpenAPIObject): OpenAPIObject => {
-  const auditFields = new Set(['id', 'createdAt', 'updatedAt', 'deletedAt']);
-
-  const schemas = document?.components?.schemas;
-  if (!schemas) return document;
-
-  for (const schema of Object.values(schemas) as LocalSchemaObject[]) {
-    const props = schema.properties;
-    if (!props) continue;
-
-    const newProps: Record<string, LocalSchemaObject> = {};
-    for (const [propName, prop] of Object.entries(props) as [
-      string,
-      LocalSchemaObject,
-    ][]) {
-      if (auditFields.has(propName) || propName === 'data') continue;
-
-      const isRelation = prop?.type === 'object';
-      if (!isRelation) {
-        newProps[propName] = prop;
-        continue;
-      }
-
-      if (!propName.endsWith('s')) {
-        newProps[`${propName}ID`] = { type: 'string' };
-      }
-    }
-    schema.properties = newProps;
-
-    const schemaRequired = schema.required;
-    if (Array.isArray(schemaRequired)) {
-      schema.required = schemaRequired.filter(
-        (field) => !auditFields.has(field) && field !== 'data',
-      );
-    }
-  }
-  return document;
-};
-
+import { resolveApiLocale } from './common/i18n/http-locale';
+import { localizeApiErrors } from './common/i18n/error-messages';
 const initOpenAPI = (app: INestApplication, config: ConfigService) => {
   if (!config.get<boolean>('SWAGGER_ENABLED', false)) return;
 
   const appName = config.get<string>('APP_NAME', 'coffee_shop_be');
   const appPrefix = config.get<string>('APP_PREFIX', '/api/v1');
-  let openApiDoc = SwaggerModule.createDocument(
+  const openApiDoc = SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
       .setTitle(`${appName} API`)
@@ -66,9 +22,16 @@ const initOpenAPI = (app: INestApplication, config: ConfigService) => {
       .addCookieAuth('accessToken', undefined, 'accessCookie')
       .addCookieAuth('refreshToken', undefined, 'refreshCookie')
       .addApiKey({ type: 'apiKey', in: 'header', name: 'X-CSRF-Token' }, 'csrf')
+      .addGlobalParameters({
+        in: 'header',
+        name: 'Accept-Language',
+        required: false,
+        schema: { type: 'string', example: 'vi-VN, en;q=0.8' },
+        description:
+          'Error message language (vi/en); codes and business data are unchanged.',
+      })
       .build(),
   );
-  openApiDoc = removeFieldsAndRelations(openApiDoc);
   SwaggerModule.setup(`${appPrefix}/docs`, app, cleanupOpenApiDoc(openApiDoc));
 };
 
@@ -79,11 +42,16 @@ const initBodyParser = (app: INestApplication, config: ConfigService) => {
       if (err) {
         if (err instanceof SyntaxError) {
           return res.status(400).json({
-            errors: [
-              {
-                message: 'Invalid JSON format. Please check your request body.',
-              },
-            ],
+            errors: localizeApiErrors(
+              [
+                {
+                  message:
+                    'Invalid JSON format. Please check your request body.',
+                },
+              ],
+              resolveApiLocale(req),
+              'VALIDATION_ERROR',
+            ),
             data: null,
             message: 'ERROR',
           });

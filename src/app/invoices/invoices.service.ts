@@ -13,7 +13,6 @@ import {
   Prisma,
   ServeStatus,
   SessionStatus,
-  TableStatus,
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { UNRESOLVED_PAYMENT_ATTEMPT_STATUSES } from '../../common/consts/payment-attempt-statuses';
@@ -782,7 +781,9 @@ export class InvoicesService {
       tableId: string | null;
     },
   ) {
-    if (session.sessionStatus !== SessionStatus.ACTIVE) return;
+    // Payment does not establish that dine-in guests have left the table.
+    if (session.tableId || session.sessionStatus !== SessionStatus.ACTIVE)
+      return;
 
     const remainingUnpaidItems = await tx.orderItem.count({
       where: {
@@ -803,13 +804,6 @@ export class InvoicesService {
       throw new ConflictException(
         'Order session was changed by another operation. Please refresh and try again.',
       );
-    }
-
-    if (session.tableId) {
-      await tx.diningTable.updateMany({
-        where: { id: session.tableId },
-        data: { status: TableStatus.EMPTY },
-      });
     }
   }
 

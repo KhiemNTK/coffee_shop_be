@@ -213,6 +213,8 @@ export class MenuService {
         data: {
           name: dto.name,
           price: this.toPrice(dto.price),
+          description: dto.description,
+          imageUrl: dto.imageUrl,
           categoryId: dto.categoryId,
           kitchenStationId: dto.kitchenStationId,
         },
@@ -419,6 +421,8 @@ export class MenuService {
         data: {
           name: dto.name,
           categoryId: dto.categoryId,
+          description: dto.description,
+          imageUrl: dto.imageUrl,
           kitchenStationId: dto.kitchenStationId,
           price: dto.price === undefined ? undefined : this.toPrice(dto.price),
         },
@@ -428,6 +432,10 @@ export class MenuService {
         menuItemId: id,
         changes: {
           ...(dto.name !== undefined ? { name: dto.name } : {}),
+          ...(dto.description !== undefined
+            ? { description: dto.description }
+            : {}),
+          ...(dto.imageUrl !== undefined ? { imageUrl: dto.imageUrl } : {}),
           ...(dto.categoryId !== undefined
             ? { categoryId: dto.categoryId }
             : {}),

@@ -17,6 +17,7 @@ import { PaymentsService } from './payments.service';
 import type { VnpayService } from './vnpay.service';
 import type { MomoService } from './momo.service';
 import type { PaymentProviderFactory } from './payment-provider.factory';
+import type { PayosService } from './payos.service';
 
 describe('PaymentsService', () => {
   const tx = {
@@ -32,10 +33,12 @@ describe('PaymentsService', () => {
     paymentWebhookEvent: { create: jest.fn(), update: jest.fn() },
     paymentReconciliationIncident: { upsert: jest.fn() },
     actionLog: { create: jest.fn() },
+    $queryRaw: jest.fn(),
   };
   const prisma = {
     paymentAttempt: {
       findUnique: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
       updateMany: jest.fn(),
     },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
@@ -52,6 +55,12 @@ describe('PaymentsService', () => {
     createPaymentUrl: jest.fn(),
     verifyCallback: jest.fn(),
   };
+  const payos = {
+    verifyCallback: jest.fn(),
+    verifyReturnState: jest.fn(),
+    assertAmount: jest.fn(),
+    paymentLinkId: jest.fn(() => 'a'.repeat(32)),
+  };
   const service = new PaymentsService(
     prisma as unknown as ExtendedPrismaClient,
     new ConfigService({ VNPAY_ATTEMPT_TTL_MINUTES: 15 }),
@@ -65,6 +74,7 @@ describe('PaymentsService', () => {
       createPaymentUrl: jest.fn(() => 'https://sandbox/payment'),
     } as unknown as PaymentProviderFactory,
     {} as MomoService,
+    payos as unknown as PayosService,
   );
   const attempt = {
     id: 'attempt-id',
@@ -118,6 +128,134 @@ describe('PaymentsService', () => {
     vnpay.createPaymentUrl.mockReturnValue('https://sandbox/payment');
   });
 
+  it('does not leak a reconstructable payOS checkout handle through ordinary reads', async () => {
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.PAYOS,
+      paymentUrl: `https://pay.payos.vn/web/${'a'.repeat(32)}`,
+      providerPaymentLinkId: 'a'.repeat(32),
+    });
+    expect(await service.findAttempt(attempt.id)).toEqual(
+      expect.objectContaining({
+        paymentUrl: null,
+        providerPaymentLinkId: null,
+      }),
+    );
+  });
+
+  it('allocates payOS order codes in PostgreSQL and persists the bound link ID', async () => {
+    tx.$queryRaw.mockResolvedValue([{ code: 1000000000n }]);
+    tx.paymentAttempt.create.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.PAYOS,
+      merchantReference: '1000000000',
+    });
+    await service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+      provider: PaymentProvider.PAYOS,
+      idempotencyKey: 'payos-sequence-key',
+      locale: 'vn',
+      closeSessionAfterPayment: true,
+    });
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(tx.paymentAttempt.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          merchantReference: '1000000000',
+          provider: PaymentProvider.PAYOS,
+        }),
+      }),
+    );
+    expect(prisma.paymentAttempt.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          providerPaymentLinkId: 'a'.repeat(32),
+        }),
+      }),
+    );
+  });
+
+  it('queues a verified payOS webhook durably without calling a provider or booking money', async () => {
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.PAYOS,
+    });
+    tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'webhook-id' });
+    payos.verifyCallback.mockResolvedValue({
+      payloadHash: 'signed-payload',
+      data: {
+        orderCode: 1000000000,
+        amount: 50000,
+        currency: 'VND',
+        paymentLinkId: 'a'.repeat(32),
+        reference: 'BANK-PARTIAL',
+        code: '00',
+      },
+    });
+    await service.handlePayosWebhook({});
+    expect(outbox.enqueue).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        eventName: 'payos.payment.notified',
+        payload: {
+          paymentAttemptId: attempt.id,
+          paymentLinkId: 'a'.repeat(32),
+        },
+      }),
+    );
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
+  });
+
+  it('acknowledges only exact webhook replays and ignores signed registration probes', async () => {
+    payos.verifyCallback.mockResolvedValue({
+      payloadHash: 'signed-payload',
+      data: {
+        orderCode: 1000000000,
+        amount: 100000,
+        currency: 'VND',
+        paymentLinkId: 'a'.repeat(32),
+        reference: 'BANK-1',
+        code: '00',
+      },
+    });
+    await service.handlePayosWebhook({});
+    expect(tx.paymentWebhookEvent.create).not.toHaveBeenCalled();
+    tx.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      provider: PaymentProvider.PAYOS,
+    });
+    tx.paymentWebhookEvent.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('duplicate', {
+        code: 'P2002',
+        clientVersion: '6.19.0',
+        meta: { target: ['payloadHash'] },
+      }),
+    );
+    await expect(service.handlePayosWebhook({})).resolves.toBeUndefined();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('does not look up payOS returns without a valid capability or trust public status', async () => {
+    payos.verifyReturnState.mockReturnValue(null);
+    expect(
+      await service.inspectPayosReturn({
+        orderCode: '1000000000',
+        status: 'PAID',
+      }),
+    ).toEqual({ signatureValid: false, attempt: null });
+    expect(prisma.paymentAttempt.findUnique).not.toHaveBeenCalled();
+    payos.verifyReturnState.mockReturnValue('1000000000');
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      provider: PaymentProvider.PAYOS,
+      status: 'PENDING',
+    });
+    expect(
+      (await service.inspectPayosReturn({ state: 'valid', status: 'PAID' }))
+        .attempt?.status,
+    ).toBe('PENDING');
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+  });
+
   it('creates one provider attempt tied to the current cashier shift', async () => {
     const result = await service.createAttempt(
       'invoice-id',
@@ -141,6 +279,57 @@ describe('PaymentsService', () => {
       }),
     );
     expect(result.paymentUrl).toBe('https://sandbox/payment');
+    expect(prisma.paymentAttempt.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { paymentUrl: 'https://sandbox/payment' },
+      }),
+    );
+  });
+
+  it('recovers the persisted link without requesting another provider payment', async () => {
+    const saved = { ...attempt, paymentUrl: 'https://sandbox/payment' };
+    prisma.paymentAttempt.findUnique.mockResolvedValue(saved);
+    expect(await service.recoverPaymentLink(attempt.id)).toEqual(saved);
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+    expect(vnpay.createPaymentUrl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: PaymentAttemptStatus.SUCCEEDED },
+    { expiresAt: new Date(0) },
+    { paymentUrl: null },
+    { invoice: { ...attempt.invoice, paymentStatus: PaymentStatus.PAID } },
+  ])('does not recover an unusable link %j', async (change) => {
+    prisma.paymentAttempt.findUnique.mockResolvedValue({
+      ...attempt,
+      paymentUrl: 'https://sandbox/payment',
+      ...change,
+    });
+    await expect(service.recoverPaymentLink(attempt.id)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(prisma.paymentAttempt.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('discards a generated link when payment completes before URL persistence', async () => {
+    prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 0 });
+    prisma.paymentAttempt.findUniqueOrThrow.mockResolvedValue({
+      ...attempt,
+      status: PaymentAttemptStatus.SUCCEEDED,
+      paymentUrl: null,
+    });
+    const result = await service.createAttempt(
+      attempt.invoiceId,
+      attempt.createdById,
+      '127.0.0.1',
+      {
+        idempotencyKey: 'another-key',
+        locale: 'vn',
+        closeSessionAfterPayment: true,
+      },
+    );
+    expect(result.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+    expect(result.paymentUrl).toBeNull();
   });
 
   it.each([PaymentAttemptStatus.EXPIRED, PaymentAttemptStatus.REQUIRES_REVIEW])(

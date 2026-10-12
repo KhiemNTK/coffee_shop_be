@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import { DailySalesCloseService } from './daily-sales-close.service';
 
 describe('DailySalesCloseService', () => {
@@ -108,6 +109,47 @@ describe('DailySalesCloseService', () => {
     expect(tx.$queryRaw).not.toHaveBeenCalled();
     expect(tx.dailySalesClose.create).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      timing: 'before close',
+      count: 1n,
+      amount: '10.00',
+      expectedDelta: { count: 0, amount: '0.00' },
+    },
+    {
+      timing: 'after close',
+      count: 2n,
+      amount: '25.25',
+      expectedDelta: { count: 1, amount: '15.25' },
+    },
+  ])(
+    'includes cash refunds $timing in the delta without changing the snapshot',
+    async ({ count, amount, expectedDelta }) => {
+      const cashClose = {
+        ...close,
+        snapshot: { ...close.snapshot, refundCount: 1, refundAmount: '10.00' },
+      };
+      tx.dailySalesClose.findUnique.mockResolvedValue(cashClose);
+      prisma.dailySalesClose.findUnique.mockResolvedValue(cashClose);
+      prisma.$queryRaw.mockResolvedValue([
+        { count, amount: new Prisma.Decimal(amount) },
+      ]);
+
+      const retried = await service.close(businessDate, 'employee-id');
+      const fetched = await service.get(businessDate);
+
+      for (const result of [retried, fetched]) {
+        expect(result.snapshot).toEqual(cashClose.snapshot);
+        expect(result.refundDeltaSinceClose).toEqual(expectedDelta);
+      }
+      const query = prisma.$queryRaw.mock.calls[0][0] as Prisma.Sql;
+      expect(query.sql).toContain(INVOICE_REFUNDS_SQL.sql);
+      expect(query.values).toEqual([close.periodStart, close.periodEnd]);
+      expect(tx.dailySalesClose.create).not.toHaveBeenCalled();
+      expect(tx.actionLog.create).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects unresolved operations without writing a close', async () => {
     tx.$queryRaw.mockResolvedValueOnce([

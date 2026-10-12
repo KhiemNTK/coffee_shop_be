@@ -1,10 +1,13 @@
 import { ConflictException } from '@nestjs/common';
 import {
+  PaymentStatus,
+  Prisma,
   PrintDeviceStatus,
   PrintDeviceType,
   PrintJobStatus,
   PrintJobType,
 } from '@prisma/client';
+import type { ReceiptPrintPayload } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { PrintingService } from './printing.service';
 import { GetPrintDevicesDto } from './dto';
@@ -196,5 +199,175 @@ describe('PrintingService leases', () => {
         }),
       }),
     );
+  });
+});
+
+describe('PrintingService receipt reprints', () => {
+  const originalPayload: ReceiptPrintPayload = {
+    isReprint: false,
+    invoiceId: 'invoice-id',
+    invoiceNumber: 'RECEIPT-001',
+    createdAt: '2026-01-01T06:00:00.000Z',
+    tableName: 'Table 1',
+    cashierName: 'Original cashier',
+    paymentMethod: 'CASH',
+    paymentStatus: 'PAID',
+    subTotal: '50000',
+    discountAmount: '0',
+    taxAmount: '0',
+    totalAmount: '50000',
+    amountTendered: null,
+    changeAmount: null,
+    items: [
+      {
+        orderItemId: 'item-id',
+        name: 'Original coffee',
+        quantity: 2,
+        unitPrice: '25000',
+        lineTotal: '50000',
+        selectedOptions: [],
+      },
+    ],
+  };
+  const dto = {
+    reason: 'Customer requested another copy',
+    copies: 2,
+    idempotencyKey: 'reprint-key',
+  };
+  const tx = {
+    employee: { findFirst: jest.fn() },
+    invoice: { findFirst: jest.fn() },
+    printDevice: { findFirst: jest.fn() },
+    printJob: { findFirst: jest.fn(), create: jest.fn() },
+    actionLog: { create: jest.fn() },
+  };
+  const idempotency = { execute: jest.fn() };
+  let service: PrintingService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    idempotency.execute.mockImplementation(
+      (_input: unknown, operation: (client: typeof tx) => Promise<unknown>) =>
+        operation(tx),
+    );
+    tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
+    tx.invoice.findFirst.mockResolvedValue({
+      ...originalPayload,
+      id: originalPayload.invoiceId,
+      createdAt: new Date(originalPayload.createdAt),
+      paymentStatus: PaymentStatus.PARTIALLY_REFUNDED,
+      orderSession: { table: { name: 'Table 2' } },
+      employee: { fullName: 'Renamed cashier' },
+      subTotal: new Prisma.Decimal(50000),
+      discountAmount: new Prisma.Decimal(0),
+      taxAmount: new Prisma.Decimal(0),
+      totalAmount: new Prisma.Decimal(50000),
+      orderItems: [
+        {
+          id: 'item-id',
+          quantity: 2,
+          priceAtTime: new Prisma.Decimal(25000),
+          selectedOptions: [],
+          menuItem: { name: 'Renamed coffee' },
+        },
+      ],
+    });
+    tx.printDevice.findFirst.mockResolvedValue({ id: 'device-id' });
+    tx.printJob.findFirst.mockResolvedValue({
+      id: 'original-id',
+      payload: originalPayload,
+    });
+    tx.printJob.create.mockImplementation(({ data }) =>
+      Promise.resolve({ id: 'reprint-id', ...data }),
+    );
+    service = new PrintingService(
+      {} as never,
+      new PaginationUtilService(),
+      idempotency as never,
+    );
+  });
+
+  it.each([
+    PrintJobStatus.PENDING,
+    PrintJobStatus.FAILED,
+    PrintJobStatus.PRINTED,
+  ])(
+    'preserves the %s original receipt after menu, table, and cashier renames',
+    async (status) => {
+      tx.printJob.findFirst.mockResolvedValue({
+        id: 'original-id',
+        payload: originalPayload,
+        status,
+      });
+      const result = await service.reprintReceipt(
+        'invoice-id',
+        'employee-id',
+        dto,
+      );
+
+      expect(result).toMatchObject({
+        reprintOfId: 'original-id',
+        copies: dto.copies,
+        deviceId: 'device-id',
+        requestedById: 'employee-id',
+      });
+      expect(result.payload).toEqual({ ...originalPayload, isReprint: true });
+      expect(originalPayload.isReprint).toBe(false);
+      expect(tx.printJob.findFirst).toHaveBeenCalledWith({
+        where: {
+          invoiceId: 'invoice-id',
+          type: PrintJobType.RECEIPT,
+          reprintOfId: null,
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, payload: true },
+      });
+    },
+  );
+
+  it.each([
+    null,
+    { id: 'original-id', payload: null },
+    { id: 'original-id', payload: 'legacy' },
+    { id: 'original-id', payload: [] },
+  ])(
+    'builds a meaningful fallback when no original receipt object exists (%j)',
+    async (original) => {
+      tx.printJob.findFirst.mockResolvedValue(original);
+
+      const result = await service.reprintReceipt(
+        'invoice-id',
+        'employee-id',
+        dto,
+      );
+
+      expect(result.payload).toEqual({
+        ...originalPayload,
+        isReprint: true,
+        tableName: 'Table 2',
+        cashierName: 'Renamed cashier',
+        paymentStatus: PaymentStatus.PARTIALLY_REFUNDED,
+        items: [
+          {
+            orderItemId: 'item-id',
+            name: 'Renamed coffee',
+            quantity: 2,
+            unitPrice: '25000',
+            lineTotal: '50000',
+            selectedOptions: [],
+          },
+        ],
+      });
+      expect(result.reprintOfId).toBe(original?.id);
+    },
+  );
+
+  it('still rejects unpaid invoices when an original receipt exists', async () => {
+    tx.invoice.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.reprintReceipt('invoice-id', 'employee-id', dto),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.printJob.create).not.toHaveBeenCalled();
   });
 });

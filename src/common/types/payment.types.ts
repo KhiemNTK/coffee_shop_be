@@ -1,9 +1,18 @@
 import type { Decimal } from '@prisma/client/runtime/library';
 
+export type PaymentConfirmationSource = 'MANUAL' | 'SCHEDULED' | 'WEBHOOK';
+
 export type PaymentCallbackQuery = Record<
   string,
   string | string[] | undefined
 >;
+
+export interface PayosPaymentUrlInput {
+  paymentAttemptId: string;
+  amount: Decimal;
+  merchantReference: string;
+  expiresAt: Date;
+}
 
 export interface VnpayPaymentUrlInput {
   amount: Decimal;

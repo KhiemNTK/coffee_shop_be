@@ -14,6 +14,8 @@ export const PUBLIC_MENU_SELECT = {
   id: true,
   name: true,
   price: true,
+  description: true,
+  imageUrl: true,
   category: { select: { id: true, name: true } },
   optionGroups: {
     orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],

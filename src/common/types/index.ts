@@ -1,4 +1,5 @@
 export type * from './api-util.types';
+export type * from './i18n.types';
 export type * from './authorization.types';
 export type * from './auth.types';
 export type * from './cookie.types';

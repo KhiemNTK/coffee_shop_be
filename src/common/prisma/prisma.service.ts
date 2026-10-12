@@ -34,10 +34,7 @@ export class PrismaService
       .filter((model) => model.fields.some((f) => f.name === 'deletedAt'))
       .map((model) => model.name);
 
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const prismaClient = this;
-
-    return prismaClient.$extends({
+    return this.$extends({
       query: {
         $allModels: {
           async $allOperations({ model, operation, args, query }) {
@@ -90,14 +87,11 @@ export class PrismaService
               return query(safeArgs as typeof args);
             }
 
-            if (operation === 'delete') {
-              safeArgs.data = { deletedAt: new Date() };
-              return (prismaClient as any)[model].update(safeArgs);
-            }
-
-            if (operation === 'deleteMany') {
-              safeArgs.data = { deletedAt: new Date() };
-              return (prismaClient as any)[model].updateMany(safeArgs);
+            if (operation === 'delete' || operation === 'deleteMany') {
+              // Re-routing through the base client would escape interactive transactions.
+              throw new Error(
+                `${model}: use update/updateMany with deletedAt for soft deletion.`,
+              );
             }
 
             return query(args);

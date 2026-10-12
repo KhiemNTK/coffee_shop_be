@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, SettingValueType } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
 import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../../common/consts/online-order-settings';
 import {
   PRISMA_SERVICE_TOKEN,
@@ -23,6 +24,7 @@ import {
 export class OnlineOrderIntakeService {
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN) private readonly prisma: ExtendedPrismaClient,
+    private readonly config: ConfigService,
   ) {}
 
   async getStatus(
@@ -61,16 +63,47 @@ export class OnlineOrderIntakeService {
     const { acceptingOrders, pausedUntil, reason } = await this.getStatus();
     return {
       acceptingOrders,
+      acceptingAsap: acceptingOrders && this.isAsapOpen(),
+      asapOpenLocal: this.config.get<string>('ONLINE_ASAP_OPEN_LOCAL', '07:00'),
+      asapCloseLocal: this.config.get<string>(
+        'ONLINE_ASAP_CLOSE_LOCAL',
+        '22:00',
+      ),
+      timeZone: 'Asia/Ho_Chi_Minh',
       pausedUntil: acceptingOrders ? null : pausedUntil,
       reason: acceptingOrders ? null : reason,
     };
   }
 
-  async assertAccepting(tx: ExtendedPrismaTransactionClient) {
+  async assertAccepting(
+    tx: ExtendedPrismaTransactionClient,
+    scheduled = false,
+  ) {
     const status = await this.getStatus(tx);
     if (!status.acceptingOrders) {
       throw new ConflictException('Online ordering is temporarily paused.');
     }
+    if (!scheduled && !this.isAsapOpen()) {
+      throw new ConflictException({
+        code: 'ONLINE_ASAP_CLOSED',
+        message:
+          'Immediate pickup is outside opening hours. Choose a scheduled slot.',
+      });
+    }
+  }
+
+  private isAsapOpen() {
+    const minute = (time: string) =>
+      Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+    const now = new Date();
+    const localMinute =
+      (now.getUTCHours() * 60 + now.getUTCMinutes() + 420) % 1440;
+    return (
+      localMinute >=
+        minute(this.config.get<string>('ONLINE_ASAP_OPEN_LOCAL', '07:00')) &&
+      localMinute <
+        minute(this.config.get<string>('ONLINE_ASAP_CLOSE_LOCAL', '22:00'))
+    );
   }
 
   update(employeeId: string, dto: UpdateOnlineOrderIntakeDto) {

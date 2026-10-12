@@ -10,6 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
@@ -31,7 +32,20 @@ import { MenuService } from './menu.service';
 @ApiTags('Menu')
 @Controller('menu')
 export class MenuController {
-  constructor(private readonly menuService: MenuService) {}
+  constructor(
+    private readonly menuService: MenuService,
+    private readonly config: ConfigService,
+  ) {}
+
+  @Get('public/store')
+  @SkipAuth()
+  getPublicStore() {
+    return {
+      name: this.config.get<string>('SHOP_NAME') ?? null,
+      address: this.config.get<string>('SHOP_ADDRESS') ?? null,
+      phone: this.config.get<string>('SHOP_PHONE') ?? null,
+    };
+  }
 
   @Get('public/categories')
   @SkipAuth()

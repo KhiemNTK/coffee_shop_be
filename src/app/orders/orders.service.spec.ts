@@ -35,6 +35,82 @@ describe('OrdersService', () => {
   let cashierShiftLedger: { findOpenShiftId: jest.Mock };
   let kitchenRouting: { createTickets: jest.Mock };
 
+  describe('completeSession', () => {
+    beforeEach(() => {
+      tx.orderSession.findUnique.mockResolvedValue({
+        tableId: 'table-id',
+        sessionStatus: SessionStatus.ACTIVE,
+        orderItems: [{ isPaid: true, serveStatus: ServeStatus.SERVED }],
+      });
+      tx.orderSession.updateMany.mockResolvedValue({ count: 1 });
+      tx.diningTable.updateMany.mockResolvedValue({ count: 1 });
+    });
+
+    it('releases a paid and served table with transactional audit and outbox', async () => {
+      await service.completeSession('session-id', 'employee-id');
+      expect(tx.diningTable.updateMany).toHaveBeenCalledWith({
+        where: { id: 'table-id', status: TableStatus.OCCUPIED },
+        data: { status: TableStatus.EMPTY },
+      });
+      expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        tx,
+        expect.objectContaining({ eventName: 'order.session.completed' }),
+      );
+    });
+
+    it.each([
+      { isPaid: false, serveStatus: ServeStatus.SERVED },
+      { isPaid: true, serveStatus: ServeStatus.COOKING },
+      { isPaid: true, serveStatus: ServeStatus.READY },
+    ])(
+      'rejects unfinished item %j without changing the table',
+      async (item) => {
+        tx.orderSession.findUnique.mockResolvedValue({
+          tableId: 'table-id',
+          sessionStatus: SessionStatus.ACTIVE,
+          orderItems: [item],
+        });
+        await expect(
+          service.completeSession('session-id', 'employee-id'),
+        ).rejects.toThrow(ConflictException);
+        expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not release a reused table when the old completion is replayed', async () => {
+      tx.orderSession.findUnique.mockResolvedValue({
+        tableId: 'table-id',
+        sessionStatus: SessionStatus.COMPLETED,
+      });
+      await service.completeSession('session-id', 'employee-id');
+      expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
+      expect(outbox.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejects cancellation, takeaway, and concurrent table changes', async () => {
+      tx.orderSession.findUnique.mockResolvedValueOnce({
+        tableId: 'table-id',
+        sessionStatus: SessionStatus.CANCELLED,
+      });
+      await expect(
+        service.completeSession('session-id', 'employee-id'),
+      ).rejects.toThrow(ConflictException);
+      tx.orderSession.findUnique.mockResolvedValueOnce({
+        tableId: null,
+        sessionStatus: SessionStatus.ACTIVE,
+      });
+      await expect(
+        service.completeSession('session-id', 'employee-id'),
+      ).rejects.toThrow(ConflictException);
+      tx.diningTable.updateMany.mockResolvedValue({ count: 0 });
+      await expect(
+        service.completeSession('session-id', 'employee-id'),
+      ).rejects.toThrow(ConflictException);
+      expect(tx.actionLog.create).not.toHaveBeenCalled();
+    });
+  });
+
   beforeEach(async () => {
     idempotency = { execute: jest.fn() };
     tx = {
@@ -1328,12 +1404,80 @@ describe('OrdersService', () => {
       service.mergeTables({
         sourceTableIds: ['source-table-id'],
         destinationTableId: 'destination-table-id',
+        sourceOrderSessionIds: ['source-session-id'],
+        destinationOrderSessionId: 'target-session-id',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('does not transfer a newer customer from a reused source table', async () => {
+    tx.diningTable.findUnique
+      .mockResolvedValueOnce({ id: 'source-table', name: 'A1' })
+      .mockResolvedValueOnce({
+        id: 'target-table',
+        name: 'A2',
+        status: TableStatus.EMPTY,
+      });
+    tx.orderSession.findFirst.mockResolvedValue(null);
+    await expect(
+      service.transferTable({
+        fromTableId: 'source-table',
+        toTableId: 'target-table',
+        sourceOrderSessionId: 'old-session',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.orderSession.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'old-session',
+        tableId: 'source-table',
+        sessionStatus: SessionStatus.ACTIVE,
+      },
+    });
+    expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('does not merge into a newer destination session', async () => {
+    tx.orderSession.findFirst.mockResolvedValue(null);
+    await expect(
+      service.mergeTables({
+        sourceTableIds: ['A1'],
+        destinationTableId: 'A2',
+        sourceOrderSessionIds: ['source'],
+        destinationOrderSessionId: 'old-target',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.orderSession.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: 'old-target',
+          tableId: 'A2',
+          sessionStatus: SessionStatus.ACTIVE,
+        },
+      }),
+    );
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a newer customer when clearing a reused table', async () => {
+    tx.diningTable.findUnique.mockResolvedValue({ id: 'table-id' });
+    tx.orderSession.findFirst.mockResolvedValue({
+      id: 'new-session',
+      orderItems: [],
+    });
+    await expect(
+      service.clearTable('table-id', 'old-session'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.clearTable('table-id', null)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
+    expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
   });
 
   it('rejects splitting an item that does not belong to the source session', async () => {

@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { SettingValueType } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
 import { UpdateOnlineOrderIntakeDto } from './dto';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
 
@@ -21,7 +22,13 @@ describe('OnlineOrderIntakeService', () => {
     actionLog: { create: jest.fn() },
   };
   const prisma = { ...tx, $transaction: jest.fn((fn) => fn(tx)) };
-  const service = new OnlineOrderIntakeService(prisma as never);
+  const service = new OnlineOrderIntakeService(
+    prisma as never,
+    new ConfigService({
+      ONLINE_ASAP_OPEN_LOCAL: '00:00',
+      ONLINE_ASAP_CLOSE_LOCAL: '24:00',
+    }),
+  );
   const pause = {
     expectedVersion: 0,
     pausedUntil: new Date(Date.now() + 60_000).toISOString(),
@@ -47,7 +54,7 @@ describe('OnlineOrderIntakeService', () => {
         reason: 'Kitchen busy',
       },
     });
-    expect(await service.getAvailability()).toEqual({
+    expect(await service.getAvailability()).toMatchObject({
       acceptingOrders: true,
       pausedUntil: null,
       reason: null,
@@ -138,5 +145,37 @@ describe('OnlineOrderIntakeService', () => {
         reason: null,
       }).success,
     ).toBe(true);
+  });
+
+  it.each([
+    ['2026-10-12T23:59:00Z', false],
+    ['2026-10-13T00:00:00Z', true],
+    ['2026-10-13T14:59:00Z', true],
+    ['2026-10-13T15:00:00Z', false],
+  ])('enforces Vietnam opening hours at %s', async (time, open) => {
+    jest.useFakeTimers({ now: new Date(time) });
+    try {
+      const intake = new OnlineOrderIntakeService(
+        prisma as never,
+        new ConfigService({
+          ONLINE_ASAP_OPEN_LOCAL: '07:00',
+          ONLINE_ASAP_CLOSE_LOCAL: '22:00',
+        }),
+      );
+      expect((await intake.getAvailability()).acceptingAsap).toBe(open);
+      if (open)
+        await expect(
+          intake.assertAccepting(tx as never),
+        ).resolves.toBeUndefined();
+      else
+        await expect(
+          intake.assertAccepting(tx as never),
+        ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        intake.assertAccepting(tx as never, true),
+      ).resolves.toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

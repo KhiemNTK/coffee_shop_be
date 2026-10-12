@@ -5,6 +5,7 @@ export type OrderEventName =
   | 'order.items.added'
   | 'order.item.status.updated'
   | 'order.session.cancelled'
+  | 'order.session.completed'
   | 'order.session.table.transferred'
   | 'order.sessions.merged'
   | 'order.session.split'
@@ -42,7 +43,7 @@ export interface OrderItemStatusUpdatedPayload extends OrderEventBase {
   isServed: boolean;
 }
 
-export interface OrderSessionCancelledPayload extends OrderEventBase {
+export interface OrderSessionEndedPayload extends OrderEventBase {
   sessionId: string;
   tableId: string | null;
 }
@@ -83,7 +84,8 @@ export interface OrderEventPayloadMap {
   'order.session.opened': OrderSessionOpenedPayload;
   'order.items.added': OrderItemsAddedPayload;
   'order.item.status.updated': OrderItemStatusUpdatedPayload;
-  'order.session.cancelled': OrderSessionCancelledPayload;
+  'order.session.cancelled': OrderSessionEndedPayload;
+  'order.session.completed': OrderSessionEndedPayload;
   'order.session.table.transferred': OrderSessionTableTransferredPayload;
   'order.sessions.merged': OrderSessionsMergedPayload;
   'order.session.split': OrderSessionSplitPayload;

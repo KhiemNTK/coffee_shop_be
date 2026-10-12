@@ -1,9 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import {
   CashExpenseRequestStatus,
   CashHandoverSettlementStatus,
   CashHandoverStatus,
   OnlineOrderStatus,
+  OutboxEventStatus,
   PaymentReconciliationIncidentStatus,
   Prisma,
   ServeStatus,
@@ -15,6 +22,8 @@ import {
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { GetManagementExceptionsDto } from './dto/get-management-exceptions.dto';
 import { ONLINE_ORDER_NO_SHOW_GRACE_MS } from '../../common/consts/online-order-settings';
+import { IdempotencyService } from '../durable/idempotency.service';
+import { RetryOutboxEventDto } from './dto/retry-outbox-event.dto';
 
 const handoverWhere: Prisma.CashHandoverWhereInput = {
   OR: [
@@ -71,23 +80,34 @@ export class ManagementExceptionsService {
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
     private readonly pagination: PaginationUtilService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   async summary() {
     const asOf = new Date();
-    const [payment, cashExpense, cashHandover, feedback, kitchen, pickup] =
-      await Promise.all([
-        this.prisma.paymentReconciliationIncident.count({
-          where: { status: PaymentReconciliationIncidentStatus.OPEN },
-        }),
-        this.prisma.cashExpenseRequest.count({
-          where: { status: CashExpenseRequestStatus.PENDING },
-        }),
-        this.prisma.cashHandover.count({ where: handoverWhere }),
-        this.prisma.takeawayFeedback.count({ where: feedbackWhere }),
-        this.prisma.kitchenTicket.count({ where: overdueKitchenWhere(asOf) }),
-        this.prisma.onlineOrderRequest.count({ where: latePickupWhere(asOf) }),
-      ]);
+    const [
+      payment,
+      cashExpense,
+      cashHandover,
+      feedback,
+      kitchen,
+      pickup,
+      outbox,
+    ] = await Promise.all([
+      this.prisma.paymentReconciliationIncident.count({
+        where: { status: PaymentReconciliationIncidentStatus.OPEN },
+      }),
+      this.prisma.cashExpenseRequest.count({
+        where: { status: CashExpenseRequestStatus.PENDING },
+      }),
+      this.prisma.cashHandover.count({ where: handoverWhere }),
+      this.prisma.takeawayFeedback.count({ where: feedbackWhere }),
+      this.prisma.kitchenTicket.count({ where: overdueKitchenWhere(asOf) }),
+      this.prisma.onlineOrderRequest.count({ where: latePickupWhere(asOf) }),
+      this.prisma.outboxEvent.count({
+        where: { status: OutboxEventStatus.DEAD_LETTER },
+      }),
+    ]);
 
     return {
       asOf: asOf.toISOString(),
@@ -98,8 +118,16 @@ export class ManagementExceptionsService {
         FEEDBACK: feedback,
         KITCHEN_OVERDUE: kitchen,
         ONLINE_PICKUP_LATE: pickup,
+        OUTBOX_DEAD_LETTER: outbox,
       },
-      total: payment + cashExpense + cashHandover + feedback + kitchen + pickup,
+      total:
+        payment +
+        cashExpense +
+        cashHandover +
+        feedback +
+        kitchen +
+        pickup +
+        outbox,
     };
   }
 
@@ -108,6 +136,33 @@ export class ManagementExceptionsService {
     const take = query.itemPerPage;
 
     switch (query.kind) {
+      case 'OUTBOX_DEAD_LETTER': {
+        const where = { status: OutboxEventStatus.DEAD_LETTER };
+        const [totalItems, list] = await Promise.all([
+          this.prisma.outboxEvent.count({ where }),
+          this.prisma.outboxEvent.findMany({
+            where,
+            skip,
+            take,
+            orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+            select: {
+              id: true,
+              topic: true,
+              eventName: true,
+              aggregateType: true,
+              aggregateId: true,
+              status: true,
+              attempts: true,
+              occurredAt: true,
+              availableAt: true,
+            },
+          }),
+        ]);
+        return {
+          kind: query.kind,
+          ...this.pagination.paging({ ...query, totalItems }).format(list),
+        };
+      }
       case 'PAYMENT': {
         const where = {
           status: PaymentReconciliationIncidentStatus.OPEN,
@@ -253,5 +308,66 @@ export class ManagementExceptionsService {
         };
       }
     }
+  }
+
+  retryOutboxEvent(id: string, employeeId: string, dto: RetryOutboxEventDto) {
+    return this.idempotency.execute(
+      {
+        employeeId,
+        operation: 'management.outbox.retry',
+        key: dto.idempotencyKey,
+        request: {
+          id,
+          reason: dto.reason,
+          expectedAvailableAt: dto.expectedAvailableAt,
+        },
+      },
+      async (tx) => {
+        const employee = await tx.employee.findFirst({
+          where: { id: employeeId, isActive: true, deletedAt: null },
+          select: { id: true },
+        });
+        if (!employee) throw new UnauthorizedException('Employee is inactive.');
+        const event = await tx.outboxEvent.findUnique({
+          where: { id },
+          select: { status: true, attempts: true, availableAt: true },
+        });
+        if (!event) throw new NotFoundException('Outbox event not found.');
+        const updated = await tx.outboxEvent.updateMany({
+          where: {
+            id,
+            status: OutboxEventStatus.DEAD_LETTER,
+            availableAt: new Date(dto.expectedAvailableAt),
+          },
+          data: {
+            status: OutboxEventStatus.PENDING,
+            attempts: 0,
+            availableAt: new Date(),
+            lockedAt: null,
+            lockedBy: null,
+          },
+        });
+        if (updated.count !== 1) {
+          throw new ConflictException(
+            'Outbox event changed. Reload before retrying.',
+          );
+        }
+        await tx.actionLog.create({
+          data: {
+            employeeId,
+            actionType: 'OUTBOX_EVENT_RETRY',
+            details: {
+              outboxEventId: id,
+              reason: dto.reason,
+              previousStatus: event.status,
+              previousAttempts: event.attempts,
+              previousAvailableAt: event.availableAt.toISOString(),
+              status: OutboxEventStatus.PENDING,
+            },
+          },
+        });
+        return { id, status: OutboxEventStatus.PENDING };
+      },
+    );
   }
 }

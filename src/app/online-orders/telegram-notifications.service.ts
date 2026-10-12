@@ -19,10 +19,13 @@ import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { OutboxService } from '../durable/outbox.service';
 import { ORDER_EVENTS } from '../orders/events/order.events';
 import {
-  ONLINE_ORDER_ACCESS_WINDOW_MS,
   ONLINE_ORDER_TELEGRAM_EVENT,
   ONLINE_ORDER_TELEGRAM_READY_EVENT,
 } from './telegram-events';
+import {
+  ONLINE_ORDER_ACCESS_WINDOW_MS,
+  PICKUP_ACCESS_GRACE_MS,
+} from './online-order-access';
 
 const UpdateSchema = z.object({
   message: z.object({
@@ -132,15 +135,30 @@ export class TelegramNotificationsService
           id: request.id,
           telegramLinkTokenHash: hash,
           telegramLinkExpiresAt: { gt: new Date() },
-          createdAt: {
-            gt: new Date(Date.now() - ONLINE_ORDER_ACCESS_WINDOW_MS),
-          },
           telegramChatId: null,
-          OR: [
-            { status: OnlineOrderStatus.ACCEPTED },
+          AND: [
             {
-              status: OnlineOrderStatus.PENDING,
-              expiresAt: { gt: new Date() },
+              OR: [
+                {
+                  createdAt: {
+                    gt: new Date(Date.now() - ONLINE_ORDER_ACCESS_WINDOW_MS),
+                  },
+                },
+                {
+                  pickupAt: {
+                    gt: new Date(Date.now() - PICKUP_ACCESS_GRACE_MS),
+                  },
+                },
+              ],
+            },
+            {
+              OR: [
+                { status: OnlineOrderStatus.ACCEPTED },
+                {
+                  status: OnlineOrderStatus.PENDING,
+                  expiresAt: { gt: new Date() },
+                },
+              ],
             },
           ],
         },

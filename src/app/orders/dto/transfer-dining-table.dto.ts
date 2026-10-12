@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export const TransferDiningTableSchema = z
   .object({
+    sourceOrderSessionId: z.uuid(),
     fromTableId: z.uuid({ message: 'fromTableId must be a valid UUID' }),
     toTableId: z.uuid({ message: 'toTableId must be a valid UUID' }),
   })

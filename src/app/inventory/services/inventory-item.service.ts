@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   InventoryTxType,
   PurchaseReceiptStatus,
@@ -158,6 +162,13 @@ export class InventoryItemService {
           id,
           tx,
         );
+        if (dto.unitId !== undefined && dto.unitId !== existing.unitId) {
+          throw new ConflictException({
+            code: 'INVENTORY_UNIT_IMMUTABLE',
+            message:
+              'Create a new inventory item instead of changing its measurement unit.',
+          });
+        }
         const nextCategoryId = dto.categoryId ?? existing.categoryId;
 
         if (dto.categoryId) {
@@ -165,9 +176,6 @@ export class InventoryItemService {
             dto.categoryId,
             tx,
           );
-        }
-        if (dto.unitId) {
-          await this.inventoryRepository.ensureActiveUnitExists(dto.unitId, tx);
         }
         if (dto.name || dto.categoryId) {
           await this.inventoryRepository.ensureItemNameAvailable({

@@ -39,6 +39,7 @@ describe('InvoicesService', () => {
     tx = {
       employee: { findUnique: jest.fn().mockResolvedValue({ isActive: true }) },
       orderSession: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findUnique: jest.fn().mockResolvedValue({
           id: 'session-id',
           sessionStatus: SessionStatus.ACTIVE,
@@ -46,6 +47,7 @@ describe('InvoicesService', () => {
         }),
       },
       orderItem: {
+        count: jest.fn().mockResolvedValue(0),
         findMany: jest.fn().mockResolvedValue([
           {
             id: 'item-id',
@@ -105,6 +107,35 @@ describe('InvoicesService', () => {
     }).compile();
 
     service = module.get(InvoicesService);
+  });
+
+  it('keeps dine-in occupied even when all items are paid', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      tableId: 'table-id',
+      sessionStatus: SessionStatus.ACTIVE,
+    });
+    await service.checkoutInvoice('employee-id', {
+      orderSessionId: 'session-id',
+      paymentMethod: PaymentMethod.CASH,
+      amountTendered: '50000',
+      closeSessionAfterPayment: true,
+    });
+    expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderItem.count).not.toHaveBeenCalled();
+  });
+
+  it('still closes fully paid takeaway sessions', async () => {
+    await service.checkoutInvoice('employee-id', {
+      orderSessionId: 'session-id',
+      paymentMethod: PaymentMethod.CASH,
+      amountTendered: '50000',
+      closeSessionAfterPayment: true,
+    });
+    expect(tx.orderSession.updateMany).toHaveBeenCalledWith({
+      where: { id: 'session-id', sessionStatus: SessionStatus.ACTIVE },
+      data: { sessionStatus: SessionStatus.COMPLETED },
+    });
   });
 
   it('books a cash checkout against the paying employee open shift', async () => {

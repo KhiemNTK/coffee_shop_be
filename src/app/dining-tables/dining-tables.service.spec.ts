@@ -1,4 +1,5 @@
 import { TableStatus } from '@prisma/client';
+import { ConflictException } from '@nestjs/common';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { DiningTablesService } from './dining-tables.service';
 
@@ -7,6 +8,7 @@ describe('DiningTablesService', () => {
     findFirst: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
     findMany: jest.fn(),
   };
   const service = new DiningTablesService({
@@ -52,13 +54,31 @@ describe('DiningTablesService', () => {
       name: 'A1',
       status: TableStatus.EMPTY,
     });
-    diningTable.update.mockResolvedValue({ id: 'table-id' });
+    diningTable.updateMany.mockResolvedValue({ count: 1 });
 
     await service.deleteTable('table-id');
 
-    expect(diningTable.update).toHaveBeenCalledWith({
-      where: { id: 'table-id' },
+    expect(diningTable.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'table-id',
+        deletedAt: null,
+        status: TableStatus.EMPTY,
+        orderSessions: { none: { sessionStatus: 'ACTIVE' } },
+      },
       data: { deletedAt: expect.any(Date) },
     });
+  });
+
+  it('rejects a table claimed after the metadata read', async () => {
+    diningTable.findFirst.mockResolvedValue({
+      id: 'table-id',
+      name: 'A1',
+      status: TableStatus.EMPTY,
+    });
+    diningTable.updateMany.mockResolvedValue({ count: 0 });
+    await expect(service.deleteTable('table-id')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(diningTable.update).not.toHaveBeenCalled();
   });
 });

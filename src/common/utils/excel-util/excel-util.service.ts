@@ -2,6 +2,8 @@ import { SYSTEM_ERRORS } from './../../consts/message';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { type CellValue, Workbook, type Worksheet } from 'exceljs';
 import { File, GenerateExcelParams } from './dto/excel-util.interface';
+import { EXCEL_IMPORT_LIMITS } from './excel-import-limits';
+import { validateExcelArchive } from './excel-import-guard';
 
 const toCamelCase = (str: string): string =>
   str
@@ -104,12 +106,22 @@ export class ExcelUtilService {
   }
 
   async read(file: File) {
-    if (!file || !file.buffer)
+    if (!file || !Buffer.isBuffer(file.buffer) || file.buffer.length === 0)
       throw new BadRequestException(SYSTEM_ERRORS.FILE_NOT_FOUND);
+    if (file.buffer.length > EXCEL_IMPORT_LIMITS.fileSize) {
+      throw new BadRequestException(
+        `Excel file size limit (${EXCEL_IMPORT_LIMITS.fileSize} bytes) exceeded.`,
+      );
+    }
     const workbook = new Workbook();
     try {
-      await workbook.xlsx.load(file.buffer as unknown as ArrayBuffer);
+      await validateExcelArchive(file.buffer);
+      // Validation ranges are not imported and can expand into millions of cells.
+      await workbook.xlsx.load(file.buffer as unknown as ArrayBuffer, {
+        ignoreNodes: ['dataValidations', 'conditionalFormatting', 'extLst'],
+      });
     } catch (error) {
+      if (error instanceof BadRequestException) throw error;
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Excel parse error: ${errorMessage}`);
@@ -122,13 +134,19 @@ export class ExcelUtilService {
         const headerMap = new Map<number, string>();
         worksheet.getRow(1).eachCell((cell, colNumber) => {
           if (cell.text) {
-            headerMap.set(colNumber, toCamelCase(String(cell.text)));
+            const header = toCamelCase(String(cell.text));
+            if (!header || [...headerMap.values()].includes(header)) {
+              throw new BadRequestException(
+                `Sheet '${worksheet.name}' contains empty or duplicate headers.`,
+              );
+            }
+            headerMap.set(colNumber, header);
           }
         });
         worksheet.eachRow((row, rowNumber) => {
           if (rowNumber === 1) return;
 
-          const value: Record<string, unknown> = {};
+          const value: Record<string, unknown> = Object.create(null);
 
           headerMap.forEach((fieldName, colNumber) => {
             const rawValue = row.getCell(colNumber).value;
@@ -139,7 +157,7 @@ export class ExcelUtilService {
         acc[worksheet.name] = sheetData;
         return acc;
       },
-      {},
+      Object.create(null) as Record<string, object[]>,
     );
     return sheetsData;
   }

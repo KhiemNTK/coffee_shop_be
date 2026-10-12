@@ -35,6 +35,7 @@ import { CreatePaymentAttemptDto, GetPaymentAttemptsDto } from './dto';
 import { VnpayService } from './vnpay.service';
 import { MomoService } from './momo.service';
 import { PaymentProviderFactory } from './payment-provider.factory';
+import { PayosService, PAYOS_PAYMENT_NOTIFIED } from './payos.service';
 
 const VNPAY_RESPONSE = {
   SUCCESS: { RspCode: '00', Message: 'Confirm Success' },
@@ -77,6 +78,7 @@ export class PaymentsService {
     private readonly vnpay: VnpayService,
     private readonly providers: PaymentProviderFactory,
     private readonly momo: MomoService,
+    private readonly payos: PayosService,
   ) {}
 
   listProviders() {
@@ -91,8 +93,8 @@ export class PaymentsService {
   ) {
     const provider = dto.provider ?? PaymentProvider.VNPAY;
     this.providers.get(provider).assertConfigured();
-    if (provider === PaymentProvider.MOMO && dto.bankCode) {
-      throw new BadRequestException('MoMo does not support bankCode.');
+    if (provider !== PaymentProvider.VNPAY && dto.bankCode) {
+      throw new BadRequestException('Only VNPay supports bankCode.');
     }
     const requestHash = this.createRequestHash(invoiceId, dto);
     const existing = await this.prisma.paymentAttempt.findUnique({
@@ -161,6 +163,8 @@ export class PaymentsService {
           if (provider === PaymentProvider.MOMO) {
             this.momo.assertAmount(invoice.totalAmount);
           }
+          if (provider === PaymentProvider.PAYOS)
+            this.payos.assertAmount(invoice.totalAmount);
 
           const unresolved = await tx.paymentAttempt.findFirst({
             where: {
@@ -183,17 +187,25 @@ export class PaymentsService {
           );
           const now = new Date();
           const ttlMinutes = this.config.get<number>(
-            provider === PaymentProvider.MOMO
-              ? 'MOMO_ATTEMPT_TTL_MINUTES'
-              : 'VNPAY_ATTEMPT_TTL_MINUTES',
+            `${provider}_ATTEMPT_TTL_MINUTES`,
             15,
           );
           const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
+          const merchantReference =
+            provider === PaymentProvider.PAYOS
+              ? String(
+                  (
+                    await tx.$queryRaw<Array<{ code: bigint }>>(
+                      Prisma.sql`SELECT nextval('payos_order_code_seq') AS code`,
+                    )
+                  )[0].code,
+                )
+              : this.createMerchantReference();
           const created = await tx.paymentAttempt.create({
             data: {
               provider,
               amount: invoice.totalAmount,
-              merchantReference: this.createMerchantReference(),
+              merchantReference,
               idempotencyKey: dto.idempotencyKey,
               requestHash,
               closeSessionAfterPayment: dto.closeSessionAfterPayment,
@@ -266,7 +278,13 @@ export class PaymentsService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       include: PAYMENT_ATTEMPT_INCLUDE,
     });
-    return paging.format(attempts);
+    return paging.format(
+      attempts.map((attempt) => ({
+        ...attempt,
+        paymentUrl: null,
+        providerPaymentLinkId: null,
+      })),
+    );
   }
 
   async findAttempt(id: string) {
@@ -276,6 +294,27 @@ export class PaymentsService {
     });
     if (!attempt) {
       throw new NotFoundException(`Payment attempt with ID ${id} not found.`);
+    }
+    return { ...attempt, paymentUrl: null, providerPaymentLinkId: null };
+  }
+
+  async recoverPaymentLink(id: string) {
+    const attempt = await this.prisma.paymentAttempt.findUnique({
+      where: { id },
+      include: PAYMENT_ATTEMPT_INCLUDE,
+    });
+    if (!attempt) throw new NotFoundException('Payment attempt not found.');
+    if (
+      attempt.status !== PaymentAttemptStatus.PENDING ||
+      attempt.expiresAt <= new Date() ||
+      attempt.invoice.paymentStatus !== PaymentStatus.UNPAID ||
+      !attempt.paymentUrl
+    ) {
+      throw new ConflictException({
+        code: 'PAYMENT_LINK_UNAVAILABLE',
+        message:
+          'Payment link is unavailable. Check or reconcile the existing attempt; do not create another payment.',
+      });
     }
     return attempt;
   }
@@ -517,6 +556,88 @@ export class PaymentsService {
     };
   }
 
+  async handlePayosWebhook(raw: unknown) {
+    const { data, payloadHash } = await this.payos.verifyCallback(raw);
+    try {
+      await runSerializableTransaction(this.prisma, async (tx) => {
+        const attempt = await tx.paymentAttempt.findUnique({
+          where: { merchantReference: String(data.orderCode) },
+        });
+        // payOS sends a signed probe while registering the webhook; it is not a local payment.
+        if (!attempt || attempt.provider !== PaymentProvider.PAYOS) return;
+        const event = await tx.paymentWebhookEvent.create({
+          data: {
+            provider: PaymentProvider.PAYOS,
+            payloadHash,
+            merchantReference: String(data.orderCode),
+            providerTransactionNo: data.reference,
+            responseCode: data.code,
+            payload: data,
+            paymentAttemptId: attempt.id,
+          },
+        });
+        if (data.code !== '00') {
+          await this.completeWebhook(tx, event.id, 'IGNORED');
+          return;
+        }
+        if (
+          data.currency !== 'VND' ||
+          (attempt.providerPaymentLinkId &&
+            attempt.providerPaymentLinkId !== data.paymentLinkId)
+        ) {
+          await this.markPaymentReview(tx, attempt, {
+            type: PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+            title: 'payOS notification does not match the payment attempt',
+            providerTransactionNo: null,
+            details: {
+              currency: data.currency,
+              paymentLinkId: data.paymentLinkId,
+            },
+          });
+          await this.completeWebhook(tx, event.id, 'MISMATCH');
+          return;
+        }
+        await tx.paymentAttempt.updateMany({
+          where: {
+            id: attempt.id,
+            status: {
+              in: [PaymentAttemptStatus.PENDING, PaymentAttemptStatus.EXPIRED],
+            },
+          },
+          data: { nextReconcileAt: new Date() },
+        });
+        await this.outbox.enqueue(tx, {
+          topic: 'payment',
+          eventName: PAYOS_PAYMENT_NOTIFIED,
+          aggregateType: 'PaymentAttempt',
+          aggregateId: attempt.id,
+          payload: {
+            paymentAttemptId: attempt.id,
+            paymentLinkId: data.paymentLinkId,
+          },
+        });
+        await this.completeWebhook(tx, event.id, 'RECONCILIATION_QUEUED');
+      });
+    } catch (error) {
+      if (this.isPayloadReplay(error)) return;
+      throw error;
+    }
+  }
+
+  async inspectPayosReturn(query: PaymentCallbackQuery) {
+    const paymentAttemptId = this.payos.verifyReturnState(query.state);
+    const attempt = paymentAttemptId
+      ? await this.prisma.paymentAttempt.findUnique({
+          where: { id: paymentAttemptId },
+          select: { id: true, provider: true, invoiceId: true, status: true },
+        })
+      : null;
+    return {
+      signatureValid: Boolean(paymentAttemptId),
+      attempt: attempt?.provider === PaymentProvider.PAYOS ? attempt : null,
+    };
+  }
+
   async handleMomoIpn(raw: unknown) {
     const verified = this.momo.verifyCallback(raw);
     if (!verified) throw new BadRequestException('Invalid MoMo notification.');
@@ -734,20 +855,54 @@ export class PaymentsService {
     ipAddress: string,
     dto: CreatePaymentAttemptDto,
   ) {
-    const paymentUrl =
-      attempt.status === PaymentAttemptStatus.PENDING
-        ? await this.providers.createPaymentUrl(attempt.provider, {
-            amount: attempt.amount,
-            invoiceNumber: attempt.invoice.invoiceNumber,
-            merchantReference: attempt.merchantReference,
-            ipAddress,
-            expiresAt: attempt.expiresAt,
-            providerCreatedAt: attempt.providerCreatedAt,
-            locale: dto.locale,
-            bankCode: dto.bankCode,
-          })
-        : null;
-    return { ...attempt, paymentUrl };
+    if (
+      attempt.status !== PaymentAttemptStatus.PENDING ||
+      attempt.expiresAt <= new Date() ||
+      attempt.invoice.paymentStatus !== PaymentStatus.UNPAID
+    )
+      return { ...attempt, paymentUrl: null };
+    if (attempt.paymentUrl) return attempt;
+    const paymentUrl = await this.providers.createPaymentUrl(attempt.provider, {
+      paymentAttemptId: attempt.id,
+      amount: attempt.amount,
+      invoiceNumber: attempt.invoice.invoiceNumber,
+      merchantReference: attempt.merchantReference,
+      ipAddress,
+      expiresAt: attempt.expiresAt,
+      providerCreatedAt: attempt.providerCreatedAt,
+      locale: dto.locale,
+      bankCode: dto.bankCode,
+    });
+    const linkData = {
+      paymentUrl,
+      ...(attempt.provider === PaymentProvider.PAYOS
+        ? { providerPaymentLinkId: this.payos.paymentLinkId(paymentUrl) }
+        : {}),
+    };
+    const persisted = await this.prisma.paymentAttempt.updateMany({
+      where: {
+        id: attempt.id,
+        status: PaymentAttemptStatus.PENDING,
+        expiresAt: { gt: new Date() },
+        paymentUrl: null,
+        invoice: { paymentStatus: PaymentStatus.UNPAID },
+      },
+      data: linkData,
+    });
+    if (persisted.count === 1) return { ...attempt, ...linkData };
+    const current = await this.prisma.paymentAttempt.findUniqueOrThrow({
+      where: { id: attempt.id },
+      include: PAYMENT_ATTEMPT_INCLUDE,
+    });
+    return {
+      ...current,
+      paymentUrl:
+        current.status === PaymentAttemptStatus.PENDING &&
+        current.expiresAt > new Date() &&
+        current.invoice.paymentStatus === PaymentStatus.UNPAID
+          ? current.paymentUrl
+          : null,
+    };
   }
 
   private assertIdempotentReplay(

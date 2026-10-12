@@ -8,6 +8,7 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentRefundsService } from './payment-refunds.service';
 import { PaymentsService } from './payments.service';
 import { MomoService } from './momo.service';
+import { PayosService } from './payos.service';
 import { PaymentProviderFactory } from './payment-provider.factory';
 import { VnpayService } from './vnpay.service';
 
@@ -21,6 +22,7 @@ import { VnpayService } from './vnpay.service';
     PaymentReconciliationScheduler,
     VnpayService,
     MomoService,
+    PayosService,
     PaymentProviderFactory,
   ],
 })

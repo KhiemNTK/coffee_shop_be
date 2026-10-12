@@ -80,8 +80,9 @@ export class PositionsService {
   async deletePosition(id: string) {
     await this.getPositionById(id);
 
-    await this.prisma.position.delete({
+    await this.prisma.position.update({
       where: { id },
+      data: { deletedAt: new Date() },
     });
 
     return {

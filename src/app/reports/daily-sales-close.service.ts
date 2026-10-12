@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, type DailySalesClose } from '@prisma/client';
+import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -171,9 +172,8 @@ export class DailySalesCloseService {
       Prisma.sql`
         SELECT COUNT(*)::bigint AS count,
           COALESCE(SUM(pr."amount"), 0)::numeric AS amount
-        FROM "PaymentRefund" pr
-        JOIN "PaymentAttempt" pa ON pa."id" = pr."paymentAttemptId"
-        JOIN "Invoice" i ON i."id" = pa."invoiceId"
+        FROM (${INVOICE_REFUNDS_SQL}) pr
+        JOIN "Invoice" i ON i."id" = pr."invoiceId"
         WHERE i."createdAt" >= ${close.periodStart}
           AND i."createdAt" < ${close.periodEnd}
           AND pr."status" = 'SUCCEEDED'

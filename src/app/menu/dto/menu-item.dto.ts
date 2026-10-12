@@ -9,6 +9,16 @@ import {
 
 const MenuItemInputSchema = {
   name: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(1000).nullable().optional(),
+  imageUrl: z
+    .url()
+    .max(2048)
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === 'https:' && !url.username && !url.password;
+    }, 'Menu images require an HTTPS URL without credentials')
+    .nullable()
+    .optional(),
   price: MenuMoneyInputSchema,
   categoryId: z.uuid('Invalid UUID for menu category'),
   kitchenStationId: z
@@ -24,6 +34,8 @@ export class CreateMenuItemDto extends createZodDto(
 export class UpdateMenuItemDto extends createZodDto(
   NonEmptyUpdateSchema({
     name: MenuItemInputSchema.name.optional(),
+    description: MenuItemInputSchema.description,
+    imageUrl: MenuItemInputSchema.imageUrl,
     price: MenuItemInputSchema.price.optional(),
     categoryId: MenuItemInputSchema.categoryId.optional(),
     kitchenStationId: MenuItemInputSchema.kitchenStationId,

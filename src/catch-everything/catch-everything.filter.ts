@@ -12,6 +12,8 @@ import { ZodSerializationException, ZodValidationException } from 'nestjs-zod';
 import { ApiUtilService } from '../common/utils/api-util/api-util.service';
 import { Prisma } from '@prisma/client';
 import type { RequestWithContext } from '../common/middlewares/request-context.middleware';
+import { resolveApiLocale } from '../common/i18n/http-locale';
+import { localizeApiErrors } from '../common/i18n/error-messages';
 
 interface ErrorItem {
   message: string;
@@ -59,9 +61,15 @@ export class CatchEverythingFilter implements ExceptionFilter {
     const reqContext = `${method} ${url}`;
 
     const { status, errors } = this.resolveException(exception, reqContext);
+    const code = this.resolveErrorCode(exception, status);
     const responseBody = this.apiUtilService.formatResponse({
-      errors,
-      code: this.resolveErrorCode(exception, status),
+      errors: localizeApiErrors(
+        errors,
+        resolveApiLocale(request),
+        code,
+        exception,
+      ),
+      code,
       requestId: request.requestId,
     });
 

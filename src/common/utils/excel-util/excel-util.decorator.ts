@@ -6,11 +6,18 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiBody, ApiProduces } from '@nestjs/swagger';
 import { ExcelResponseInterceptor } from '../../../common/interceptors/excel-response/excel-response.interceptor';
+import { EXCEL_IMPORT_LIMITS } from './excel-import-limits';
 
 export const ImportExcel = () => {
   return applyDecorators(
     UseInterceptors(
       FileInterceptor('file', {
+        limits: {
+          fileSize: EXCEL_IMPORT_LIMITS.fileSize,
+          files: EXCEL_IMPORT_LIMITS.files,
+          parts: EXCEL_IMPORT_LIMITS.parts,
+          fields: EXCEL_IMPORT_LIMITS.fields,
+        },
         fileFilter: (req, file, cb) => {
           const isExcelExtension = file.originalname.match(/\.(xlsx)$/i);
           const isExcelMimeType =

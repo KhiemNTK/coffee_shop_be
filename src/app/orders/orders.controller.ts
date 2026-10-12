@@ -15,6 +15,7 @@ import { Throttle } from '@nestjs/throttler';
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  ClearDiningTableDto,
   RemakeOrderItemDto,
   GetHandoffItemsDto,
   GetOpenTakeawayFeedbackCasesDto,
@@ -182,6 +183,16 @@ export class OrdersController {
     return this.ordersService.addOrderItems(id, addOrderItemsDto, employeeId);
   }
 
+  @Post('sessions/:id/complete')
+  @RequirePermissions(PermissionKeys.ORDERS_TABLES_CLEAR)
+  @HttpCode(HttpStatus.OK)
+  completeSession(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.completeSession(id, employeeId);
+  }
+
   @Patch('items/:id/status')
   @RequirePermissions(PermissionKeys.ORDERS_ITEMS_UPDATE_STATUS)
   updateItemStatus(
@@ -251,7 +262,7 @@ export class OrdersController {
 
   @Post('tables/:id/clear')
   @RequirePermissions(PermissionKeys.ORDERS_TABLES_CLEAR)
-  clearTable(@Param() { id }: IDDto) {
-    return this.ordersService.clearTable(id);
+  clearTable(@Param() { id }: IDDto, @Body() dto: ClearDiningTableDto) {
+    return this.ordersService.clearTable(id, dto.expectedOrderSessionId);
   }
 }

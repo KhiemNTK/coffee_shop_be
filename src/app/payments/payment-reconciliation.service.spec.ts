@@ -11,6 +11,8 @@ import type { InvoicesService } from '../invoices/invoices.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
 import type { VnpayService } from './vnpay.service';
 import type { MomoService } from './momo.service';
+import type { PayosService } from './payos.service';
+import { DomainEventBusService } from '../durable/domain-event-bus.service';
 
 describe('PaymentReconciliationService', () => {
   const attempt = {
@@ -41,6 +43,7 @@ describe('PaymentReconciliationService', () => {
       id: 'invoice-id',
       invoiceNumber: 'INV-001',
       paymentStatus: PaymentStatus.UNPAID,
+      totalAmount: new Prisma.Decimal('100000'),
     },
   };
   const tx = {
@@ -75,6 +78,7 @@ describe('PaymentReconciliationService', () => {
     assertConfigured: jest.fn(),
     queryTransaction: jest.fn(),
   };
+  const payos = { assertConfigured: jest.fn(), queryTransaction: jest.fn() };
   const service = new PaymentReconciliationService(
     prisma as unknown as ExtendedPrismaClient,
     new PaginationUtilService(),
@@ -82,6 +86,8 @@ describe('PaymentReconciliationService', () => {
     outbox as unknown as OutboxService,
     vnpay as unknown as VnpayService,
     momo as unknown as MomoService,
+    payos as unknown as PayosService,
+    new DomainEventBusService(),
   );
 
   beforeEach(() => {
@@ -114,6 +120,57 @@ describe('PaymentReconciliationService', () => {
       },
     });
   });
+
+  it.each([
+    ['PAID', 100000, 0, false, PaymentAttemptStatus.SUCCEEDED],
+    ['UNDERPAID', 50000, 50000, false, PaymentAttemptStatus.EXPIRED],
+    ['PAID', 100001, -1, false, PaymentAttemptStatus.REQUIRES_REVIEW],
+    ['CANCELLED', 0, 100000, false, PaymentAttemptStatus.FAILED],
+    ['CANCELLED', 50000, 50000, false, PaymentAttemptStatus.REQUIRES_REVIEW],
+    ['PAID', 100000, 0, true, PaymentAttemptStatus.REQUIRES_REVIEW],
+  ])(
+    'reconciles payOS %s with paid amount %s safely',
+    async (status, amountPaid, amountRemaining, invoiceChanged, expected) => {
+      const current = {
+        ...attempt,
+        provider: PaymentProvider.PAYOS,
+        merchantReference: '1000000000',
+        providerPaymentLinkId: 'a'.repeat(32),
+        invoice: {
+          ...attempt.invoice,
+          paymentStatus: invoiceChanged
+            ? PaymentStatus.VOIDED
+            : PaymentStatus.UNPAID,
+        },
+      };
+      prisma.paymentAttempt.findUnique
+        .mockReset()
+        .mockResolvedValueOnce({
+          id: current.id,
+          provider: PaymentProvider.PAYOS,
+        })
+        .mockResolvedValueOnce(current);
+      tx.paymentAttempt.findUnique.mockResolvedValue(current);
+      payos.queryTransaction.mockResolvedValue({
+        id: 'a'.repeat(32),
+        orderCode: 1000000000,
+        amount: 100000,
+        amountPaid,
+        amountRemaining,
+        status,
+        transactions: amountPaid
+          ? [{ reference: 'BANK-1', amount: amountPaid }]
+          : [],
+      });
+      const result = await service.reconcileAttempt(current.id, 'manager-id');
+      expect(result?.status).toBe(expected);
+      expect(invoices.completeOnlinePayment).toHaveBeenCalledTimes(
+        expected === PaymentAttemptStatus.SUCCEEDED ? 1 : 0,
+      );
+      expect(vnpay.queryTransaction).not.toHaveBeenCalled();
+      expect(momo.queryTransaction).not.toHaveBeenCalled();
+    },
+  );
 
   it('repairs an expired local attempt when VNPay confirms payment', async () => {
     const result = await service.reconcileAttempt(attempt.id, 'manager-id');

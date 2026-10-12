@@ -3,6 +3,7 @@ export const ORDER_EVENTS = {
   ITEMS_ADDED: 'order.items.added',
   ITEM_STATUS_UPDATED: 'order.item.status.updated',
   SESSION_CANCELLED: 'order.session.cancelled',
+  SESSION_COMPLETED: 'order.session.completed',
   SESSION_TABLE_TRANSFERRED: 'order.session.table.transferred',
   SESSIONS_MERGED: 'order.sessions.merged',
   SESSION_SPLIT: 'order.session.split',

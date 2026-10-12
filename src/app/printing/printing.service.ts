@@ -412,16 +412,22 @@ export class PrintingService {
           where: {
             invoiceId,
             type: PrintJobType.RECEIPT,
-            status: PrintJobStatus.PRINTED,
+            reprintOfId: null,
           },
-          orderBy: { printedAt: 'asc' },
-          select: { id: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { id: true, payload: true },
         });
+        // shortcut: uncaptured receipts use current names, add sale-time names if legacy fidelity is required.
+        const originalPayload = original?.payload;
         const job = await tx.printJob.create({
           data: {
             type: PrintJobType.RECEIPT,
             payload: {
-              ...this.receiptPayload(invoice),
+              ...(originalPayload &&
+              typeof originalPayload === 'object' &&
+              !Array.isArray(originalPayload)
+                ? originalPayload
+                : this.receiptPayload(invoice)),
               isReprint: true,
             },
             copies: dto.copies,

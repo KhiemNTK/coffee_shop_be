@@ -17,7 +17,12 @@ export function startTelemetry() {
       new HttpInstrumentation({
         ignoreIncomingRequestHook: (request) => {
           const path = request.url?.split('?', 1)[0];
-          return path === '/metrics' || path?.endsWith('/health/live') === true;
+          // Return tokens are capabilities; request latency is still covered by application metrics.
+          return (
+            path === '/metrics' ||
+            path?.endsWith('/health/live') === true ||
+            path?.endsWith('/payments/payos/return') === true
+          );
         },
       }),
       new ExpressInstrumentation(),

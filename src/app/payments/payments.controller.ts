@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Post,
   Query,
@@ -9,7 +10,7 @@ import {
   Res,
   HttpCode,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
@@ -25,6 +26,7 @@ import {
   GetPaymentIncidentsDto,
   GetPaymentRefundsDto,
   ResolvePaymentIncidentDto,
+  PayosWebhookDto,
 } from './dto';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentRefundsService } from './payment-refunds.service';
@@ -71,6 +73,16 @@ export class PaymentsController {
   @RequirePermissions(PermissionKeys.PAYMENT_ATTEMPTS_READ)
   findAttempt(@Param() { id }: IDDto) {
     return this.paymentsService.findAttempt(id);
+  }
+
+  @Post('payment-attempts/:id/payment-link')
+  @RequirePermissions(
+    PermissionKeys.PAYMENT_ATTEMPTS_CREATE,
+    PermissionKeys.PAYMENT_ATTEMPTS_READ,
+  )
+  @Header('Cache-Control', 'no-store')
+  recoverPaymentLink(@Param() { id }: IDDto) {
+    return this.paymentsService.recoverPaymentLink(id);
   }
 
   @Post('payment-attempts/:id/refunds')
@@ -148,5 +160,29 @@ export class PaymentsController {
   @SkipAuth()
   inspectMomoReturn(@Query() query: unknown) {
     return this.paymentsService.inspectMomoReturn(query);
+  }
+
+  @Post('payments/payos/webhook')
+  @ApiOperation({
+    summary: 'Verify payOS notification and durably queue reconciliation',
+  })
+  @SkipAuth()
+  @SkipCsrf()
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async handlePayosWebhook(@Body() body: PayosWebhookDto) {
+    await this.paymentsService.handlePayosWebhook(body);
+    return { ok: true };
+  }
+
+  @Get('payments/payos/return')
+  @ApiOperation({
+    summary:
+      'Read payment status with a server-issued return token; never confirms payment',
+  })
+  @SkipAuth()
+  @Header('Cache-Control', 'no-store')
+  inspectPayosReturn(@Query() query: PaymentCallbackQuery) {
+    return this.paymentsService.inspectPayosReturn(query);
   }
 }

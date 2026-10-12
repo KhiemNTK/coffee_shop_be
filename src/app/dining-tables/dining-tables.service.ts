@@ -99,10 +99,19 @@ export class DiningTablesService {
       );
     }
 
-    await this.prisma.diningTable.update({
-      where: { id },
+    const deleted = await this.prisma.diningTable.updateMany({
+      where: {
+        id,
+        deletedAt: null,
+        status: TableStatus.EMPTY,
+        orderSessions: { none: { sessionStatus: SessionStatus.ACTIVE } },
+      },
       data: { deletedAt: new Date() },
     });
+    if (deleted.count !== 1)
+      throw new ConflictException(
+        'Table changed or has an active session. Refresh before deleting.',
+      );
 
     this.logger.log(
       `Table '${table.name}' (${id}) has been successfully soft-deleted.`,
@@ -117,8 +126,19 @@ export class DiningTablesService {
         orderSessions: {
           where: { sessionStatus: SessionStatus.ACTIVE },
           take: 1,
-          include: {
-            orderItems: true,
+          select: {
+            id: true,
+            sessionStatus: true,
+            guestCount: true,
+            createdAt: true,
+            orderItems: {
+              select: {
+                id: true,
+                quantity: true,
+                serveStatus: true,
+                isPaid: true,
+              },
+            },
           },
         },
       },

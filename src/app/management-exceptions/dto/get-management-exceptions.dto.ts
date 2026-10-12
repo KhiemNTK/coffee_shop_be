@@ -10,6 +10,7 @@ export class GetManagementExceptionsDto extends createZodDto(
       'FEEDBACK',
       'KITCHEN_OVERDUE',
       'ONLINE_PICKUP_LATE',
+      'OUTBOX_DEAD_LETTER',
     ]),
     page: z.coerce.number().int().min(1).default(1),
     itemPerPage: z.coerce.number().int().min(1).max(50).default(20),
