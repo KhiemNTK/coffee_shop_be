@@ -21,13 +21,70 @@ const productionEnvironment = {
   MAIL_FROM: 'noreply@example.com',
   VNPAY_TMN_CODE: 'COFFEE01',
   VNPAY_HASH_SECRET: 'strong-vnpay-secret-with-more-than-32-characters',
-  VNPAY_PAYMENT_URL: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
-  VNPAY_API_URL: 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
+  VNPAY_PAYMENT_URL: 'https://pay.vnpay.vn/vpcpay.html',
+  VNPAY_API_URL: 'https://merchant.vnpay.vn/merchant_webapi/api/transaction',
   VNPAY_SERVER_IP: '203.0.113.10',
   VNPAY_RETURN_URL: 'https://coffee.example.com/payment/vnpay/return',
 } as const;
 
 describe('validateEnvironment', () => {
+  it('keeps payOS disabled without keys and rejects partial or unsafe configuration', () => {
+    const base = { DATABASE_URL: 'postgresql://localhost/test' };
+    expect(validateEnvironment(base).PAYOS_CLIENT_ID).toBeUndefined();
+    const configured = {
+      ...base,
+      PAYOS_CLIENT_ID: 'fixture-client-id-at-least-20-characters',
+      PAYOS_API_KEY: 'fixture-api-key-at-least-32-characters',
+      PAYOS_CHECKSUM_KEY: 'fixture-checksum-key-at-least-32-characters',
+      PAYOS_RETURN_URL: 'http://localhost:3001/payment/payos/return',
+    };
+    expect(() =>
+      validateEnvironment({
+        ...base,
+        PAYOS_CLIENT_ID: configured.PAYOS_CLIENT_ID,
+      }),
+    ).toThrow('payOS requires');
+    expect(validateEnvironment(configured).PAYOS_API_TIMEOUT_MS).toBe(5000);
+    expect(() =>
+      validateEnvironment({
+        ...configured,
+        PAYOS_RETURN_URL: 'https://untrusted.example.com/payment/payos/return',
+      }),
+    ).toThrow('payOS return URL');
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        ...configured,
+        PAYOS_RETURN_URL: 'http://localhost:3001/payment/payos/return',
+      }),
+    ).toThrow('payOS return URL');
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        PAYOS_CLIENT_ID: configured.PAYOS_CLIENT_ID,
+        PAYOS_API_KEY: configured.PAYOS_API_KEY,
+        PAYOS_CHECKSUM_KEY: 'short-checksum-at-least20',
+        PAYOS_RETURN_URL: 'https://coffee.example.com/payment/payos/return',
+      }),
+    ).toThrow('strong production credentials');
+  });
+  it('validates ASAP hours independently of scheduled slots', () => {
+    const base = { DATABASE_URL: 'postgresql://localhost/test' };
+    expect(() =>
+      validateEnvironment({
+        ...base,
+        ONLINE_ASAP_OPEN_LOCAL: '22:00',
+        ONLINE_ASAP_CLOSE_LOCAL: '07:00',
+      }),
+    ).toThrow('ASAP opening time');
+    expect(
+      validateEnvironment({
+        ...base,
+        ONLINE_ASAP_OPEN_LOCAL: '00:00',
+        ONLINE_ASAP_CLOSE_LOCAL: '24:00',
+      }).ONLINE_ASAP_CLOSE_LOCAL,
+    ).toBe('24:00');
+  });
   it('provides safe development defaults', () => {
     const environment = validateEnvironment({
       NODE_ENV: 'development',
@@ -258,6 +315,36 @@ describe('validateEnvironment', () => {
         AUTH_SIGNUP_ENABLED: 'true',
       }),
     ).toThrow('AUTH_SIGNUP_ENABLED cannot be enabled in production');
+  });
+
+  it('supports cash-only production without VNPay credentials', () => {
+    expect(
+      validateEnvironment({
+        ...productionEnvironment,
+        VNPAY_TMN_CODE: '',
+        VNPAY_HASH_SECRET: '',
+        VNPAY_RETURN_URL: '',
+      }).VNPAY_TMN_CODE,
+    ).toBeUndefined();
+  });
+
+  it('rejects partial VNPay configuration and production sandbox endpoints', () => {
+    expect(() =>
+      validateEnvironment({ ...productionEnvironment, VNPAY_HASH_SECRET: '' }),
+    ).toThrow('VNPay requires');
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        VNPAY_PAYMENT_URL: 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
+      }),
+    ).toThrow('not sandbox');
+    expect(() =>
+      validateEnvironment({
+        ...productionEnvironment,
+        VNPAY_API_URL:
+          'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction',
+      }),
+    ).toThrow('not sandbox');
   });
 
   it('rejects insecure VNPay endpoints in production', () => {

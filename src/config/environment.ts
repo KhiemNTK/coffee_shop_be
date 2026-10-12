@@ -42,6 +42,14 @@ const EnvironmentSchema = z
     HOST: z.string().min(1).default('0.0.0.0'),
     APP_PREFIX: z.string().startsWith('/').default('/api/v1'),
     APP_NAME: z.string().min(1).default('coffee_shop_be'),
+    SHOP_NAME: optionalBlank(z.string().trim().max(120)),
+    SHOP_ADDRESS: optionalBlank(z.string().trim().max(255)),
+    SHOP_PHONE: optionalBlank(
+      z
+        .string()
+        .trim()
+        .regex(/^\+?[0-9 ()-]{6,24}$/),
+    ),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.url().optional(),
     AI_INSIGHTS_ENABLED: BooleanEnvSchema.default(false),
@@ -115,6 +123,14 @@ const EnvironmentSchema = z
       .max(180)
       .default(45),
     ONLINE_PICKUP_DAYS_AHEAD: z.coerce.number().int().min(1).max(14).default(7),
+    ONLINE_ASAP_OPEN_LOCAL: z
+      .string()
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+      .default('07:00'),
+    ONLINE_ASAP_CLOSE_LOCAL: z
+      .string()
+      .regex(/^(([01]\d|2[0-3]):[0-5]\d|24:00)$/)
+      .default('22:00'),
     ONLINE_REORDER_SECRET: z.string().min(32).optional(),
     TELEGRAM_BOT_TOKEN: OptionalCredentialSchema,
     TELEGRAM_BOT_USERNAME: optionalBlank(
@@ -146,8 +162,8 @@ const EnvironmentSchema = z
     MAIL_USER: z.string().optional(),
     MAIL_PASS: z.string().optional(),
     MAIL_FROM: z.string().optional(),
-    VNPAY_TMN_CODE: z.string().trim().min(1).max(32).optional(),
-    VNPAY_HASH_SECRET: z.string().min(8).optional(),
+    VNPAY_TMN_CODE: optionalBlank(z.string().trim().min(1).max(32)),
+    VNPAY_HASH_SECRET: optionalBlank(z.string().min(8)),
     VNPAY_PAYMENT_URL: z
       .url()
       .default('https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
@@ -161,7 +177,7 @@ const EnvironmentSchema = z
       .min(1_000)
       .max(15_000)
       .default(5_000),
-    VNPAY_RETURN_URL: z.url().optional(),
+    VNPAY_RETURN_URL: optionalBlank(z.url()),
     VNPAY_ATTEMPT_TTL_MINUTES: z.coerce
       .number()
       .int()
@@ -181,6 +197,22 @@ const EnvironmentSchema = z
       .max(60_000)
       .default(30_000),
     MOMO_ATTEMPT_TTL_MINUTES: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(60)
+      .default(15),
+    PAYOS_CLIENT_ID: OptionalCredentialSchema,
+    PAYOS_API_KEY: OptionalCredentialSchema,
+    PAYOS_CHECKSUM_KEY: OptionalCredentialSchema,
+    PAYOS_RETURN_URL: optionalBlank(z.url()),
+    PAYOS_API_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1000)
+      .max(10000)
+      .default(5000),
+    PAYOS_ATTEMPT_TTL_MINUTES: z.coerce
       .number()
       .int()
       .min(5)
@@ -231,6 +263,11 @@ export function validateEnvironment(raw: Record<string, unknown>) {
       );
     }
   }
+  if (
+    environment.ONLINE_ASAP_OPEN_LOCAL >= environment.ONLINE_ASAP_CLOSE_LOCAL
+  ) {
+    throw new Error('ASAP opening time must be before closing time.');
+  }
   const telegram = [
     environment.TELEGRAM_BOT_TOKEN,
     environment.TELEGRAM_BOT_USERNAME,
@@ -239,6 +276,16 @@ export function validateEnvironment(raw: Record<string, unknown>) {
   if (telegram.some(Boolean) && telegram.some((value) => !value)) {
     throw new Error(
       'Telegram requires bot token, username and webhook secret.',
+    );
+  }
+  const vnpay = [
+    environment.VNPAY_TMN_CODE,
+    environment.VNPAY_HASH_SECRET,
+    environment.VNPAY_RETURN_URL,
+  ];
+  if (vnpay.some(Boolean) && vnpay.some((value) => !value)) {
+    throw new Error(
+      'VNPay requires terminal code, hash secret and return URL together.',
     );
   }
   const momo = [
@@ -252,6 +299,48 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     throw new Error(
       'MoMo requires partner code, access key, secret key, redirect URL and IPN URL.',
     );
+  }
+  const payos = [
+    environment.PAYOS_CLIENT_ID,
+    environment.PAYOS_API_KEY,
+    environment.PAYOS_CHECKSUM_KEY,
+    environment.PAYOS_RETURN_URL,
+  ];
+  if (payos.some(Boolean) && payos.some((value) => !value))
+    throw new Error(
+      'payOS requires client ID, API key, checksum key and return URL.',
+    );
+  if (environment.PAYOS_RETURN_URL) {
+    const url = new URL(environment.PAYOS_RETURN_URL);
+    const allowedOrigins = environment.FE_URL.split(',').map(
+      (origin) => new URL(origin.trim()).origin,
+    );
+    if (
+      !allowedOrigins.includes(url.origin) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== '/payment/payos/return'
+    )
+      throw new Error(
+        'payOS return URL must be the frontend /payment/payos/return route.',
+      );
+    if (environment.NODE_ENV === 'production' && url.protocol !== 'https:')
+      throw new Error('payOS return URL must use HTTPS in production.');
+    if (
+      environment.NODE_ENV === 'production' &&
+      [environment.PAYOS_API_KEY, environment.PAYOS_CHECKSUM_KEY].some(
+        (key) =>
+          (key?.length ?? 0) < 32 ||
+          WEAK_SECRET_MARKERS.some((marker) =>
+            key?.toLowerCase().includes(marker),
+          ),
+      )
+    )
+      throw new Error(
+        'payOS API/checksum keys must be strong production credentials.',
+      );
   }
   if (environment.NODE_ENV !== 'production') return environment;
 
@@ -269,12 +358,6 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     'MAIL_USER',
     'MAIL_PASS',
     'MAIL_FROM',
-    'VNPAY_TMN_CODE',
-    'VNPAY_HASH_SECRET',
-    'VNPAY_PAYMENT_URL',
-    'VNPAY_API_URL',
-    'VNPAY_SERVER_IP',
-    'VNPAY_RETURN_URL',
   ] as const;
   const missing = required.filter((key) => !raw[key]);
   if (missing.length > 0) {
@@ -356,33 +439,55 @@ export function validateEnvironment(raw: Record<string, unknown>) {
   if (!environment.PASSWORD_RESET_URL.startsWith('https://')) {
     throw new Error('PASSWORD_RESET_URL must use HTTPS in production');
   }
-  if (!environment.VNPAY_RETURN_URL?.startsWith('https://')) {
-    throw new Error('VNPAY_RETURN_URL must use HTTPS in production');
-  }
-  if (!environment.VNPAY_PAYMENT_URL.startsWith('https://')) {
-    throw new Error('VNPAY_PAYMENT_URL must use HTTPS in production');
-  }
-  if (!environment.VNPAY_API_URL.startsWith('https://')) {
-    throw new Error('VNPAY_API_URL must use HTTPS in production');
-  }
-  if (
-    ['your_', 'replace-', 'changeme'].some((marker) =>
-      environment.VNPAY_TMN_CODE?.toLowerCase().includes(marker),
-    )
-  ) {
-    throw new Error('VNPAY_TMN_CODE must not use a placeholder value');
-  }
-  if ((environment.VNPAY_HASH_SECRET?.length ?? 0) < 32) {
-    throw new Error(
-      'VNPAY_HASH_SECRET must be a strong secret of at least 32 characters',
-    );
-  }
-  if (
-    ['replace-', 'development', ...WEAK_SECRET_MARKERS].some((marker) =>
-      environment.VNPAY_HASH_SECRET?.toLowerCase().includes(marker),
-    )
-  ) {
-    throw new Error('VNPAY_HASH_SECRET must not use a placeholder value');
+  if (environment.VNPAY_TMN_CODE) {
+    for (const key of [
+      'VNPAY_PAYMENT_URL',
+      'VNPAY_API_URL',
+      'VNPAY_SERVER_IP',
+    ] as const) {
+      if (!raw[key])
+        throw new Error(
+          `${key} must be explicitly configured for production VNPay`,
+        );
+    }
+    if (!environment.VNPAY_RETURN_URL?.startsWith('https://')) {
+      throw new Error('VNPAY_RETURN_URL must use HTTPS in production');
+    }
+    if (!environment.VNPAY_PAYMENT_URL.startsWith('https://')) {
+      throw new Error('VNPAY_PAYMENT_URL must use HTTPS in production');
+    }
+    if (!environment.VNPAY_API_URL.startsWith('https://')) {
+      throw new Error('VNPAY_API_URL must use HTTPS in production');
+    }
+    if (
+      new URL(environment.VNPAY_PAYMENT_URL).hostname !== 'pay.vnpay.vn' ||
+      !['pay.vnpay.vn', 'merchant.vnpay.vn'].includes(
+        new URL(environment.VNPAY_API_URL).hostname,
+      )
+    ) {
+      throw new Error(
+        'VNPay production endpoints must use production gateways, not sandbox.',
+      );
+    }
+    if (
+      ['your_', 'replace-', 'changeme'].some((marker) =>
+        environment.VNPAY_TMN_CODE?.toLowerCase().includes(marker),
+      )
+    ) {
+      throw new Error('VNPAY_TMN_CODE must not use a placeholder value');
+    }
+    if ((environment.VNPAY_HASH_SECRET?.length ?? 0) < 32) {
+      throw new Error(
+        'VNPAY_HASH_SECRET must be a strong secret of at least 32 characters',
+      );
+    }
+    if (
+      ['replace-', 'development', ...WEAK_SECRET_MARKERS].some((marker) =>
+        environment.VNPAY_HASH_SECRET?.toLowerCase().includes(marker),
+      )
+    ) {
+      throw new Error('VNPAY_HASH_SECRET must not use a placeholder value');
+    }
   }
 
   if (environment.MOMO_PARTNER_CODE) {

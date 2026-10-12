@@ -20,6 +20,14 @@ RUN pnpm prisma:generate
 RUN pnpm build
 RUN pnpm prune --prod --ignore-scripts
 
+FROM dependencies AS tooling
+COPY prisma ./prisma
+COPY src ./src
+RUN pnpm prisma:generate
+COPY prisma.config.ts tsconfig.json ./
+USER node
+CMD ["node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
+
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app

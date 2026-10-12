@@ -5,6 +5,87 @@ routes use `/api/v1` by default. PostgreSQL stores business state; Redis is
 used for background delivery and cache. Do not run migrations or seed against
 a shared database without reviewing the target URL and backup first.
 
+## Audit hardening rollout
+
+- Apply `20261012000000_payment_link_recovery_and_retention` before starting the
+  updated API. It adds durable payment URLs and an outbox retention index. Existing
+  pending attempts without a stored URL require reconciliation; never recreate a
+  payment just to recover a QR. Drain these attempts before rolling out.
+- Transfer requires `sourceOrderSessionId`; merge requires
+  `sourceOrderSessionIds` and `destinationOrderSessionId`; clear requires
+  `expectedOrderSessionId` (explicitly `null` for a table with no session).
+  Older clients fail validation rather than modifying a newer customer session.
+  Deploy the matching frontend and pin its integration `BACKEND_REF` accordingly.
+- `POST /payment-attempts/:id/payment-link` requires payment-attempt create and
+  read permissions. It returns only an existing, unexpired link for a pending,
+  unpaid attempt. It does not call a payment provider or create another attempt.
+- Authorization is read from PostgreSQL on each request. Redis remains in use
+  for queues and rate limiting, not for caching revocable permission grants.
+- ASAP intake defaults to 07:00-22:00 Vietnam time via `ONLINE_ASAP_OPEN_LOCAL`
+  and `ONLINE_ASAP_CLOSE_LOCAL`. Scheduled pickup retains its separate slot
+  policy; existing submissions can still replay after closing or a pause.
+- Housekeeping deletes at most 500 rows per table per five-minute cycle:
+  published outbox older than 30 days, auth sessions expired over 30 days ago,
+  password-reset tokens expired over 7 days ago, and completed idempotency records
+  past their existing expiry. Pending/processing/dead-letter events, still-valid
+  tokens, audit logs and financial records are not purged.
+
+## payOS Integration
+
+payOS is an optional invoice payment provider, alongside VNPay and MoMo. It uses
+the official `@payos/node` SDK, pinned in the lockfile. The existing remote takeaway
+checkout still accepts payment on collection; this change does not introduce public
+prepayment or bypass employee permissions.
+
+- Apply `20261012010000_add_payos_provider` before starting the updated API, even
+  if payOS remains disabled. The migration adds the provider, link ID and PostgreSQL
+  order-code sequence. It does not seed new permissions or modify existing invoices.
+- Configure `PAYOS_CLIENT_ID`, `PAYOS_API_KEY`, `PAYOS_CHECKSUM_KEY` and
+  `PAYOS_RETURN_URL` together. Leave all four blank to keep payOS disabled. The
+  return URL must be your configured frontend's `/payment/payos/return` route,
+  using HTTPS in production. Never put these keys in frontend `VITE_*` variables.
+- Register `https://YOUR_API_DOMAIN/api/v1/payments/payos/webhook` in your payOS
+  channel dashboard. Do not enable a browser CAPTCHA/challenge on this server-to-server
+  endpoint. A signed registration probe is acknowledged without creating a payment.
+- `POST /invoices/:id/payment-attempts` accepts `provider: "PAYOS"` using existing
+  payment-attempt permissions and idempotency key. Amounts must be positive whole
+  VND within JavaScript's safe integer range. Retry the same key after an uncertain
+  response; never switch provider or mint another key to work around it.
+- Creation uses a database sequence rather than timestamps or random short codes.
+  A duplicate/lost creation response is recovered by querying the original order
+  code. URLs are persisted and reopened through the existing protected payment-link API.
+- Signed webhook data and its reconciliation outbox event commit together. Redis
+  workers query the signed payOS link outside the financial transaction, then validate
+  link identity, exact invoice amount and all bank-transaction totals before finalizing.
+  Repeated notifications cannot book another payment. Partial payments remain unresolved;
+  overpayments and inconsistent amounts go to the manager exception queue.
+- Return navigation is read-only. A server-issued UUID/HMAC capability allows the
+  public status lookup; `status`, `code`, `cancel` and `orderCode` from the browser
+  never confirm payment. The FE removes the capability from the address bar; keep
+  proxy access logs free of query strings and retain `Referrer-Policy: no-referrer`.
+- Automatic payOS refunds/payouts are deliberately not exposed. Cancelling a link
+  is not a refund. Handle refunds through a separately approved accounting workflow.
+
+### Go-Live Checklist
+
+1. Use a dedicated payOS channel for this system. Verify the merchant account,
+   receiving bank account, current fees and limits in your payOS dashboard.
+2. Deploy the migration and matching BE/FE before supplying credentials. Check
+   webhook registration and the expected frontend origin; do not auto-register a
+   webhook or rotate keys on application startup.
+3. With the merchant account ready, run a controlled real small-value payment,
+   duplicate webhook, lost-response retry, expired/cancelled link and partial/overpaid
+   scenario. Fixture tests are not proof of a working merchant account.
+4. Monitor outbox/dead-letter lag and payment incidents. Preserve Redis and the
+   reconciliation scheduler; the periodic query is the fallback for a missed webhook.
+5. Before changing keys/channel, drain or reconcile unresolved attempts. After a
+   PostgreSQL restore, advance `payos_order_code_seq` beyond every order code already
+   issued in the payOS channel before reopening payment intake; never reuse codes.
+   Once PAYOS rows exist, do not roll back to a binary that does not support this enum.
+
+References: [payOS Node SDK](https://payos.vn/docs/sdks/back-end/node/),
+[payOS API and webhook contract](https://payos.vn/docs/api/).
+
 ## Local setup
 
 1. Use Node.js 22 and pnpm 9.15.9. Copy `.env.example` to `.env`, then set
