@@ -137,7 +137,6 @@ export class AuthService {
       }
       return created;
     });
-    await this.authorizationService.invalidateEmployee(employee.id);
     return this.authSessionService.createSession(employee, metadata);
   }
 
@@ -156,7 +155,12 @@ export class AuthService {
     if (!passwordMatches) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
     }
-    return this.authSessionService.createSession(employee, metadata);
+    return this.authSessionService.createSession(
+      employee,
+      metadata,
+      undefined,
+      employee.password,
+    );
   }
 
   async signInWithGoogle(dto: GoogleSignInDto, metadata: AuthRequestMetadata) {

@@ -35,6 +35,7 @@ export class AuthSessionService {
     employee: { id: string; email: string },
     metadata: AuthRequestMetadata,
     googleSubject?: string,
+    expectedPasswordHash?: string,
   ) {
     const sessionId = randomUUID();
     const familyId = randomUUID();
@@ -62,6 +63,19 @@ export class AuthSessionService {
           FOR SHARE
         `;
         if (!linked.length) {
+          throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+        }
+        await tx.authSession.create({ data });
+      });
+    } else if (expectedPasswordHash !== undefined) {
+      await this.prisma.$transaction(async (tx) => {
+        const verified = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM "Employee"
+          WHERE id = ${employee.id} AND "password" = ${expectedPasswordHash}
+            AND "isActive" = true AND "deletedAt" IS NULL
+          FOR SHARE
+        `;
+        if (!verified.length) {
           throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
         }
         await tx.authSession.create({ data });

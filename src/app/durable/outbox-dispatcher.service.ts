@@ -24,13 +24,14 @@ const HOUSEKEEPING_INTERVAL_MS = 5 * 60 * 1_000;
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 50;
 const REDIS_CLOSE_TIMEOUT_MS = 3_000;
+const RETENTION_BATCH_SIZE = 500;
+const DAY_MS = 86_400_000;
 
 @Injectable()
 export class OutboxDispatcherService
   implements OnApplicationBootstrap, OnModuleDestroy
 {
   private readonly logger = new Logger(OutboxDispatcherService.name);
-  private readonly workerId = randomUUID();
   private queue?: Queue<ClaimedOutboxEvent, void, 'publish'>;
   private worker?: Worker<ClaimedOutboxEvent, void, 'publish'>;
   private timer?: NodeJS.Timeout;
@@ -88,17 +89,38 @@ export class OutboxDispatcherService
   }
 
   private async runHousekeepingIfNeeded() {
-    const now = Date.now();
-    if (now - this.lastHousekeepingAt < HOUSEKEEPING_INTERVAL_MS) return;
-    this.lastHousekeepingAt = now;
+    if (Date.now() - this.lastHousekeepingAt < HOUSEKEEPING_INTERVAL_MS) return;
 
     await this.recoverAbandonedEvents();
-    await this.prisma.idempotencyRequest.deleteMany({
-      where: {
-        status: 'COMPLETED',
-        expiresAt: { lt: new Date() },
-      },
-    });
+    const now = new Date();
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "IdempotencyRequest"
+        WHERE "status" = 'COMPLETED' AND "expiresAt" < ${now}
+        ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "IdempotencyRequest" r USING candidates c WHERE r."id" = c."id"
+    `);
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "OutboxEvent"
+        WHERE "status" = 'PUBLISHED' AND "publishedAt" < ${new Date(now.getTime() - 30 * DAY_MS)}
+        ORDER BY "publishedAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "OutboxEvent" e USING candidates c WHERE e."id" = c."id"
+    `);
+    // Keep every still-valid token plus a grace window for replay detection and investigation.
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "AuthSession" WHERE "expiresAt" < ${new Date(now.getTime() - 30 * DAY_MS)}
+        ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "AuthSession" s USING candidates c WHERE s."id" = c."id"
+    `);
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "PasswordResetToken" WHERE "expiresAt" < ${new Date(now.getTime() - 7 * DAY_MS)}
+        ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "PasswordResetToken" t USING candidates c WHERE t."id" = c."id"
+    `);
+    this.lastHousekeepingAt = now.getTime();
   }
 
   private startBullMq(redisUrl: string) {
@@ -156,7 +178,7 @@ export class OutboxDispatcherService
       SET
         "status" = 'PROCESSING',
         "lockedAt" = CURRENT_TIMESTAMP,
-        "lockedBy" = ${this.workerId}
+        "lockedBy" = ${randomUUID()}
       FROM candidates
       WHERE event."id" = candidates."id"
       RETURNING
@@ -167,12 +189,31 @@ export class OutboxDispatcherService
         event."aggregateId",
         event."payload",
         event."attempts",
+        event."lockedBy",
         event."occurredAt"
     `);
   }
 
   private async enqueue(event: ClaimedOutboxEvent) {
     try {
+      const existing = await this.queue!.getJob(event.id);
+      if (existing) {
+        const state = await existing.getState();
+        if (state === 'failed' || state === 'completed') {
+          await existing.updateData(event);
+          await existing.retry(state, { resetAttemptsMade: true });
+        } else if (
+          state !== 'unknown' &&
+          existing.data.lockedBy !== event.lockedBy
+        ) {
+          // An older job must finish before this lease can reuse its retained ID.
+          await this.release(
+            event,
+            'Waiting for the previous delivery job to finish.',
+          );
+        }
+        if (state !== 'unknown') return;
+      }
       await this.queue!.add('publish', event, {
         jobId: event.id,
         attempts: MAX_ATTEMPTS,
@@ -182,23 +223,39 @@ export class OutboxDispatcherService
       });
     } catch (error) {
       outboxDispatchTotal.inc({ outcome: 'enqueue_failed' });
-      await this.release(event.id, error);
+      await this.release(event, error);
     }
   }
 
   private async processJob(job: Job<ClaimedOutboxEvent, void, 'publish'>) {
-    const event = await this.prisma.outboxEvent.findUnique({
-      where: { id: job.data.id },
-    });
-    if (!event || event.status !== OutboxEventStatus.PROCESSING) return;
-
+    let attempt = job.data.attempts + job.attemptsMade + 1;
     try {
+      const event = await this.prisma.outboxEvent.findUnique({
+        where: { id: job.data.id },
+      });
+      if (
+        !event ||
+        event.status !== OutboxEventStatus.PROCESSING ||
+        event.lockedBy !== job.data.lockedBy
+      )
+        return;
+      attempt = Math.max(attempt, event.attempts + 1);
+      if (event.attempts >= MAX_ATTEMPTS) {
+        await this.recordFailure(
+          job.data,
+          'Retry budget exhausted',
+          event.attempts,
+          true,
+        );
+        return;
+      }
       await this.eventBus.publish(event.eventName, event.payload);
-      await this.markPublished(event.id);
+      await this.markPublished(job.data);
     } catch (error) {
-      const attempt = job.attemptsMade + 1;
-      const finalAttempt = attempt >= (job.opts.attempts ?? MAX_ATTEMPTS);
-      await this.recordFailure(event.id, error, attempt, finalAttempt);
+      const finalAttempt =
+        attempt >= MAX_ATTEMPTS ||
+        job.attemptsMade + 1 >= (job.opts.attempts ?? MAX_ATTEMPTS);
+      await this.recordFailure(job.data, error, attempt, finalAttempt);
       throw error;
     }
   }
@@ -206,15 +263,19 @@ export class OutboxDispatcherService
   private async deliverWithoutRedis(event: ClaimedOutboxEvent) {
     try {
       await this.eventBus.publish(event.eventName, event.payload);
-      await this.markPublished(event.id);
+      await this.markPublished(event);
     } catch (error) {
       const attempt = event.attempts + 1;
       if (attempt >= MAX_ATTEMPTS) {
-        await this.recordFailure(event.id, error, attempt, true);
+        await this.recordFailure(event, error, attempt, true);
       } else {
         outboxDispatchTotal.inc({ outcome: 'retry' });
         await this.prisma.outboxEvent.updateMany({
-          where: { id: event.id, status: OutboxEventStatus.PROCESSING },
+          where: {
+            id: event.id,
+            status: OutboxEventStatus.PROCESSING,
+            lockedBy: event.lockedBy,
+          },
           data: {
             status: OutboxEventStatus.PENDING,
             attempts: attempt,
@@ -228,9 +289,13 @@ export class OutboxDispatcherService
     }
   }
 
-  private async markPublished(id: string) {
+  private async markPublished(event: ClaimedOutboxEvent) {
     const result = await this.prisma.outboxEvent.updateMany({
-      where: { id, status: OutboxEventStatus.PROCESSING },
+      where: {
+        id: event.id,
+        status: OutboxEventStatus.PROCESSING,
+        lockedBy: event.lockedBy,
+      },
       data: {
         status: OutboxEventStatus.PUBLISHED,
         publishedAt: new Date(),
@@ -243,25 +308,18 @@ export class OutboxDispatcherService
     return result;
   }
 
-  private recordFailure(
-    id: string,
+  private async recordFailure(
+    event: ClaimedOutboxEvent,
     error: unknown,
     attempts: number,
     deadLetter: boolean,
   ) {
-    if (deadLetter) {
-      outboxDispatchTotal.inc({ outcome: 'dead_letter' });
-      this.logger.error({
-        event: 'outbox.event.dead_lettered',
-        outboxEventId: id,
-        attempts,
-        error: this.errorMessage(error),
-      });
-    } else {
-      outboxDispatchTotal.inc({ outcome: 'retry' });
-    }
-    return this.prisma.outboxEvent.updateMany({
-      where: { id, status: OutboxEventStatus.PROCESSING },
+    const result = await this.prisma.outboxEvent.updateMany({
+      where: {
+        id: event.id,
+        status: OutboxEventStatus.PROCESSING,
+        lockedBy: event.lockedBy,
+      },
       data: {
         status: deadLetter
           ? OutboxEventStatus.DEAD_LETTER
@@ -271,11 +329,29 @@ export class OutboxDispatcherService
         ...(deadLetter ? { lockedAt: null, lockedBy: null } : {}),
       },
     });
+    if (result.count > 0) {
+      outboxDispatchTotal.inc({
+        outcome: deadLetter ? 'dead_letter' : 'retry',
+      });
+      if (deadLetter) {
+        this.logger.error({
+          event: 'outbox.event.dead_lettered',
+          outboxEventId: event.id,
+          attempts,
+          error: this.errorMessage(error),
+        });
+      }
+    }
+    return result;
   }
 
-  private release(id: string, error: unknown) {
+  private release(event: ClaimedOutboxEvent, error: unknown) {
     return this.prisma.outboxEvent.updateMany({
-      where: { id, status: OutboxEventStatus.PROCESSING },
+      where: {
+        id: event.id,
+        status: OutboxEventStatus.PROCESSING,
+        lockedBy: event.lockedBy,
+      },
       data: {
         status: OutboxEventStatus.PENDING,
         lockedAt: null,

@@ -1,0 +1,3 @@
+ALTER TABLE "MenuItem"
+  ADD COLUMN "description" VARCHAR(1000),
+  ADD COLUMN "imageUrl" VARCHAR(2048);

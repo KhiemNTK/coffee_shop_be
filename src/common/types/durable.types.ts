@@ -28,5 +28,6 @@ export interface ClaimedOutboxEvent {
   aggregateId: string;
   payload: Prisma.JsonValue;
   attempts: number;
+  lockedBy: string;
   occurredAt: Date;
 }

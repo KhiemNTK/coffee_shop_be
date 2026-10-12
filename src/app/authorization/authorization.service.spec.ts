@@ -14,7 +14,7 @@ describe('AuthorizationService delegation', () => {
   };
 
   it('allows only an explicit subset, without a role-name bypass', () => {
-    const service = new AuthorizationService({} as never, {} as never);
+    const service = new AuthorizationService({} as never);
     expect(
       service.canGrantPermissions(context, [PermissionKeys.MENU_READ]),
     ).toBe(true);
@@ -26,7 +26,6 @@ describe('AuthorizationService delegation', () => {
   });
 
   it('uses the transaction client, never cached grants, for sensitive writes', async () => {
-    const cache = { get: jest.fn().mockResolvedValue(context), set: jest.fn() };
     const tx = {
       employee: {
         findUnique: jest.fn().mockResolvedValue({
@@ -47,13 +46,12 @@ describe('AuthorizationService delegation', () => {
         }),
       },
     };
-    const service = new AuthorizationService({} as never, cache as never);
+    const service = new AuthorizationService({} as never);
     const fresh = await service.getFreshAuthorizationContext(
       'actor',
       tx as never,
     );
     expect(fresh.permissionKeys).toEqual([PermissionKeys.MENU_READ]);
-    expect(cache.get).not.toHaveBeenCalled();
     expect(tx.employee.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'actor', deletedAt: null } }),
     );
@@ -64,14 +62,44 @@ describe('AuthorizationService delegation', () => {
     { isActive: false },
     { isActive: true, deletedAt: new Date() },
   ])('rejects inactive/deleted actors: %p', async (employee) => {
-    const service = new AuthorizationService(
-      {
-        employee: { findUnique: jest.fn().mockResolvedValue(employee) },
-      } as never,
-      {} as never,
-    );
+    const service = new AuthorizationService({
+      employee: { findUnique: jest.fn().mockResolvedValue(employee) },
+    } as never);
     await expect(
       service.getFreshAuthorizationContext('actor'),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('reads committed grants on every request, without stale cache refill', async () => {
+    const employee = {
+      id: 'actor',
+      email: context.employeeEmail,
+      isActive: true,
+      deletedAt: null,
+    };
+    const findUnique = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ...employee,
+        employeeRoles: [
+          {
+            role: {
+              name: 'MANAGER',
+              rolePermissions: [
+                { permission: { key: PermissionKeys.MENU_READ } },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ ...employee, employeeRoles: [] });
+    const service = new AuthorizationService({
+      employee: { findUnique },
+    } as never);
+    expect(await service.getPermissionKeys('actor')).toEqual([
+      PermissionKeys.MENU_READ,
+    ]);
+    expect(await service.getPermissionKeys('actor')).toEqual([]);
+    expect(findUnique).toHaveBeenCalledTimes(2);
   });
 });

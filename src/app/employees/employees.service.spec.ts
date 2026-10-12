@@ -210,10 +210,7 @@ describe('Employee access changes', () => {
         (callback: (client: typeof tx) => Promise<unknown>) => callback(tx),
       ),
     };
-    const authorization = new AuthorizationService(
-      prisma as never,
-      { invalidateEmployee: jest.fn() } as never,
-    );
+    const authorization = new AuthorizationService(prisma as never);
     return {
       tx,
       service: new EmployeesService(

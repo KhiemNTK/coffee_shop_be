@@ -125,6 +125,7 @@ export const PermissionKeys = {
 
   AUDIT_LOGS_READ: '/audit-logs_read',
   MANAGEMENT_EXCEPTIONS_READ: '/management-exceptions_read',
+  OUTBOX_EVENTS_RETRY: '/outbox-events_retry',
   ONLINE_ORDERS_READ: '/online-orders_read',
   ONLINE_ORDERS_REVIEW: '/online-orders_review',
   ONLINE_ORDERS_MANAGE_INTAKE: '/online-orders_manage-intake',

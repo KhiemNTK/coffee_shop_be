@@ -4,6 +4,10 @@ import { RolesService } from './roles.service';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { AUTHORIZATION_ERRORS } from '../../common/consts/message';
+import { BadRequestException } from '@nestjs/common';
+import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
+import type { ImportRolesDto } from './dto';
+import type { File } from '../../common/utils/excel-util/dto/excel-util.interface';
 
 describe('RoleService', () => {
   let service: RolesService;
@@ -18,6 +22,176 @@ describe('RoleService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+});
+
+describe('Role import validation', () => {
+  let service: RolesService;
+  let prisma: { role: { createMany: jest.Mock } };
+  let excel: { read: jest.Mock };
+  const input: ImportRolesDto = {
+    file: { buffer: Buffer.from('fixture') } as File,
+    employee: {} as never,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      role: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    };
+    excel = {
+      read: jest.fn().mockResolvedValue({ RoleEntity: [{ name: 'WAITER' }] }),
+    };
+    service = new RolesService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      excel as never,
+      {} as never,
+    );
+  });
+
+  it('only imports schema fields and assigns protected fields on the server', async () => {
+    excel.read.mockResolvedValue({
+      RoleEntity: [
+        {
+          name: ' CUSTOM ',
+          description: ' Service role ',
+          id: 'chosen-by-client',
+          isSystemRole: true,
+          deletedAt: new Date(),
+          createdAt: new Date(0),
+          updatedAt: new Date(0),
+          rolePermissions: { create: [{ permissionId: 'admin' }] },
+          employeeRoles: { create: [{ employeeId: 'attacker' }] },
+        },
+      ],
+    });
+
+    await expect(service.importRoles(input)).resolves.toEqual({
+      success: true,
+      message: 'Imported 1 roles successfully.',
+    });
+    expect(prisma.role.createMany).toHaveBeenCalledTimes(1);
+    expect(prisma.role.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          name: 'CUSTOM',
+          description: 'Service role',
+          isSystemRole: false,
+          deletedAt: null,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it('accepts nullable and absent descriptions in one bulk insert', async () => {
+    excel.read.mockResolvedValue({
+      RoleEntity: [{ name: 'FIRST', description: null }, { name: 'SECOND' }],
+    });
+    await service.importRoles(input);
+    expect(prisma.role.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          name: 'FIRST',
+          description: null,
+          isSystemRole: false,
+          deletedAt: null,
+        },
+        {
+          name: 'SECOND',
+          description: undefined,
+          isSystemRole: false,
+          deletedAt: null,
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it.each([
+    {},
+    { name: '   ' },
+    { name: 42 },
+    { name: 'x'.repeat(101) },
+    { name: 'CUSTOM', description: 'x'.repeat(501) },
+    { name: 'CUSTOM', description: false },
+    { name: { formula: '"ADMIN"', result: 'ADMIN' } },
+    null,
+  ])('validates every row before any database write: %p', async (row) => {
+    excel.read.mockResolvedValue({ RoleEntity: [{ name: 'VALID' }, row] });
+    await expect(service.importRoles(input)).rejects.toThrow(
+      "Invalid role in sheet 'RoleEntity' at row 3.",
+    );
+    expect(prisma.role.createMany).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { RoleEntity: [] }, { OtherSheet: [{ name: 'CUSTOM' }] }])(
+    'retains missing/empty sheet validation: %p',
+    async (sheets) => {
+      excel.read.mockResolvedValue(sheets);
+      await expect(service.importRoles(input)).rejects.toThrow(
+        "Sheet 'RoleEntity' is empty or not found",
+      );
+      expect(prisma.role.createMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('propagates parser rejection without writing', async () => {
+    const error = new BadRequestException('Excel data row limit exceeded.');
+    excel.read.mockRejectedValue(error);
+    await expect(service.importRoles(input)).rejects.toBe(error);
+    expect(prisma.role.createMany).not.toHaveBeenCalled();
+  });
+
+  it('propagates database errors', async () => {
+    const error = new Error('Database unavailable');
+    prisma.role.createMany.mockRejectedValue(error);
+    await expect(service.importRoles(input)).rejects.toBe(error);
+    expect(prisma.role.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not import protected fields from real normalized Excel headers', async () => {
+    const excelUtil = new ExcelUtilService();
+    const workbook = excelUtil.generateExcel({
+      worksheets: [
+        {
+          sheetName: 'RoleEntity',
+          fieldsExclude: [],
+          data: [
+            {
+              name: ' CUSTOM ',
+              id: 'client-id',
+              isSystemRole: true,
+              deletedAt: '2026-01-01',
+              createdAt: '2000-01-01',
+            },
+          ],
+        },
+      ],
+    });
+    const importer = new RolesService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      excelUtil,
+      {} as never,
+    );
+    await importer.importRoles({
+      ...input,
+      file: { buffer: Buffer.from(await workbook.xlsx.writeBuffer()) } as File,
+    });
+    expect(prisma.role.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          name: 'CUSTOM',
+          description: undefined,
+          isSystemRole: false,
+          deletedAt: null,
+        },
+      ],
+      skipDuplicates: true,
+    });
   });
 });
 
@@ -78,10 +252,7 @@ describe('Role permission delegation', () => {
         (callback: (client: typeof tx) => Promise<unknown>) => callback(tx),
       ),
     };
-    const authorization = new AuthorizationService(
-      prisma as never,
-      { invalidateAll: jest.fn() } as never,
-    );
+    const authorization = new AuthorizationService(prisma as never);
     return {
       tx,
       service: new RolesService(

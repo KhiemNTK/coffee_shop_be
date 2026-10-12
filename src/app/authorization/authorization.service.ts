@@ -14,25 +14,19 @@ import type {
   ExtendedPrismaTransactionClient,
   PermissionKey,
 } from '../../common/types';
-import { PermissionCacheService } from './permission-cache.service';
 
 @Injectable()
 export class AuthorizationService {
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
-    private readonly permissionCacheService: PermissionCacheService,
   ) {}
 
   async getAuthorizationContext(
     employeeId: string,
   ): Promise<AuthorizationContext> {
-    const cached = await this.permissionCacheService.get(employeeId);
-    if (cached) return cached;
-
-    const context = await this.getFreshAuthorizationContext(employeeId);
-    await this.permissionCacheService.set(employeeId, context);
-    return context;
+    // Grants are authoritative in PostgreSQL; an in-flight cache fill can undo revocation.
+    return this.getFreshAuthorizationContext(employeeId);
   }
 
   async getPermissionKeys(employeeId: string): Promise<PermissionKey[]> {
@@ -51,14 +45,6 @@ export class AuthorizationService {
     return requiredPermissions.every((permission) =>
       permissionSet.has(permission),
     );
-  }
-
-  async invalidateEmployee(employeeId: string) {
-    await this.permissionCacheService.invalidateEmployee(employeeId);
-  }
-
-  async invalidateAll() {
-    await this.permissionCacheService.invalidateAll();
   }
 
   canGrantPermissions(context: AuthorizationContext, keys: readonly string[]) {

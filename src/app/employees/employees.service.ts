@@ -232,7 +232,6 @@ export class EmployeesService {
         return updated;
       },
     );
-    await this.authorizationService.invalidateEmployee(id);
     return employee;
   }
 
@@ -277,7 +276,6 @@ export class EmployeesService {
         },
       });
     });
-    await this.authorizationService.invalidateEmployee(id);
 
     return {
       success: true,
@@ -419,7 +417,6 @@ export class EmployeesService {
         },
       });
     });
-    await this.authorizationService.invalidateEmployee(id);
 
     return this.getEmployeeRoles(id, actorId);
   }

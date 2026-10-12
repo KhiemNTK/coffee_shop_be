@@ -13,7 +13,6 @@ import {
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { AUTHORIZATION_ERRORS } from '../../common/consts/message';
-import { AuthorizationService } from '../authorization/authorization.service';
 import {
   CreatePermissionDto,
   GetPermissionsPaginationDto,
@@ -27,7 +26,6 @@ export class PermissionsService {
     private readonly prisma: ExtendedPrismaClient,
     private readonly paginationUtilService: PaginationUtilService,
     private readonly queryUtilService: QueryUtilService,
-    private readonly authorizationService: AuthorizationService,
   ) {}
 
   async createPermission(createPermissionDto: CreatePermissionDto) {
@@ -36,7 +34,6 @@ export class PermissionsService {
     const permission = await this.prisma.permission.create({
       data: createPermissionDto,
     });
-    await this.authorizationService.invalidateAll();
     return permission;
   }
 
@@ -104,7 +101,6 @@ export class PermissionsService {
       where: { id },
       data: updatePermissionDto,
     });
-    await this.authorizationService.invalidateAll();
     return updated;
   }
 
@@ -118,9 +114,11 @@ export class PermissionsService {
 
     await this.prisma.$transaction(async (tx) => {
       await tx.rolePermission.deleteMany({ where: { permissionId: id } });
-      await tx.permission.delete({ where: { id } });
+      await tx.permission.update({
+        where: { id },
+        data: { deletedAt: new Date() },
+      });
     });
-    await this.authorizationService.invalidateAll();
 
     return {
       success: true,

@@ -14,6 +14,7 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import {
   CreateRoleDto,
+  CreateRoleInputSchema,
   ExportRolesDto,
   GetRolesPaginationDto,
   ImportRolesDto,
@@ -112,7 +113,6 @@ export class RolesService {
       where: { id },
       data: updateRoleDto,
     });
-    await this.authorizationService.invalidateAll();
     return updated;
   }
 
@@ -147,7 +147,6 @@ export class RolesService {
         },
       });
     });
-    await this.authorizationService.invalidateAll();
 
     return {
       success: true,
@@ -267,7 +266,6 @@ export class RolesService {
         },
       });
     });
-    await this.authorizationService.invalidateAll();
 
     return this.getRolePermissions(id, actorId);
   }
@@ -341,16 +339,27 @@ export class RolesService {
         `Sheet '${roleSheetName}' is empty or not found in the uploaded Excel file.`,
       );
     }
-    const insertData = roleData.map((item: any): Prisma.RoleCreateManyInput => {
-      return {
-        ...(item as Prisma.RoleCreateManyInput),
-      };
-    });
+    const insertData = roleData.map(
+      (item, index): Prisma.RoleCreateManyInput => {
+        const parsed = CreateRoleInputSchema.safeParse(item);
+        if (!parsed.success) {
+          throw new BadRequestException({
+            message: `Invalid role in sheet '${roleSheetName}' at row ${index + 2}.`,
+            errors: parsed.error.issues,
+          });
+        }
+        return {
+          name: parsed.data.name,
+          description: parsed.data.description,
+          isSystemRole: false,
+          deletedAt: null,
+        };
+      },
+    );
     const result = await this.prisma.role.createMany({
       data: insertData,
       skipDuplicates: true,
     });
-    await this.authorizationService.invalidateAll();
     return {
       success: true,
       message: `Imported ${result.count} roles successfully.`,

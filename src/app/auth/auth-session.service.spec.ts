@@ -1,4 +1,5 @@
 import { UnauthorizedException } from '@nestjs/common';
+import { AUTH_ERRORS } from '../../common/consts/message';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { AuthSessionService } from './auth-session.service';
 import { AuthTokenService } from './auth-token.service';
@@ -18,6 +19,7 @@ describe('AuthSessionService', () => {
 
   const createFixture = () => {
     const tx = {
+      $queryRaw: jest.fn(),
       authSession: {
         findUnique: jest.fn(),
         updateMany: jest.fn(),
@@ -65,6 +67,84 @@ describe('AuthSessionService', () => {
     expect(prisma.authSession.create.mock.calls[0][0].data).not.toHaveProperty(
       'refreshToken',
     );
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('locks and revalidates the verified password hash before inserting the session in the same transaction', async () => {
+    const { prisma, service, tx } = createFixture();
+    tx.$queryRaw.mockResolvedValue([{ id: payload.sub }]);
+
+    await expect(
+      service.createSession(
+        { id: payload.sub, email: payload.email },
+        {},
+        undefined,
+        'verified-password-hash',
+      ),
+    ).resolves.toEqual(nextTokens);
+
+    const [sql, employeeId, passwordHash] = tx.$queryRaw.mock.calls[0] as [
+      TemplateStringsArray,
+      string,
+      string,
+    ];
+    expect(employeeId).toBe(payload.sub);
+    expect(passwordHash).toBe('verified-password-hash');
+    expect(sql.join('?')).toContain('"password" = ?');
+    expect(sql.join('?')).toContain('"isActive" = true');
+    expect(sql.join('?')).toContain('"deletedAt" IS NULL');
+    expect(sql.join('?')).toContain('FOR SHARE');
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.authSession.create.mock.invocationCallOrder[0],
+    );
+    expect(tx.authSession.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        employeeId: payload.sub,
+        refreshTokenHash: 'hash:next-refresh-token',
+      }),
+    });
+    expect(prisma.authSession.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale password or account state without inserting a session', async () => {
+    const { prisma, service, tx } = createFixture();
+    tx.$queryRaw.mockResolvedValue([]);
+
+    await expect(
+      service.createSession(
+        { id: payload.sub, email: payload.email },
+        {},
+        undefined,
+        'stale-password-hash',
+      ),
+    ).rejects.toThrow(AUTH_ERRORS.INVALID_CREDENTIALS);
+    expect(tx.authSession.create).not.toHaveBeenCalled();
+    expect(prisma.authSession.create).not.toHaveBeenCalled();
+  });
+
+  it('continues to lock and check the Google subject for Google sessions', async () => {
+    const { prisma, service, tx } = createFixture();
+    tx.$queryRaw.mockResolvedValue([{ id: payload.sub }]);
+
+    await expect(
+      service.createSession(
+        { id: payload.sub, email: payload.email },
+        {},
+        'google-subject',
+      ),
+    ).resolves.toEqual(nextTokens);
+
+    const [sql, employeeId, subject] = tx.$queryRaw.mock.calls[0] as [
+      TemplateStringsArray,
+      string,
+      string,
+    ];
+    expect(employeeId).toBe(payload.sub);
+    expect(subject).toBe('google-subject');
+    expect(sql.join('?')).toContain('"googleSubject" = ?');
+    expect(sql.join('?')).toContain('FOR SHARE');
+    expect(tx.authSession.create).toHaveBeenCalledTimes(1);
+    expect(prisma.authSession.create).not.toHaveBeenCalled();
   });
 
   it('rotates a valid refresh token in a serializable transaction', async () => {

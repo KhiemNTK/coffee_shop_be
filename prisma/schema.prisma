@@ -94,6 +94,7 @@ enum PaymentStatus {
 enum PaymentProvider {
   VNPAY
   MOMO
+  PAYOS
 }
 
 enum PaymentAttemptStatus {
@@ -383,6 +384,8 @@ model MenuCategory {
 model MenuItem {
   id          String  @id @default(uuid())
   name        String
+  description String? @db.VarChar(1000)
+  imageUrl    String? @db.VarChar(2048)
   price       Decimal @db.Decimal(18, 2)
   isAvailable Boolean @default(true)
 
@@ -1443,6 +1446,8 @@ model PaymentAttempt {
   merchantReference        String               @unique
   idempotencyKey           String
   requestHash              String
+  paymentUrl               String?              @db.Text
+  providerPaymentLinkId    String?              @db.VarChar(32)
   providerTransactionNo    String?
   failureCode              String?
   closeSessionAfterPayment Boolean              @default(true)
@@ -1472,6 +1477,7 @@ model PaymentAttempt {
 
   @@unique([createdById, idempotencyKey])
   @@unique([provider, providerTransactionNo])
+  @@unique([provider, providerPaymentLinkId])
   @@index([invoiceId, status, createdAt])
   @@index([status, expiresAt])
   @@index([status, nextReconcileAt])
@@ -1621,6 +1627,7 @@ model OutboxEvent {
   publishedAt   DateTime?
 
   @@index([status, availableAt, occurredAt])
+  @@index([status, publishedAt])
   @@index([aggregateType, aggregateId, occurredAt])
   @@index([topic, eventName, occurredAt])
 }
