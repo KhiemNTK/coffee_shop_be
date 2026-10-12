@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
+  PaymentStatus,
+  Prisma,
   PrismaClient,
   PrintDeviceStatus,
   PrintDeviceType,
@@ -8,6 +10,7 @@ import {
 } from '@prisma/client';
 import { ConflictException } from '@nestjs/common';
 import type { AuthenticatedPrintDevice } from '../src/common/types';
+import { IdempotencyService } from '../src/app/durable/idempotency.service';
 import { PrintingService } from '../src/app/printing/printing.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 
@@ -169,6 +172,102 @@ describe('KDS printing claims (e2e)', () => {
     expect(listed).not.toHaveProperty('deduplicationKey');
     expect(listed).not.toHaveProperty('payload');
   });
+
+  it.each([
+    PrintJobStatus.PENDING,
+    PrintJobStatus.FAILED,
+    PrintJobStatus.PRINTED,
+  ])(
+    'reprints the %s stored receipt after the menu item is renamed',
+    async (status) => {
+      await expect(
+        prisma.$transaction(async (tx) => {
+          const invoice = await tx.invoice.create({
+            data: {
+              invoiceNumber: `REPRINT-${suffix}`,
+              subTotal: 25_000,
+              totalAmount: 25_000,
+              paymentStatus: PaymentStatus.PAID,
+              orderSessionId: ids.session,
+              employeeId: ids.employee,
+            },
+          });
+          await tx.orderItem.update({
+            where: { id: ids.orderItem },
+            data: { invoiceId: invoice.id, isPaid: true },
+          });
+          const scopedPrisma = {
+            $transaction: (callback: (client: typeof tx) => Promise<unknown>) =>
+              callback(tx),
+            idempotencyRequest: tx.idempotencyRequest,
+          };
+          const service = new PrintingService(
+            scopedPrisma as never,
+            new PaginationUtilService(),
+            new IdempotencyService(scopedPrisma as never),
+          );
+          const original = await service.createAutomaticReceipt(invoice.id);
+          if (!original) throw new Error('Automatic receipt was not created.');
+          expect(original.payload).toMatchObject({
+            isReprint: false,
+            items: [{ name: `Print item ${suffix}` }],
+          });
+          const device = await tx.printDevice.create({
+            data: {
+              name: `Receipt printer ${suffix}`,
+              type: PrintDeviceType.RECEIPT,
+              paperSize: '80mm',
+              apiKeyHash: 'b'.repeat(64),
+            },
+          });
+          await tx.printJob.update({
+            where: { id: original.id },
+            data: {
+              status,
+              printedAt: status === PrintJobStatus.PRINTED ? new Date() : null,
+              failedAt: status === PrintJobStatus.FAILED ? new Date() : null,
+              deviceId: status === PrintJobStatus.PRINTED ? device.id : null,
+            },
+          });
+          await tx.menuItem.update({
+            where: { id: ids.menuItem },
+            data: { name: `Renamed print item ${suffix}`, price: 30_000 },
+          });
+
+          const reprint = await service.reprintReceipt(
+            invoice.id,
+            ids.employee,
+            {
+              reason: 'Customer requested another copy',
+              copies: 2,
+              deviceId: device.id,
+              idempotencyKey: `reprint-${suffix}`,
+            },
+          );
+          expect(reprint.reprintOfId).toBe(original.id);
+          expect(reprint.copies).toBe(2);
+          expect(reprint.payload).toEqual({
+            ...(original.payload as Prisma.JsonObject),
+            isReprint: true,
+          });
+          const persisted = await tx.printJob.findUniqueOrThrow({
+            where: { id: original.id },
+          });
+          expect(persisted.payload).toEqual(original.payload);
+          expect(persisted.status).toBe(status);
+          expect(persisted.deviceId).toBe(
+            status === PrintJobStatus.PRINTED ? device.id : null,
+          );
+          throw new Error('rollback test fixture');
+        }),
+      ).rejects.toThrow('rollback test fixture');
+      expect(
+        await prisma.printJob.count({
+          where: { requestedById: ids.employee, type: PrintJobType.RECEIPT },
+        }),
+      ).toBe(0);
+    },
+  );
 
   it('rejects claims after a device is paused, even with a stale guard context', async () => {
     await prisma.printDevice.update({

@@ -14,6 +14,8 @@ import {
   Prisma,
   ServeStatus,
   SessionStatus,
+  TableStatus,
+  PaymentMethod,
 } from '@prisma/client';
 import request from 'supertest';
 import { App } from 'supertest/types';
@@ -27,6 +29,7 @@ import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../src/common/consts/online-ord
 import { vietnamDate } from '../src/app/online-orders/pickup-schedule';
 import { MenuService } from '../src/app/menu/menu.service';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { InvoicesService } from '../src/app/invoices/invoices.service';
 import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
 import { ReportsService } from '../src/app/reports/reports.service';
@@ -192,6 +195,8 @@ describe('Remote takeaway orders (e2e)', () => {
       await prisma.orderSession.deleteMany({
         where: { id: { in: sessionIds } },
       });
+      if (ids.diningTable)
+        await prisma.diningTable.deleteMany({ where: { id: ids.diningTable } });
       if (ids.shift)
         await prisma.cashierShift.deleteMany({ where: { id: ids.shift } });
       if (ids.fund) await prisma.fund.deleteMany({ where: { id: ids.fund } });
@@ -895,6 +900,122 @@ describe('Remote takeaway orders (e2e)', () => {
         idempotencyKey: randomUUID(),
       }),
     ).rejects.toThrow('Online order is not available for pickup.');
+  });
+
+  it('retains a paid dine-in table until explicit completion and never clears a newer session on replay', async () => {
+    const table = await prisma.diningTable.create({
+      data: { name: `Completion ${suffix}` },
+    });
+    ids.diningTable = table.id;
+    const session = await orders.openSession({
+      employeeId: ids.employee,
+      tableId: table.id,
+    });
+    posSessionIds.push(session.id);
+    await orders.addOrderItems(
+      session.id,
+      {
+        items: [{ menuItemId: ids.menuItem, quantity: 1 }],
+        idempotencyKey: randomUUID(),
+      },
+      ids.employee,
+    );
+    const item = await prisma.orderItem.findFirstOrThrow({
+      where: { orderSessionId: session.id },
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.COOKING,
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.SERVED,
+    });
+    const invoices = app.get(InvoicesService);
+    await invoices.checkoutInvoice(ids.employee, {
+      orderSessionId: session.id,
+      paymentMethod: PaymentMethod.CASH,
+      amountTendered: '30000',
+      closeSessionAfterPayment: true,
+    });
+    expect(
+      (await prisma.diningTable.findUniqueOrThrow({ where: { id: table.id } }))
+        .status,
+    ).toBe(TableStatus.OCCUPIED);
+    await Promise.all([
+      orders.completeSession(session.id, ids.employee),
+      orders.completeSession(session.id, ids.employee),
+    ]);
+    expect(
+      await prisma.actionLog.count({
+        where: {
+          employeeId: ids.employee,
+          actionType: 'ORDER_SESSION_COMPLETED',
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.outboxEvent.count({
+        where: {
+          aggregateId: session.id,
+          eventName: ORDER_EVENTS.SESSION_COMPLETED,
+        },
+      }),
+    ).toBe(1);
+    const newer = await orders.openSession({
+      employeeId: ids.employee,
+      tableId: table.id,
+    });
+    posSessionIds.push(newer.id);
+    await orders.completeSession(session.id, ids.employee);
+    expect(
+      (await prisma.diningTable.findUniqueOrThrow({ where: { id: table.id } }))
+        .status,
+    ).toBe(TableStatus.OCCUPIED);
+    await orders.cancelSession(newer.id);
+  });
+
+  it('lets an accepted scheduled order be tracked and collected after the original 72-hour window', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const created = await onlineOrders.createPublicRequest(dto);
+    const accepted = await onlineOrders.accept(created.requestId, ids.employee);
+    await prisma.onlineOrderRequest.update({
+      where: { id: created.requestId },
+      data: {
+        createdAt: new Date(Date.now() - 5 * 24 * 60 * 60_000),
+        pickupAt: new Date(),
+      },
+    });
+    const access = {
+      requestId: created.requestId,
+      accessToken: created.accessToken,
+    };
+    await expect(
+      onlineOrders.trackPublicRequest(access),
+    ).resolves.toMatchObject({ requestId: created.requestId });
+    await expect(onlineOrders.reorderTemplate(access)).resolves.toMatchObject({
+      quote: { canSubmit: true },
+    });
+    const item = await prisma.orderItem.findFirstOrThrow({
+      where: { orderSessionId: accepted.orderSessionId },
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.COOKING,
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.READY,
+    });
+    await onlineOrders.collect(created.requestId, ids.employee, {
+      accessToken: created.accessToken,
+      amountTendered: '60000',
+      idempotencyKey: randomUUID(),
+    });
+    await prisma.onlineOrderRequest.update({
+      where: { id: created.requestId },
+      data: { pickupAt: new Date(Date.now() - 25 * 60 * 60_000) },
+    });
+    await expect(onlineOrders.trackPublicRequest(access)).rejects.toThrow(
+      'Order request not found.',
+    );
   });
 
   it('allows only one concurrent cash collection', async () => {

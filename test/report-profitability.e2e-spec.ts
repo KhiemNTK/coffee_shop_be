@@ -281,6 +281,94 @@ describe('Daily sales profitability (e2e)', () => {
     expect(await prisma.dailySalesClose.count()).toBe(0);
   });
 
+  it('counts cash refunds before close once and reports only later refunds as the delta', async () => {
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fund = await tx.fund.create({
+          data: { name: `Refund fund ${suffix}`, type: 'CASH', balance: 110 },
+        });
+        const invoice = await tx.invoice.create({
+          data: {
+            invoiceNumber: `CASH-PROFIT-${suffix}`,
+            subTotal: 100,
+            totalAmount: 110,
+            taxAmount: 10,
+            taxRate: 10,
+            paymentMethod: 'CASH',
+            paymentStatus: PaymentStatus.PARTIALLY_REFUNDED,
+            orderSessionId: ids.session,
+            employeeId: ids.employee,
+            createdAt: new Date('2020-01-01T08:00:00.000Z'),
+          },
+        });
+        const createCashRefund = (amount: string) =>
+          tx.cashRefund.create({
+            data: {
+              amount,
+              reason: 'Test cash refund',
+              idempotencyKey: `cash-refund-${suffix}-${amount}`,
+              requestHash: 'test-cash-refund-hash',
+              completedAt: new Date(),
+              invoice: { connect: { id: invoice.id } },
+              requestedBy: { connect: { id: ids.employee } },
+              cashTransaction: {
+                create: {
+                  type: 'EXPENSE',
+                  amount,
+                  description: 'Test cash refund',
+                  transactionDate: new Date(),
+                  fundId: fund.id,
+                  employeeId: ids.employee,
+                },
+              },
+            },
+          });
+        await createCashRefund('11.00');
+        const scopedPrisma = {
+          $transaction: (callback: (client: typeof tx) => Promise<unknown>) =>
+            callback(tx),
+          $queryRaw: tx.$queryRaw.bind(tx),
+          dailySalesClose: tx.dailySalesClose,
+        };
+        const service = new DailySalesCloseService(scopedPrisma as never);
+        const original = await service.close('2020-01-01', ids.employee);
+        expect(original.snapshot).toMatchObject({
+          refundCount: 2,
+          refundAmount: '33.00',
+          netReceipts: '187.00',
+          estimatedNetSalesExTax: '170.00',
+          estimatedGrossProfit: '130.00',
+        });
+        expect(original.refundDeltaSinceClose).toEqual({
+          count: 0,
+          amount: '0.00',
+        });
+
+        await createCashRefund('5.50');
+        const fetched = await service.get('2020-01-01');
+        const retried = await service.close('2020-01-01', ids.employee);
+        for (const result of [fetched, retried]) {
+          expect(result.snapshot).toEqual(original.snapshot);
+          expect(result.refundDeltaSinceClose).toEqual({
+            count: 1,
+            amount: '5.50',
+          });
+        }
+        expect(
+          await tx.dailySalesClose.count({
+            where: { businessDate: new Date('2020-01-01T00:00:00.000Z') },
+          }),
+        ).toBe(1);
+        throw new Error('rollback test fixture');
+      }),
+    ).rejects.toThrow('rollback test fixture');
+    expect(
+      await prisma.dailySalesClose.count({
+        where: { businessDate: new Date('2020-01-01T00:00:00.000Z') },
+      }),
+    ).toBe(0);
+  });
+
   it('rejects updates to a closed snapshot at the database boundary', async () => {
     await expect(
       prisma.$transaction(async (tx) => {

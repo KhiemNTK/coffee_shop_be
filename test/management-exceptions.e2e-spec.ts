@@ -4,12 +4,14 @@ import { CashHandoverStatus, PrismaClient, ServeStatus } from '@prisma/client';
 import { ManagementExceptionsService } from '../src/app/management-exceptions/management-exceptions.service';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
+import { IdempotencyService } from '../src/app/durable/idempotency.service';
 
 describe('Management exception inbox (e2e)', () => {
   const prisma = new PrismaClient();
   const service = new ManagementExceptionsService(
     prisma as unknown as ExtendedPrismaClient,
     new PaginationUtilService(),
+    new IdempotencyService(prisma as unknown as ExtendedPrismaClient),
   );
 
   beforeAll(async () => {
@@ -222,6 +224,7 @@ describe('Management exception inbox (e2e)', () => {
           const inbox = new ManagementExceptionsService(
             tx as unknown as ExtendedPrismaClient,
             new PaginationUtilService(),
+            new IdempotencyService(prisma as unknown as ExtendedPrismaClient),
           );
           const kitchen = await inbox.findAll({
             kind: 'KITCHEN_OVERDUE',

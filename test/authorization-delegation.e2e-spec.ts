@@ -19,11 +19,6 @@ describe('Authorization delegation (PostgreSQL)', () => {
   const databaseName = `authz_${randomUUID().replaceAll('-', '')}_test`;
   const originalUrl = process.env.DATABASE_URL;
   let databaseCreated = false;
-  const cache = {
-    get: jest.fn(),
-    set: jest.fn(),
-    invalidateEmployee: jest.fn(),
-  };
   let authorization: AuthorizationService;
   let employees: EmployeesService;
   const ids = {
@@ -58,7 +53,7 @@ describe('Authorization delegation (PostgreSQL)', () => {
     base = new PrismaService();
     await base.$connect();
     prisma = base.getExtendedClient();
-    authorization = new AuthorizationService(prisma, cache as never);
+    authorization = new AuthorizationService(prisma);
     employees = new EmployeesService(
       prisma,
       new PaginationUtilService(),
@@ -193,16 +188,10 @@ describe('Authorization delegation (PostgreSQL)', () => {
     ).toBe(false);
   });
 
-  it('does not honor cached grants after a role is revoked in PostgreSQL', async () => {
-    cache.get.mockResolvedValue({
-      employeeId: ids.cashier,
-      permissionKeys: Object.values(PermissionKeys),
-      roleNames: ['OWNER'],
-    });
+  it('does not grant permissions outside the committed PostgreSQL scope', async () => {
     await expect(
       employees.replaceEmployeeRoles(ids.ownerA, { roleIds: [] }, ids.cashier),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE);
-    expect(cache.get).not.toHaveBeenCalled();
   });
 
   it('rolls back junction changes when the audit insert fails', async () => {

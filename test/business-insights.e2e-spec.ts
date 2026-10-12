@@ -18,7 +18,6 @@ import Redis from 'ioredis';
 import http from 'supertest';
 import { AppModule } from '../src/app/app.module';
 import { AuthSessionService } from '../src/app/auth/auth-session.service';
-import { AuthorizationService } from '../src/app/authorization/authorization.service';
 import { BusinessInsightSnapshotService } from '../src/app/reports/business-insight-snapshot.service';
 import { BusinessInsightsService } from '../src/app/reports/business-insights.service';
 import type { CreateBusinessInsightDto } from '../src/app/reports/dto/business-insight.dto';
@@ -833,7 +832,6 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     const previousLogger = new Logger().localInstance;
     const appRedisUrl = new URL(redisUrl.href);
     let app: NestExpressApplication | undefined;
-    let authorization: AuthorizationService | undefined;
 
     try {
       const moduleFixture = await Test.createTestingModule({
@@ -885,8 +883,6 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
         where: { id: ids.employee },
       });
       const sessions = app.get(AuthSessionService);
-      authorization = app.get<AuthorizationService>(AuthorizationService);
-      await authorization.invalidateEmployee(employee.id);
       const tokens = await sessions.createSession(employee, {
         ipAddress: '127.0.0.1',
         userAgent: 'business-insights-http-test',
@@ -954,7 +950,6 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
           },
         },
       });
-      await authorization.invalidateEmployee(employee.id);
       await api
         .post(url)
         .set('Authorization', bearer)
@@ -996,27 +991,22 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       expect(await redis.get(dailyKey('admissions'))).toBe('1');
     } finally {
       try {
-        for (const employeeId of employeeIds)
-          await authorization?.invalidateEmployee(employeeId);
+        await app?.close();
       } finally {
-        try {
-          await app?.close();
-        } finally {
-          Logger.overrideLogger(previousLogger);
-          assertSafeTargets();
-          await prisma.$transaction([
-            prisma.authSession.deleteMany({
-              where: { employeeId: { in: employeeIds } },
-            }),
-            prisma.employeeRole.deleteMany({ where: { roleId } }),
-            prisma.rolePermission.deleteMany({ where: { roleId } }),
-            prisma.role.deleteMany({ where: { id: roleId } }),
-            prisma.permission.deleteMany({
-              where: { id: { in: createdPermissionIds } },
-            }),
-            prisma.employee.deleteMany({ where: { id: otherEmployeeId } }),
-          ]);
-        }
+        Logger.overrideLogger(previousLogger);
+        assertSafeTargets();
+        await prisma.$transaction([
+          prisma.authSession.deleteMany({
+            where: { employeeId: { in: employeeIds } },
+          }),
+          prisma.employeeRole.deleteMany({ where: { roleId } }),
+          prisma.rolePermission.deleteMany({ where: { roleId } }),
+          prisma.role.deleteMany({ where: { id: roleId } }),
+          prisma.permission.deleteMany({
+            where: { id: { in: createdPermissionIds } },
+          }),
+          prisma.employee.deleteMany({ where: { id: otherEmployeeId } }),
+        ]);
       }
     }
   });

@@ -1,4 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { PayOS } from '@payos/node';
 import { ConfigService } from '@nestjs/config';
 import {
   PaymentAttemptStatus,
@@ -26,6 +28,10 @@ import { PaymentRefundsService } from '../src/app/payments/payment-refunds.servi
 import { VnpayService } from '../src/app/payments/vnpay.service';
 import { MomoService } from '../src/app/payments/momo.service';
 import { PaymentProviderFactory } from '../src/app/payments/payment-provider.factory';
+import { PayosService } from '../src/app/payments/payos.service';
+import { PaymentReconciliationService } from '../src/app/payments/payment-reconciliation.service';
+import { DomainEventBusService } from '../src/app/durable/domain-event-bus.service';
+import { OutboxDispatcherService } from '../src/app/durable/outbox-dispatcher.service';
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import type { PromotionCalculatorService } from '../src/app/promotions/services/promotion-calculator.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
@@ -50,6 +56,11 @@ describe('VNPay payment lifecycle (e2e)', () => {
     MOMO_REDIRECT_URL: 'https://shop.example.com/payment/momo/return',
     MOMO_IPN_URL: 'https://api.example.com/api/v1/payments/momo/ipn',
     MOMO_API_TIMEOUT_MS: 30_000,
+    PAYOS_CLIENT_ID: 'fixture-client-id-not-a-real-credential',
+    PAYOS_API_KEY: 'fixture-api-key-not-a-real-credential',
+    PAYOS_CHECKSUM_KEY: 'fixture-checksum-key-not-a-real-credential',
+    PAYOS_RETURN_URL: 'https://coffee.example.com/payment/payos/return',
+    JWT_SECRET: 'fixture-return-secret-not-a-real-credential',
   });
   const invoices = new InvoicesService(
     extendedPrisma,
@@ -73,8 +84,10 @@ describe('VNPay payment lifecycle (e2e)', () => {
     new PaymentProviderFactory(
       new VnpayService(config),
       new MomoService(config),
+      new PayosService(config),
     ),
     new MomoService(config),
+    new PayosService(config),
   );
   const refundGateway = {
     assertApiConfigured: jest.fn(),
@@ -185,6 +198,13 @@ describe('VNPay payment lifecycle (e2e)', () => {
       .digest('hex');
 
   beforeAll(async () => {
+    const database = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['localhost', '127.0.0.1'].includes(database.hostname) &&
+        database.pathname.endsWith('_test'),
+      'Use a dedicated loopback test database, never the business database.',
+    );
     const position = await prisma.position.create({
       data: { name: `Payment Position ${suffix}`, salary: 0 },
     });
@@ -323,6 +343,277 @@ describe('VNPay payment lifecycle (e2e)', () => {
     }
   });
 
+  it.each(['full', 'split', 'overpaid'])(
+    'handles payOS %s payments through PostgreSQL and Redis exactly once',
+    async (scenario) => {
+      const redis = new URL(process.env.REDIS_URL ?? '');
+      assert(
+        ['localhost', '127.0.0.1'].includes(redis.hostname) &&
+          ['/14', '/15'].includes(redis.pathname),
+        'Use isolated Redis DB 14/15 for payment tests.',
+      );
+      const checksumKey = config.getOrThrow<string>('PAYOS_CHECKSUM_KEY');
+      const signer = new PayOS({
+        clientId: 'fixture',
+        apiKey: 'fixture',
+        checksumKey,
+        logLevel: 'off',
+      });
+      const linkId = randomUUID().replaceAll('-', '');
+      let orderCode = 0;
+      let returnState: string | null = null;
+      let queryCount = 0;
+      let amountPaid = 0;
+      let transactions: Array<{ reference: string; amount: number }> = [];
+      const signed = async (data: Record<string, unknown>) =>
+        Response.json({
+          code: '00',
+          data,
+          signature: await signer.crypto.createSignatureFromObj(
+            data,
+            checksumKey,
+          ),
+        });
+      const fetchSpy = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (url, options) => {
+          const requestUrl =
+            typeof url === 'string' || url instanceof URL
+              ? new URL(url)
+              : new URL(url.url);
+          expect(requestUrl.origin).toBe('https://api-merchant.payos.vn');
+          if (options?.method === 'POST') {
+            if (orderCode)
+              return Response.json({ code: '201', desc: 'already exists' });
+            if (typeof options.body !== 'string')
+              throw new Error('Expected JSON request');
+            const body = JSON.parse(options.body) as {
+              orderCode: number;
+              returnUrl: string;
+            };
+            orderCode = body.orderCode;
+            returnState = new URL(body.returnUrl).searchParams.get('state');
+            return signed({
+              paymentLinkId: linkId,
+              orderCode,
+              amount: 35000,
+              currency: 'VND',
+              status: 'PENDING',
+              checkoutUrl: `https://pay.payos.vn/web/${linkId}`,
+            });
+          }
+          queryCount++;
+          return signed({
+            id: linkId,
+            orderCode,
+            amount: 35000,
+            amountPaid,
+            amountRemaining: 35000 - amountPaid,
+            status:
+              amountPaid >= 35000
+                ? 'PAID'
+                : amountPaid
+                  ? 'UNDERPAID'
+                  : 'PENDING',
+            transactions,
+          });
+        });
+      const bus = new DomainEventBusService();
+      const reconciliation = new PaymentReconciliationService(
+        extendedPrisma,
+        pagination,
+        invoices,
+        outbox,
+        new VnpayService(config),
+        new MomoService(config),
+        new PayosService(config),
+        bus,
+      );
+      const dispatcher = new OutboxDispatcherService(
+        extendedPrisma,
+        new ConfigService({
+          REDIS_URL: redis.href,
+          OUTBOX_POLL_INTERVAL_MS: 0,
+        }),
+        bus,
+      );
+      const waitUntil = async (predicate: () => Promise<boolean>) => {
+        for (let i = 0; i < 100; i++) {
+          if (await predicate()) return;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error('payOS outbox consumer did not finish');
+      };
+      const webhook = async (reference: string, amount: number) => {
+        const data = {
+          orderCode,
+          amount,
+          currency: 'VND',
+          paymentLinkId: linkId,
+          reference,
+          code: '00',
+          desc: 'success',
+          description: 'Coffee',
+          accountNumber: 'private-bank-account',
+          transactionDateTime: '2026-10-12 12:00:00',
+        };
+        return {
+          code: '00',
+          desc: 'success',
+          success: true,
+          data,
+          signature: await signer.crypto.createSignatureFromObj(
+            data,
+            checksumKey,
+          ),
+        };
+      };
+      try {
+        const { invoice } = await createUnpaidInvoice('35000');
+        const dto = {
+          provider: PaymentProvider.PAYOS,
+          idempotencyKey: randomUUID(),
+          locale: 'vn' as const,
+          closeSessionAfterPayment: true,
+        };
+        const attempts = await Promise.all([
+          payments.createAttempt(invoice.id, employeeId, '127.0.0.1', dto),
+          payments.createAttempt(invoice.id, employeeId, '127.0.0.1', dto),
+        ]);
+        expect(new Set(attempts.map((attempt) => attempt.id)).size).toBe(1);
+        const attempt = attempts[0];
+        expect(Number.isSafeInteger(Number(attempt.merchantReference))).toBe(
+          true,
+        );
+        expect(
+          await payments.inspectPayosReturn({
+            orderCode: String(orderCode),
+            status: 'PAID',
+          }),
+        ).toEqual({ signatureValid: false, attempt: null });
+        expect(
+          (
+            await payments.inspectPayosReturn({
+              state: returnState ?? '',
+              status: 'PAID',
+            })
+          ).attempt?.status,
+        ).toBe(PaymentAttemptStatus.PENDING);
+        reconciliation.onModuleInit();
+        await dispatcher.onApplicationBootstrap();
+        const firstAmount =
+          scenario === 'split'
+            ? 15000
+            : scenario === 'overpaid'
+              ? 35001
+              : 35000;
+        amountPaid = firstAmount;
+        transactions = [{ reference: 'BANK-1', amount: firstAmount }];
+        const first = await webhook('BANK-1', firstAmount);
+        await expect(
+          payments.handlePayosWebhook({ ...first, signature: '0'.repeat(64) }),
+        ).rejects.toThrow();
+        const queriesBefore = queryCount;
+        await Promise.all([
+          payments.handlePayosWebhook(first),
+          payments.handlePayosWebhook(first),
+        ]);
+        expect(queryCount).toBe(queriesBefore);
+        expect(
+          await prisma.paymentWebhookEvent.count({
+            where: { paymentAttemptId: attempt.id },
+          }),
+        ).toBe(1);
+        await dispatcher.drainOnce();
+        await waitUntil(
+          async () =>
+            queryCount > queriesBefore &&
+            (await prisma.outboxEvent.count({
+              where: {
+                aggregateId: attempt.id,
+                eventName: 'payos.payment.notified',
+                status: 'PUBLISHED',
+              },
+            })) === 1,
+        );
+        if (scenario === 'split') {
+          expect(
+            (
+              await prisma.invoice.findUniqueOrThrow({
+                where: { id: invoice.id },
+              })
+            ).paymentStatus,
+          ).toBe(PaymentStatus.UNPAID);
+          amountPaid = 35000;
+          transactions = [
+            ...transactions,
+            { reference: 'BANK-2', amount: 20000 },
+          ];
+          await payments.handlePayosWebhook(await webhook('BANK-2', 20000));
+          await dispatcher.drainOnce();
+        }
+        const expected =
+          scenario === 'overpaid'
+            ? PaymentAttemptStatus.REQUIRES_REVIEW
+            : PaymentAttemptStatus.SUCCEEDED;
+        await waitUntil(
+          async () =>
+            (
+              await prisma.paymentAttempt.findUniqueOrThrow({
+                where: { id: attempt.id },
+              })
+            ).status === expected,
+        );
+        const result = await prisma.invoice.findUniqueOrThrow({
+          where: { id: invoice.id },
+        });
+        expect(result.paymentStatus).toBe(
+          scenario === 'overpaid' ? PaymentStatus.UNPAID : PaymentStatus.PAID,
+        );
+        if (scenario !== 'overpaid') {
+          await bus.publish('payos.payment.notified', {
+            paymentAttemptId: attempt.id,
+            paymentLinkId: linkId,
+          });
+          expect(
+            (
+              await prisma.paymentAttempt.findUniqueOrThrow({
+                where: { id: attempt.id },
+              })
+            ).providerTransactionNo,
+          ).toBe(linkId);
+          const confirmations = await prisma.actionLog.findMany({
+            where: {
+              actionType: 'PAYMENT_RECONCILED',
+              details: { path: ['paymentAttemptId'], equals: attempt.id },
+            },
+          });
+          expect(confirmations).toHaveLength(1);
+          expect(confirmations[0].details).toEqual(
+            expect.objectContaining({ source: 'WEBHOOK' }),
+          );
+        }
+        expect(
+          await prisma.cashTransaction.count({
+            where: { invoiceId: invoice.id },
+          }),
+        ).toBe(0);
+        expect(
+          JSON.stringify(
+            await prisma.paymentWebhookEvent.findMany({
+              where: { paymentAttemptId: attempt.id },
+            }),
+          ),
+        ).not.toContain('private-bank-account');
+      } finally {
+        await dispatcher.onModuleDestroy();
+        reconciliation.onModuleDestroy();
+        fetchSpy.mockRestore();
+      }
+    },
+    20000,
+  );
+
   it('finalizes a signed IPN exactly once without booking cash', async () => {
     const { invoice, session, table } = await createUnpaidInvoice('125000');
     const created = await payments.createAttempt(
@@ -366,8 +657,8 @@ describe('VNPay payment lifecycle (e2e)', () => {
     expect(paidInvoice.paymentMethod).toBe(PaymentMethod.TRANSFER);
     expect(succeeded.status).toBe(PaymentAttemptStatus.SUCCEEDED);
     expect(paidItem.isPaid).toBe(true);
-    expect(completedSession.sessionStatus).toBe(SessionStatus.COMPLETED);
-    expect(emptyTable.status).toBe(TableStatus.EMPTY);
+    expect(completedSession.sessionStatus).toBe(SessionStatus.ACTIVE);
+    expect(emptyTable.status).toBe(TableStatus.OCCUPIED);
     await expect(
       prisma.cashTransaction.count({ where: { invoiceId: invoice.id } }),
     ).resolves.toBe(0);
