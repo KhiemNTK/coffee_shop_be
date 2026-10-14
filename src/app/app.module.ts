@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { LoggingInterceptor } from './logger/logging.interceptor';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { ZodSerializerInterceptor, ZodValidationPipe } from 'nestjs-zod';
 import { ConfigModule } from '@nestjs/config';
@@ -46,6 +45,7 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { ManagementExceptionsModule } from './management-exceptions/management-exceptions.module';
 import { OnlineOrdersModule } from './online-orders/online-orders.module';
 import { RecommendationsModule } from './recommendations/recommendations.module';
+import { CustomersModule } from './customers/customers.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -86,15 +86,12 @@ import { RecommendationsModule } from './recommendations/recommendations.module'
     ManagementExceptionsModule,
     OnlineOrdersModule,
     RecommendationsModule,
+    CustomersModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
     ZodExceptionService,
-    {
-      provide: APP_INTERCEPTOR,
-      useClass: LoggingInterceptor,
-    },
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

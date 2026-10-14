@@ -1,3 +1,11 @@
+import type { Request } from 'express';
+import type { EmployeeInfo } from './employee.types';
+
+export type AuthenticatedStaffRequest = Request & {
+  employee?: EmployeeInfo;
+  authMethod?: 'bearer' | 'cookie';
+};
+
 export type AuthTokenType = 'access' | 'refresh';
 
 export interface AuthAccessTokenPayload {

@@ -54,6 +54,18 @@ describe('HTTP language boundary', () => {
     expect(localizeApiErrors(errors, 'vi', 'HTTP_409')).toEqual(errors);
   });
 
+  it('localizes rate-limit outages without changing the stable code contract', () => {
+    const errors = [
+      { message: 'Rate limiting is temporarily unavailable. Please retry.' },
+    ];
+    expect(localizeApiErrors(errors, 'vi', 'RATE_LIMIT_UNAVAILABLE')).toEqual([
+      { message: 'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.' },
+    ]);
+    expect(localizeApiErrors(errors, 'en', 'RATE_LIMIT_UNAVAILABLE')).toBe(
+      errors,
+    );
+  });
+
   it('localizes Zod constraints without exposing the submitted value', () => {
     const result = z
       .object({ password: z.string().min(8) })

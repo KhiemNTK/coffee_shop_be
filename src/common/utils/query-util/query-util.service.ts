@@ -1,19 +1,39 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { BuildSearchParams, Operator } from './interfaces/query-util.interface';
+
+const selectableFields = new Map(
+  Prisma.dmmf.datamodel.models.map((model) => [
+    model.name,
+    new Set(
+      model.fields
+        .filter(
+          (field) =>
+            field.kind !== 'object' &&
+            !['password', 'googleSubject'].includes(field.name),
+        )
+        .map((field) => field.name),
+    ),
+  ]),
+);
 
 @Injectable()
 export class QueryUtilService {
   convertFieldsSelectOption<T>(
-    value?: string | null,
+    value: string | null | undefined,
+    model: Prisma.ModelName,
   ): Record<keyof T, boolean> | undefined {
     if (!value?.trim()) return undefined;
 
-    return value.split(',').reduce(
+    const fields = [...new Set(value.split(',').map((field) => field.trim()))];
+    const allowed = selectableFields.get(model);
+    if (fields.some((field) => !allowed?.has(field))) {
+      throw new BadRequestException('Invalid selectable fields requested.');
+    }
+
+    return fields.reduce(
       (acc, field) => {
-        const trimmedField = field.trim();
-        if (trimmedField) {
-          acc[trimmedField as keyof T] = true;
-        }
+        acc[field as keyof T] = true;
         return acc;
       },
       {} as Record<keyof T, boolean>,

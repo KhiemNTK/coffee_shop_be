@@ -37,6 +37,8 @@ const messages: Readonly<Record<string, string>> = {
 };
 
 const codedMessages: Readonly<Record<string, string>> = {
+  RATE_LIMIT_UNAVAILABLE:
+    'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.',
   ONLINE_ASAP_CLOSED:
     'Ngoài giờ nhận ngay. Vui lòng chọn khung giờ nhận món đặt trước.',
   PAYMENT_LINK_UNAVAILABLE:

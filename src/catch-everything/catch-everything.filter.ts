@@ -11,6 +11,8 @@ import { ZodExceptionService } from './zod-exception/zod-exception.service';
 import { ZodSerializationException, ZodValidationException } from 'nestjs-zod';
 import { ApiUtilService } from '../common/utils/api-util/api-util.service';
 import { Prisma } from '@prisma/client';
+import type { Response } from 'express';
+import type { HttpResponseLocals } from '../common/types';
 import type { RequestWithContext } from '../common/middlewares/request-context.middleware';
 import { resolveApiLocale } from '../common/i18n/http-locale';
 import { localizeApiErrors } from '../common/i18n/error-messages';
@@ -55,13 +57,16 @@ export class CatchEverythingFilter implements ExceptionFilter {
     const ctx = host.switchToHttp();
     const request = ctx.getRequest<RequestWithContext>();
 
-    const response = ctx.getResponse();
+    const response = ctx.getResponse<Response<unknown, HttpResponseLocals>>();
     const method = httpAdapter.getRequestMethod(request);
-    const url = httpAdapter.getRequestUrl(request);
-    const reqContext = `${method} ${url}`;
+    const reqContext = `${method} ${request.path}`;
 
     const { status, errors } = this.resolveException(exception, reqContext);
     const code = this.resolveErrorCode(exception, status);
+    response.locals.httpError = {
+      name: exception instanceof Error ? exception.name : 'UnknownError',
+      code,
+    };
     const responseBody = this.apiUtilService.formatResponse({
       errors: localizeApiErrors(
         errors,

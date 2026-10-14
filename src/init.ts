@@ -7,6 +7,7 @@ import { json, urlencoded, Request, Response, NextFunction } from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { resolveApiLocale } from './common/i18n/http-locale';
 import { localizeApiErrors } from './common/i18n/error-messages';
+import { CUSTOMER_SESSION_COOKIE } from './common/consts/customer-auth';
 const initOpenAPI = (app: INestApplication, config: ConfigService) => {
   if (!config.get<boolean>('SWAGGER_ENABLED', false)) return;
 
@@ -21,6 +22,11 @@ const initOpenAPI = (app: INestApplication, config: ConfigService) => {
       .addBearerAuth()
       .addCookieAuth('accessToken', undefined, 'accessCookie')
       .addCookieAuth('refreshToken', undefined, 'refreshCookie')
+      .addCookieAuth(
+        CUSTOMER_SESSION_COOKIE,
+        undefined,
+        CUSTOMER_SESSION_COOKIE,
+      )
       .addApiKey({ type: 'apiKey', in: 'header', name: 'X-CSRF-Token' }, 'csrf')
       .addGlobalParameters({
         in: 'header',

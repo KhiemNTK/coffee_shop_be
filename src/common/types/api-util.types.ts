@@ -1,3 +1,7 @@
+export interface HttpResponseLocals {
+  httpError?: { name: string; code: string };
+}
+
 export interface FormatResponseParams {
   errors?: null | Record<string, any>[];
   data?: null | any;
