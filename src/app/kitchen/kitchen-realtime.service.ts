@@ -9,7 +9,15 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
-import { interval, map, merge, Observable, Subject } from 'rxjs';
+import {
+  interval,
+  map,
+  merge,
+  Observable,
+  ReplaySubject,
+  Subject,
+  takeUntil,
+} from 'rxjs';
 import type { KitchenRealtimeEvent } from '../../common/types';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { ORDER_EVENTS } from '../orders/events/order.events';
@@ -33,6 +41,7 @@ export class KitchenRealtimeService
 {
   private readonly logger = new Logger(KitchenRealtimeService.name);
   private readonly events = new Subject<KitchenRealtimeEvent>();
+  private readonly shutdown = new ReplaySubject<void>(1);
   private readonly publisher?: Redis;
   private readonly subscriber?: Redis;
   private readonly unsubscribe: Array<() => void> = [];
@@ -89,6 +98,8 @@ export class KitchenRealtimeService
   }
 
   onModuleDestroy() {
+    this.shutdown.next();
+    this.shutdown.complete();
     for (const unsubscribe of this.unsubscribe) unsubscribe();
     this.publisher?.disconnect();
     this.subscriber?.disconnect();
@@ -111,7 +122,7 @@ export class KitchenRealtimeService
           data: { occurredAt: new Date().toISOString() },
         })),
       ),
-    );
+    ).pipe(takeUntil(this.shutdown));
   }
 
   private async publishRefresh(eventName: string, payload: unknown) {

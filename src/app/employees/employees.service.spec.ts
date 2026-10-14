@@ -183,6 +183,31 @@ describe('Employee access changes', () => {
       ['cashier', makeEmployee('cashier', [cashierRole])],
     ]);
     const tx = {
+      $queryRaw: jest.fn(({ values }: { values: unknown[] }) => {
+        const employee = records.get(String(values[0]));
+        return Promise.resolve(
+          employee?.isActive && !employee.deletedAt
+            ? [
+                {
+                  employeeId: employee.id,
+                  employeeEmail: employee.email,
+                  roleNames: employee.employeeRoles.map(
+                    (entry) => entry.role.name,
+                  ),
+                  permissionKeys: [
+                    ...new Set(
+                      employee.employeeRoles.flatMap((entry) =>
+                        entry.role.rolePermissions.map(
+                          (item) => item.permission.key,
+                        ),
+                      ),
+                    ),
+                  ],
+                },
+              ]
+            : [],
+        );
+      }),
       employee: {
         findUnique: jest.fn(({ where }: { where: { id: string } }) =>
           Promise.resolve(records.get(where.id) ?? null),

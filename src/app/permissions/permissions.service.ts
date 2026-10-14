@@ -44,7 +44,10 @@ export class PermissionsService {
     ...search
   }: GetPermissionsPaginationDto) {
     const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<Permission>(select);
+      this.queryUtilService.convertFieldsSelectOption<Permission>(
+        select,
+        'Permission',
+      );
     const searchQuery = this.queryUtilService.buildSearchQuery<Permission>({
       search,
     });

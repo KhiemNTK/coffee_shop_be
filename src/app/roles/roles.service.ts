@@ -61,8 +61,10 @@ export class RolesService {
     select,
     ...search
   }: GetRolesPaginationDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<Role>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<Role>(
+      select,
+      'Role',
+    );
     const searchQuery = this.queryUtilService.buildSearchQuery<Role>({
       search,
     });
@@ -313,8 +315,10 @@ export class RolesService {
     if (ids) {
       where.id = { in: ids };
     }
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<Role>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<Role>(
+      select,
+      'Role',
+    );
     const roles = await this.prisma.role.export({
       select: fieldsSelect,
       where,

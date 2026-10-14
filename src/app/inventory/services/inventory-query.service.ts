@@ -32,8 +32,10 @@ export class InventoryQueryService {
     lowStockOnly,
     maxStock,
   }: GetInventoryItemsDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<any>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<any>(
+      select,
+      'InventoryItem',
+    );
     const resolvedMaxStock =
       maxStock !== undefined ? new Decimal(maxStock) : new Decimal(5);
     const where: Prisma.InventoryItemWhereInput = {
@@ -81,8 +83,10 @@ export class InventoryQueryService {
     transactionFrom,
     transactionTo,
   }: GetInventoryTransactionsDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<any>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<any>(
+      select,
+      'InventoryTransaction',
+    );
     const where: Prisma.InventoryTransactionWhereInput = {
       ...(inventoryItemId ? { inventoryItemId } : {}),
       ...(orderItemId ? { orderItemId } : {}),

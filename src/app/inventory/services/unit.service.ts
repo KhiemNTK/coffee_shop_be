@@ -40,8 +40,10 @@ export class UnitService {
   }
 
   async findAll({ page, itemPerPage, select, keyword }: GetUnitsDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<any>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<any>(
+      select,
+      'Unit',
+    );
     const where: Prisma.UnitWhereInput = {
       ...(keyword
         ? {

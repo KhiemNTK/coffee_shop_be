@@ -65,17 +65,25 @@ jobs:
       - run: pnpm prisma:preflight
       - name: Check deployed schema for drift
         run: pnpm exec prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+      - run: pnpm audit --prod --audit-level high
       - run: pnpm verify
-      - run: pnpm exec jest --config ./test/jest-e2e.json --runInBand --detectOpenHandles
+      - run: pnpm exec jest --config ./test/jest-e2e.json --maxWorkers=1 --workerThreads --workerIdleMemoryLimit=512MB
 
   container:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Build production image
         run: docker build --tag coffee-shop-api:ci .
+      - name: Build isolated migration runner
+        run: docker build --target tooling --tag coffee-shop-tooling:ci .
       - name: Verify runtime is non-root
         run: test "$(docker run --rm --entrypoint id coffee-shop-api:ci -u)" = 1000
       - name: Verify generated Prisma Client is in the runtime image
         run: docker run --rm --entrypoint node coffee-shop-api:ci -e "if (typeof require('@prisma/client').PrismaClient !== 'function') process.exit(1)"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Smoke test actual production runtime
+        run: node test/runtime-smoke.cjs

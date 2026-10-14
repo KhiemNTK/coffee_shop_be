@@ -205,24 +205,14 @@ describe('Role permission delegation', () => {
   let service: RolesService;
   function fixture() {
     const tx = {
-      employee: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'actor',
-          email: 'actor@example.test',
-          isActive: true,
-          deletedAt: null,
-          employeeRoles: [
-            {
-              role: {
-                name: 'CUSTOM_ADMIN',
-                rolePermissions: allowedKeys.map((key) => ({
-                  permission: { key },
-                })),
-              },
-            },
-          ],
-        }),
-      },
+      $queryRaw: jest.fn().mockResolvedValue([
+        {
+          employeeId: 'actor',
+          employeeEmail: 'actor@example.test',
+          roleNames: ['CUSTOM_ADMIN'],
+          permissionKeys: allowedKeys,
+        },
+      ]),
       role: {
         findUnique: jest.fn().mockResolvedValue({
           id: 'role',

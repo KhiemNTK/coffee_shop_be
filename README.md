@@ -1,11 +1,64 @@
 # Coffee Shop Backend
 
+## Customer Wishlist And Demo Data
+
+Apply `20261013000000_customer_wishlist` before deploying the API. Customers use
+Google sign-in and are separate from employees and role/permission grants. Configure
+the existing `GOOGLE_CLIENT_ID` and Turnstile settings; no public employee signup is
+enabled. Customer sessions are random opaque tokens hashed in PostgreSQL, expire
+after 30 days, and are revoked server-side on logout. A customer has at most ten
+sessions; expired sessions are removed by the existing bounded housekeeping job.
+Cookies `customerSession` (HttpOnly) and `customerCsrfToken` are separate from staff.
+
+- `POST /customers/auth/google`: existing Google/Turnstile DTO; returns only customer identity.
+- `GET /customers/me`, `POST /customers/auth/logout`: current customer session.
+- `GET /customers/wishlist`: at most 100 favorites with current price and availability;
+  discontinued items return `item: null` and remain removable.
+- `PUT/DELETE /customers/wishlist/:id`: idempotent save/remove; JSON body requires
+  `expectedCustomerId` as an account-change precondition, not an authorization identity.
+  The server always uses the authenticated session as the owner. Cookie mutations
+  require `X-CSRF-Token` from `customerCsrfToken`, even with a Bearer header present.
+
+Demo data is opt-in and is never part of production permission/OWNER seeding:
+
+```powershell
+pnpm prisma:seed:demo --database db_nestjs_coffee_shop_be --seed 20261013
+```
+
+Only a loopback PostgreSQL database whose name exactly matches `--database` is
+allowed; production is rejected. Stable demo IDs make replay non-destructive even
+with another random seed: existing prices, recipes, soft deletions and consumed stock
+are preserved. New rows include four categories, 24 menu items/recipes, eight ingredients,
+three units, two kitchen stations, six empty tables and a zero-balance cash fund.
+Opening stock has matching IMPORT ledger rows, never fake invoices, payments,
+customers, staff accounts or cash revenue. Everything is explicitly named `Demo`.
+Seed randomness changes new prices and quantities only; it is not sales analytics data.
+
 NestJS, Prisma, PostgreSQL and Redis backend for a single coffee shop. API
 routes use `/api/v1` by default. PostgreSQL stores business state; Redis is
 used for background delivery and cache. Do not run migrations or seed against
 a shared database without reviewing the target URL and backup first.
 
 ## Audit hardening rollout
+
+- List/export `select` accepts scalar fields of the requested model only. Relations,
+  unknown fields and credential fields return HTTP 400 rather than expanding private
+  records. Shared pagination requires integer pages and at most 100 items per page.
+- Cookie-authenticated mutations, including refresh/logout, require CSRF even when
+  an Authorization header is supplied. Only a successfully authenticated Bearer
+  request is exempt; malformed headers never fall back to an employee cookie.
+- Logout revokes the current browser's entire session family in a serializable
+  transaction, including a concurrently rotated successor; other device families
+  remain valid. Permission grants use one parameterized PostgreSQL query per load,
+  retain active/deleted filters, and stay transaction-bound for delegation checks.
+- New idempotency snapshots use the same numeric Decimal JSON shape as HTTP
+  responses. Existing snapshots are preserved for safe retries; legacy Decimal
+  strings can remain until their 24-hour retention expires. Never clear them during
+  deployment merely to change response types.
+- HTTP logging/metrics run before guards and record 401/403/429 and client aborts
+  once, with request IDs and stable error codes. Query strings and request credentials
+  are excluded from access/error request paths. Business-action permissions remain
+  distinct; no role-name bypass or permission cache is added.
 
 - Apply `20261012000000_payment_link_recovery_and_retention` before starting the
   updated API. It adds durable payment URLs and an outbox retention index. Existing
@@ -126,10 +179,27 @@ application startup or deployment. Review its target database before running.
 ## Verification
 
 `pnpm verify` validates Prisma, lints, type-checks, builds and runs unit tests.
-`pnpm test:e2e -- --runInBand` requires a separate disposable PostgreSQL
+`pnpm exec jest --config test/jest-e2e.json --maxWorkers=1 --workerThreads --workerIdleMemoryLimit=512MB` requires a separate disposable PostgreSQL
 database, Redis, applied migrations and `NODE_ENV=test`; it mutates test data.
-`pnpm audit --prod --audit-level high` checks production dependencies and is
-currently a go-live blocker; see the release runbook.
+`pnpm audit --prod --audit-level high` is a required CI/release gate. See
+[dependency review](deploy/release/dependency-review.md) for the last verified
+result and the narrow Prisma CLI override. `.npmrc` disables automatic peer
+installation; declare a peer explicitly only when the application uses it.
+
+CI also builds runtime/tooling images and runs `node test/runtime-smoke.cjs`.
+The smoke test owns an isolated Compose project with disposable PostgreSQL/Redis,
+loopback-only HTTP and fixture credentials. It verifies production startup under
+the read-only/512 MB heap profile, Redis outage/recovery, persisted signed IPN,
+authenticated kitchen SSE and graceful SIGTERM. It never calls a payment gateway.
+Build both `coffee-shop-api:ci` and `coffee-shop-tooling:ci` images first when
+running it locally; it removes its test containers in `finally`.
+
+Health routes bypass rate limiting: liveness remains 200 during a Redis outage,
+while readiness returns 503. Ordinary routes fail-closed with 503 and
+`RATE_LIMIT_UNAVAILABLE`. Signed payment callbacks use an independent in-process
+limit of 600 requests/minute/IP/route; signatures and database replay protection
+remain mandatory. Coordinate abuse limits at the reverse proxy before adding
+replicas. Redis outage delays background/realtime delivery, not callback storage.
 
 ## Operations
 

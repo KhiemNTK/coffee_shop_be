@@ -41,7 +41,10 @@ export class PositionsService {
       totalItems,
     });
     const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<Position>(select);
+      this.queryUtilService.convertFieldsSelectOption<Position>(
+        select,
+        'Position',
+      );
     const searchQuery = this.queryUtilService.buildSearchQuery<Position>({
       search,
     });

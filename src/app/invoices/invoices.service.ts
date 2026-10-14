@@ -217,8 +217,10 @@ export class InvoicesService {
     employeeId,
     shiftId,
   }: GetInvoicesPaginationDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<any>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<any>(
+      select,
+      'Invoice',
+    );
     const where: Prisma.InvoiceWhereInput = {
       ...(paymentStatus ? { paymentStatus } : {}),
       ...(paymentMethod ? { paymentMethod } : {}),

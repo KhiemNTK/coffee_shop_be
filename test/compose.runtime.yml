@@ -1,0 +1,101 @@
+name: coffee-shop-runtime-test
+
+x-database: &database
+  DATABASE_URL: postgresql://runtime_test:runtime_test@postgres:5432/coffee_shop_runtime_test?schema=public&connection_limit=10
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: runtime_test
+      POSTGRES_PASSWORD: runtime_test
+      POSTGRES_DB: coffee_shop_runtime_test
+    tmpfs: /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U runtime_test -d coffee_shop_runtime_test]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command:
+      [
+        redis-server,
+        --save,
+        '',
+        --appendonly,
+        'no',
+        --requirepass,
+        runtime-test-password,
+      ]
+    healthcheck:
+      test: [CMD, redis-cli, -a, runtime-test-password, ping]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  tooling:
+    image: coffee-shop-tooling:ci
+    environment:
+      <<: *database
+      NODE_ENV: production
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  backend:
+    image: coffee-shop-api:ci
+    environment:
+      <<: *database
+      NODE_ENV: production
+      PORT: '3000'
+      HOST: 0.0.0.0
+      APP_PREFIX: /api/v1
+      REDIS_URL: redis://:runtime-test-password@redis:6379/14
+      FE_URL: https://runtime.example.com
+      PASSWORD_RESET_URL: https://runtime.example.com/reset-password
+      JWT_SECRET: smoke-access-key-only-for-isolated-container-tests
+      JWT_REFRESH_SECRET: smoke-refresh-key-only-for-isolated-container-tests
+      ONLINE_REORDER_SECRET: smoke-reorder-key-only-for-isolated-container-tests
+      TURNSTILE_SECRET_KEY: smoke-turnstile-key-only-for-isolated-container-tests
+      METRICS_TOKEN: smoke-metrics-key-only-for-isolated-container-tests
+      MAIL_HOST: localhost
+      MAIL_PORT: '587'
+      MAIL_USER: smoke@example.com
+      MAIL_PASS: smoke-smtp-key-only-for-isolated-container-tests
+      MAIL_FROM: smoke@example.com
+      VNPAY_TMN_CODE: SMOKEPOS
+      VNPAY_HASH_SECRET: smoke-vnpay-key-only-for-isolated-container-tests
+      VNPAY_PAYMENT_URL: https://pay.vnpay.vn/vpcpay.html
+      VNPAY_API_URL: https://merchant.vnpay.vn/merchant_webapi/api/transaction
+      VNPAY_SERVER_IP: 203.0.113.10
+      VNPAY_RETURN_URL: https://runtime.example.com/payment/vnpay/return
+      COOKIE_SECURE: 'true'
+      CSRF_ENABLED: 'true'
+      AUTH_SIGNUP_ENABLED: 'false'
+      SWAGGER_ENABLED: 'false'
+      TRUST_PROXY: loopback
+      NODE_OPTIONS: --max-old-space-size=512
+    ports: ['127.0.0.1::3000']
+    init: true
+    read_only: true
+    tmpfs: /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    stop_grace_period: 15s
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 5s
+      start_period: 30s
+      retries: 20

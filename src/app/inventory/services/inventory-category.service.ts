@@ -47,8 +47,10 @@ export class InventoryCategoryService {
     select,
     keyword,
   }: GetInventoryCategoriesDto) {
-    const fieldsSelect =
-      this.queryUtilService.convertFieldsSelectOption<any>(select);
+    const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<any>(
+      select,
+      'InventoryCategory',
+    );
     const where: Prisma.InventoryCategoryWhereInput = {
       ...(keyword
         ? {

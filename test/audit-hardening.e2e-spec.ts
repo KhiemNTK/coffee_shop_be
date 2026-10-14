@@ -314,6 +314,49 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
     expect(await authorization.getPermissionKeys(employeeId)).toEqual([]);
   });
 
+  it('deduplicates grants and filters deleted roles/permissions in the flattened query', async () => {
+    const active = await prisma.permission.create({
+      data: { key: '/inventory_read', name: 'Active' },
+    });
+    const deleted = await prisma.permission.create({
+      data: { key: '/menu_update', name: 'Deleted', deletedAt: new Date() },
+    });
+    const hidden = await prisma.permission.create({
+      data: { key: '/orders_sessions_read', name: 'Deleted role grant' },
+    });
+    const a = await prisma.role.create({ data: { name: 'Active A' } });
+    const b = await prisma.role.create({ data: { name: 'Active B' } });
+    const c = await prisma.role.create({
+      data: { name: 'Deleted C', deletedAt: new Date() },
+    });
+    await prisma.rolePermission.createMany({
+      data: [
+        { roleId: a.id, permissionId: active.id },
+        { roleId: b.id, permissionId: active.id },
+        { roleId: b.id, permissionId: deleted.id },
+        { roleId: c.id, permissionId: hidden.id },
+      ],
+    });
+    await prisma.employeeRole.createMany({
+      data: [a, b, c].map((role) => ({ employeeId, roleId: role.id })),
+    });
+    const authorization = new AuthorizationService(prisma);
+    const grants = await authorization.getAuthorizationContext(employeeId);
+    expect(grants.permissionKeys).toEqual(['/inventory_read']);
+    expect(grants.roleNames).not.toContain(c.name);
+    await prisma.employee.update({
+      where: { id: employeeId },
+      data: { isActive: false },
+    });
+    await expect(
+      authorization.getAuthorizationContext(employeeId),
+    ).rejects.toThrow();
+    await prisma.employee.update({
+      where: { id: employeeId },
+      data: { isActive: true },
+    });
+  });
+
   it('cleans at most 500 published events and preserves pending/dead letters and valid auth tokens', async () => {
     const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000);
     const event = {

@@ -22,7 +22,9 @@ CI does not prove point-in-time recovery (PITR).
    commit as the application image. The production image intentionally does not
    include the Prisma CLI. Deploy one canary instance; check `/api/v1/health/ready`,
    sign-in, table/order read, a test transaction, metrics, logs, and payment
-   reconciliation before increasing traffic. Never test payments with real money.
+   reconciliation before increasing traffic. Use fixture/sandbox payments for
+   automated tests. Any provider-required live acceptance payment needs explicit
+   merchant approval and normal reconciliation/refund accounting.
 5. Watch 5xx, p95 read/mutation latency, PostgreSQL connections, Redis status,
    outbox lag/dead letters, and payment mismatch for at least one business
    cycle. Record the release decision and evidence outside the repository.
@@ -99,16 +101,19 @@ then deploy the application. Never print old or new values in CI output.
 - Logical backups are not PITR or automated off-site retention. The operator
   must configure both and pass a timed restore drill.
 - The Nest throttler uses Redis when `REDIS_URL` is configured, and rejects
-  requests if that configured Redis is unavailable. Run a multi-replica
-  rate-limit check before go-live; without `REDIS_URL`, dev/test use memory.
+  ordinary requests with 503 if that configured Redis is unavailable. Health
+  bypasses the limiter: liveness remains up and readiness reports 503. Signed
+  payment callbacks use an independent 600/minute/IP/route in-process limiter
+  and still persist verified events to PostgreSQL. Coordinate callback abuse
+  protection at the edge before scaling replicas; dev/test may omit Redis.
   Confirm that the per-IP limit fits the real POS network topology, including
   clients sharing one public IP. An edge abuse limit remains necessary.
 - The read-only k6 profile in `test/load` has not demonstrated 250 RPS steady
   or 500 RPS burst until run on production-sized staging with saved results.
   Financial and inventory concurrency tests need disposable fixtures and
   distinct idempotency keys; do not point mutation load at live data.
-- The production dependency audit on 2026-09-27 reported 33 high, 18 moderate
-  and 5 low advisories, including paths through `multer` and Prisma/`effect`.
-  The current lockfile is **not** security-cleared for go-live. Remediate and
-  re-run the audit; do not suppress findings by adding an always-failing CI
-  job or blindly overriding transitive versions.
+- On 2026-10-14 the release lockfile audit reported 0 critical, 0 high,
+  2 moderate and 0 low advisories. [Dependency review](dependency-review.md)
+  records their reachability and the scoped override. CI rejects new high or
+  critical advisories. Re-run against the actual release lockfile; this dated
+  result is not a permanent security clearance.
