@@ -403,11 +403,47 @@ model MenuItem {
   ingredients             MenuItemIngredient[]
   onlineOrderRequestItems OnlineOrderRequestItem[]
   optionGroups            MenuItemOptionGroup[]
+  customerWishlists       CustomerWishlist[]
   recommendationAnchors   MenuItemRecommendationPair[] @relation("RecommendationAnchor")
   recommendationCandidates MenuItemRecommendationPair[] @relation("RecommendationCandidate")
 
   @@index([deletedAt, categoryId, isAvailable])
   @@index([kitchenStationId, deletedAt, isAvailable])
+}
+
+model Customer {
+  id            String             @id @default(uuid())
+  googleSubject String             @unique @db.VarChar(255)
+  email         String             @db.VarChar(254)
+  isActive      Boolean            @default(true)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  deletedAt     DateTime?
+  sessions      CustomerSession[]
+  wishlist      CustomerWishlist[]
+}
+
+model CustomerSession {
+  id         String   @id @default(uuid())
+  tokenHash  String   @unique @db.VarChar(64)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([expiresAt])
+}
+
+model CustomerWishlist {
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([customerId, menuItemId])
+  @@index([menuItemId])
 }
 
 model MenuItemOptionGroup {
