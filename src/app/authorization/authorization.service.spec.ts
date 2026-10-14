@@ -25,81 +25,54 @@ describe('AuthorizationService delegation', () => {
     ).toThrow(ForbiddenException);
   });
 
-  it('uses the transaction client, never cached grants, for sensitive writes', async () => {
-    const tx = {
-      employee: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: 'actor',
-          email: context.employeeEmail,
-          isActive: true,
-          deletedAt: null,
-          employeeRoles: [
-            {
-              role: {
-                name: 'MANAGER',
-                rolePermissions: [
-                  { permission: { key: PermissionKeys.MENU_READ } },
-                ],
-              },
-            },
-          ],
-        }),
-      },
-    };
-    const service = new AuthorizationService({} as never);
-    const fresh = await service.getFreshAuthorizationContext(
-      'actor',
-      tx as never,
-    );
-    expect(fresh.permissionKeys).toEqual([PermissionKeys.MENU_READ]);
-    expect(tx.employee.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'actor', deletedAt: null } }),
-    );
+  it('loads grants with one parameterized query on the supplied transaction client', async () => {
+    const query = jest
+      .fn()
+      .mockResolvedValue([{ ...context, permissionKeys: [] }]);
+    const baseQuery = jest.fn();
+    const service = new AuthorizationService({ $queryRaw: baseQuery } as never);
+    await expect(
+      service.getFreshAuthorizationContext('actor', {
+        $queryRaw: query,
+      } as never),
+    ).resolves.toEqual({ ...context, permissionKeys: [] });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(baseQuery).not.toHaveBeenCalled();
+    const sql = query.mock.calls[0][0] as { text: string; values: unknown[] };
+    expect(sql.values).toEqual(['actor']);
+    expect(sql.text).toContain('e."isActive" = true');
+    expect(sql.text).toContain('e."deletedAt" IS NULL');
+    expect(sql.text).toContain('r."deletedAt" IS NULL');
+    expect(sql.text).toContain('p."deletedAt" IS NULL');
   });
 
-  it.each([
-    null,
-    { isActive: false },
-    { isActive: true, deletedAt: new Date() },
-  ])('rejects inactive/deleted actors: %p', async (employee) => {
+  it('rejects an inactive, deleted or missing employee when the query returns no row', async () => {
     const service = new AuthorizationService({
-      employee: { findUnique: jest.fn().mockResolvedValue(employee) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
     } as never);
     await expect(
       service.getFreshAuthorizationContext('actor'),
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
-  it('reads committed grants on every request, without stale cache refill', async () => {
-    const employee = {
-      id: 'actor',
-      email: context.employeeEmail,
-      isActive: true,
-      deletedAt: null,
-    };
-    const findUnique = jest
+  it('reads committed grants on every request and keeps deterministic ordering', async () => {
+    const query = jest
       .fn()
-      .mockResolvedValueOnce({
-        ...employee,
-        employeeRoles: [
-          {
-            role: {
-              name: 'MANAGER',
-              rolePermissions: [
-                { permission: { key: PermissionKeys.MENU_READ } },
-              ],
-            },
-          },
-        ],
-      })
-      .mockResolvedValueOnce({ ...employee, employeeRoles: [] });
-    const service = new AuthorizationService({
-      employee: { findUnique },
-    } as never);
-    expect(await service.getPermissionKeys('actor')).toEqual([
-      PermissionKeys.MENU_READ,
-    ]);
+      .mockResolvedValueOnce([
+        {
+          ...context,
+          permissionKeys: [
+            PermissionKeys.MENU_READ,
+            PermissionKeys.EMPLOYEE_ROLES_UPDATE,
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([{ ...context, permissionKeys: [] }]);
+    const service = new AuthorizationService({ $queryRaw: query } as never);
+    expect(await service.getPermissionKeys('actor')).toEqual(
+      [...context.permissionKeys].sort(),
+    );
     expect(await service.getPermissionKeys('actor')).toEqual([]);
-    expect(findUnique).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(2);
   });
 });

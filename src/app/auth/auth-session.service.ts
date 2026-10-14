@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AUTH_ERRORS } from '../../common/consts/message';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -191,33 +192,38 @@ export class AuthSessionService {
       throw error;
     }
 
-    const session = await this.prisma.authSession.findUnique({
-      where: { id: payload.sid },
-      select: { id: true, refreshTokenHash: true, familyId: true },
-    });
-    if (!session) return;
-
-    if (
-      !this.authTokenService.tokenHashMatches(
-        refreshToken,
-        session.refreshTokenHash,
-      )
-    ) {
-      await this.revokeFamily(
-        payload.sub,
-        payload.familyId,
-        SESSION_REVOKE_REASONS.REFRESH_REUSE,
-      );
-      return;
-    }
-
-    await this.prisma.authSession.updateMany({
-      where: { id: session.id, employeeId: payload.sub, revokedAt: null },
-      data: {
-        revokedAt: new Date(),
-        revokeReason: SESSION_REVOKE_REASONS.LOGOUT,
+    // Retry the family-wide revoke if rotation commits after our snapshot.
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const session = await tx.authSession.findUnique({
+          where: {
+            id: payload.sid,
+            employeeId: payload.sub,
+            familyId: payload.familyId,
+          },
+          select: { refreshTokenHash: true },
+        });
+        if (!session) return;
+        await tx.authSession.updateMany({
+          where: {
+            employeeId: payload.sub,
+            familyId: payload.familyId,
+            revokedAt: null,
+          },
+          data: {
+            revokedAt: new Date(),
+            revokeReason: this.authTokenService.tokenHashMatches(
+              refreshToken,
+              session.refreshTokenHash,
+            )
+              ? SESSION_REVOKE_REASONS.LOGOUT
+              : SESSION_REVOKE_REASONS.REFRESH_REUSE,
+          },
+        });
       },
-    });
+      { loggerContext: 'AuthSession.logout' },
+    );
   }
 
   revokeAllForEmployee(

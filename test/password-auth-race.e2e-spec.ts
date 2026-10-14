@@ -15,6 +15,7 @@ import { AUTH_ERRORS } from '../src/common/consts/message';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { StringUtilService } from '../src/common/utils/string-util/string-util.service';
+import type { AuthTokenPair } from '../src/common/types';
 
 // Run with --maxWorkers=1 against a dedicated loopback *_test database.
 describe('Password sign-in races (PostgreSQL)', () => {
@@ -201,4 +202,123 @@ describe('Password sign-in races (PostgreSQL)', () => {
       ).toBe(0);
     },
   );
+
+  it('revokes a successor committed after the logout snapshot without revoking another device', async () => {
+    const old = await sessions.createSession(
+      employee,
+      {},
+      undefined,
+      employee.password,
+    );
+    const other = await sessions.createSession(
+      employee,
+      {},
+      undefined,
+      employee.password,
+    );
+    const read = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let paused = false;
+    const client = base.getExtendedClient().$extends({
+      query: {
+        authSession: {
+          async updateMany({ args, query }) {
+            if (args.data.revokeReason === 'LOGOUT' && !paused) {
+              paused = true;
+              read.resolve();
+              await resume.promise;
+            }
+            return query(args);
+          },
+        },
+      },
+    });
+    const logoutSessions = new AuthSessionService(client, tokens);
+    const logout = Promise.allSettled([
+      logoutSessions.revoke(old.refreshToken),
+    ]);
+    let successor: AuthTokenPair | undefined;
+    try {
+      await Promise.race([
+        read.promise,
+        logout.then(() => {
+          throw new Error('Logout ended before the race checkpoint.');
+        }),
+      ]);
+      successor = await sessions.rotate(old.refreshToken, {});
+    } finally {
+      resume.resolve();
+      await logout;
+    }
+    expect((await logout)[0].status).toBe('fulfilled');
+    const original = await tokens.verifyRefreshToken(old.refreshToken);
+    expect(
+      await base.authSession.count({
+        where: {
+          employeeId: employee.id,
+          familyId: original.familyId,
+          revokedAt: null,
+        },
+      }),
+    ).toBe(0);
+    assert(successor);
+    const next = await tokens.verifyAccessToken(successor.accessToken);
+    await expect(
+      auth.getAuthenticatedEmployee(employee.id, next.sid),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    const otherDevice = await tokens.verifyAccessToken(other.accessToken);
+    await expect(
+      auth.getAuthenticatedEmployee(employee.id, otherDevice.sid),
+    ).resolves.toMatchObject({ employeeId: employee.id });
+  }, 15_000);
+
+  it('rejects a refresh whose session was revoked after its snapshot', async () => {
+    const old = await sessions.createSession(
+      employee,
+      {},
+      undefined,
+      employee.password,
+    );
+    const read = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let paused = false;
+    const client = base.getExtendedClient().$extends({
+      query: {
+        authSession: {
+          async findUnique({ args, query }) {
+            const result = await query(args);
+            if (!paused) {
+              paused = true;
+              read.resolve();
+              await resume.promise;
+            }
+            return result;
+          },
+        },
+      },
+    });
+    const refresh = Promise.allSettled([
+      new AuthSessionService(client, tokens).rotate(old.refreshToken, {}),
+    ]);
+    try {
+      await Promise.race([
+        read.promise,
+        refresh.then(() => {
+          throw new Error('Refresh ended before the race checkpoint.');
+        }),
+      ]);
+      await sessions.revoke(old.refreshToken);
+    } finally {
+      resume.resolve();
+      await refresh;
+    }
+    const [outcome] = await refresh;
+    assert(outcome.status === 'rejected');
+    expect(outcome.reason).toBeInstanceOf(UnauthorizedException);
+    expect(
+      await base.authSession.count({
+        where: { employeeId: employee.id, revokedAt: null },
+      }),
+    ).toBe(0);
+  }, 15_000);
 });

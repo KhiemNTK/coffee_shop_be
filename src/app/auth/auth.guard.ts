@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import type { Request } from 'express';
+import type { AuthenticatedStaffRequest } from '../../common/types';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import { setRequestEmployee } from '../../common/request-context';
 import { TokenKeys } from './consts/jwt.const';
@@ -26,24 +26,31 @@ export class AuthGuard implements CanActivate {
     ]);
     if (skipAuth) return true;
 
-    const req = context.switchToHttp().getRequest<Request>();
-    const token = this.extractToken(req);
-    if (!token) {
+    const req = context.switchToHttp().getRequest<AuthenticatedStaffRequest>();
+    const credential = this.extractToken(req);
+    if (!credential) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     }
 
-    const payload = await this.authService.verifyAccessToken(token);
-    req['employee'] = await this.authService.getAuthenticatedEmployee(
+    const payload = await this.authService.verifyAccessToken(credential.token);
+    req.employee = await this.authService.getAuthenticatedEmployee(
       payload.sub,
       payload.sid,
     );
+    req.authMethod = credential.method;
     setRequestEmployee(payload.sub);
     return true;
   }
 
-  private extractToken(req: Request) {
-    const [type, bearerToken] = req.headers.authorization?.split(' ') ?? [];
-    if (type === 'Bearer' && bearerToken) return bearerToken;
-    return req.cookies?.[TokenKeys.ACCESS_TOKEN_KEY] as string | undefined;
+  private extractToken(req: AuthenticatedStaffRequest) {
+    const authorization = req.headers.authorization;
+    if (authorization !== undefined) {
+      const match = /^Bearer ([^\s]+)$/i.exec(authorization);
+      return match ? { token: match[1], method: 'bearer' as const } : undefined;
+    }
+    const token: unknown = req.cookies?.[TokenKeys.ACCESS_TOKEN_KEY];
+    return typeof token === 'string' && token
+      ? { token, method: 'cookie' as const }
+      : undefined;
   }
 }

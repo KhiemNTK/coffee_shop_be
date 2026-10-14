@@ -93,5 +93,36 @@ describe('AuthGuard', () => {
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
     expect(request.employee).toEqual(employee);
+    expect(request.authMethod).toBe('bearer');
+  });
+
+  it.each(['Bearer  ignored', 'Bearer', 'Basic token', 'Bearer token extra'])(
+    'does not fall back to a cookie for malformed authorization: %s',
+    async (authorization) => {
+      const { authService, context, guard, request } = createFixture();
+      request.headers = { authorization };
+      request.cookies = { accessToken: 'valid-cookie-token' };
+      await expect(guard.canActivate(context)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(authService.verifyAccessToken).not.toHaveBeenCalled();
+      expect(request.authMethod).toBeUndefined();
+    },
+  );
+
+  it('marks cookie authentication only after token and employee validation', async () => {
+    const { authService, context, guard, request } = createFixture();
+    request.headers = {};
+    request.cookies = { accessToken: 'cookie-token' };
+    authService.verifyAccessToken.mockResolvedValue({
+      sub: 'employee',
+      sid: 'session',
+    });
+    authService.getAuthenticatedEmployee.mockResolvedValue({
+      employeeId: 'employee',
+    });
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(authService.verifyAccessToken).toHaveBeenCalledWith('cookie-token');
+    expect(request.authMethod).toBe('cookie');
   });
 });

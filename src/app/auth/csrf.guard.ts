@@ -7,10 +7,15 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
-import type { Request } from 'express';
+import type { AuthenticatedStaffRequest } from '../../common/types';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import { TokenKeys } from './consts/jwt.const';
 import { IS_SKIP_CSRF } from './csrf.decorator';
+import {
+  CUSTOMER_AUTH_SCOPE,
+  CUSTOMER_CSRF_COOKIE,
+  CUSTOMER_SESSION_COOKIE,
+} from '../../common/consts/customer-auth';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -30,22 +35,29 @@ export class CsrfGuard implements CanActivate {
     ]);
     if (skipCsrf) return true;
 
-    const req = context.switchToHttp().getRequest<Request>();
+    const req = context.switchToHttp().getRequest<AuthenticatedStaffRequest>();
     if (SAFE_METHODS.has(req.method)) return true;
-    if (req.headers.authorization?.startsWith('Bearer ')) return true;
+    const customerScope = this.reflector.getAllAndOverride<boolean>(
+      CUSTOMER_AUTH_SCOPE,
+      [context.getHandler(), context.getClass()],
+    );
+    if (!customerScope && req.authMethod === 'bearer') return true;
 
     const hasAuthCookie = Boolean(
-      req.cookies?.[TokenKeys.ACCESS_TOKEN_KEY] ||
-      req.cookies?.[TokenKeys.REFRESH_TOKEN_KEY],
+      customerScope
+        ? req.cookies?.[CUSTOMER_SESSION_COOKIE]
+        : req.cookies?.[TokenKeys.ACCESS_TOKEN_KEY] ||
+            req.cookies?.[TokenKeys.REFRESH_TOKEN_KEY],
     );
     if (!hasAuthCookie) return true;
 
-    const cookieToken = req.cookies?.[TokenKeys.CSRF_TOKEN_KEY] as
-      | string
-      | undefined;
+    const cookieToken = req.cookies?.[
+      customerScope ? CUSTOMER_CSRF_COOKIE : TokenKeys.CSRF_TOKEN_KEY
+    ] as string | undefined;
     const headerToken = req.headers['x-csrf-token'];
     if (
       typeof headerToken !== 'string' ||
+      typeof cookieToken !== 'string' ||
       !cookieToken ||
       !this.matches(cookieToken, headerToken)
     ) {

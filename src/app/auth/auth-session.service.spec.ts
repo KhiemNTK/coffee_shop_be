@@ -3,6 +3,7 @@ import { AUTH_ERRORS } from '../../common/consts/message';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { AuthSessionService } from './auth-session.service';
 import { AuthTokenService } from './auth-token.service';
+import { Prisma } from '@prisma/client';
 
 describe('AuthSessionService', () => {
   const payload = {
@@ -221,5 +222,53 @@ describe('AuthSessionService', () => {
         data: expect.objectContaining({ revokeReason: 'REFRESH_REUSE' }),
       }),
     );
+  });
+
+  it('revokes the whole browser family even when logout carries a rotated token', async () => {
+    const { service, prisma, tx } = createFixture();
+    tx.authSession.findUnique.mockResolvedValue({
+      refreshTokenHash: 'hash:old-refresh',
+    });
+    await service.revoke('old-refresh');
+    expect(tx.authSession.findUnique).toHaveBeenCalledWith({
+      where: {
+        id: payload.sid,
+        employeeId: payload.sub,
+        familyId: payload.familyId,
+      },
+      select: { refreshTokenHash: true },
+    });
+    expect(tx.authSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        employeeId: payload.sub,
+        familyId: payload.familyId,
+        revokedAt: null,
+      },
+      data: expect.objectContaining({ revokeReason: 'LOGOUT' }),
+    });
+    expect(prisma.authSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('retries logout after a concurrent rotation conflicts with its snapshot', async () => {
+    const { service, prisma, tx } = createFixture();
+    prisma.$transaction.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Write conflict', {
+        code: 'P2034',
+        clientVersion: '6.19.0',
+      }),
+    );
+    tx.authSession.findUnique.mockResolvedValue({
+      refreshTokenHash: 'hash:old-refresh',
+    });
+    await service.revoke('old-refresh');
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not revoke an unrelated family when the session cannot be found', async () => {
+    const { service, tx } = createFixture();
+    tx.authSession.findUnique.mockResolvedValue(null);
+    await service.revoke('old-refresh');
+    expect(tx.authSession.updateMany).not.toHaveBeenCalled();
   });
 });

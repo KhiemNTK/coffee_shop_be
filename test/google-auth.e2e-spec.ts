@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -11,6 +12,7 @@ import { GoogleIdentityService } from '../src/app/auth/google-identity.service';
 import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
+import { PermissionKeys } from '../src/common/consts/permission-keys';
 
 const cookiesFrom = (response: request.Response) => {
   const header = response.headers['set-cookie'] as
@@ -35,6 +37,8 @@ describe('Google employee authentication (e2e)', () => {
   let employeeId: string | undefined;
   let positionId: string | undefined;
   let email: string;
+  let roleId: string | undefined;
+  const createdPermissionIds: string[] = [];
   const password = 'CorrectHorseBatteryStaple1!';
   const idToken = 'g'.repeat(100);
   const wrongEmailToken = 'w'.repeat(100);
@@ -42,6 +46,13 @@ describe('Google employee authentication (e2e)', () => {
   const verifyHuman = jest.fn(() => Promise.resolve());
 
   beforeAll(async () => {
+    const target = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['127.0.0.1', 'localhost'].includes(target.hostname) &&
+        target.pathname.endsWith('_test'),
+      'Use only an isolated loopback test database.',
+    );
     const moduleFixture = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -83,6 +94,32 @@ describe('Google employee authentication (e2e)', () => {
       },
     });
     employeeId = employee.id;
+    const permissions: Array<{ id: string }> = [];
+    for (const key of [
+      PermissionKeys.INVOICES_READ,
+      PermissionKeys.POSITIONS_READ,
+    ]) {
+      let permission = await prisma.permission.findFirst({ where: { key } });
+      if (!permission) {
+        permission = await prisma.permission.create({
+          data: { key, name: key },
+        });
+        createdPermissionIds.push(permission.id);
+      }
+      permissions.push(permission);
+    }
+    const role = await prisma.role.create({
+      data: {
+        name: `Google fixture reader ${suffix}`,
+        rolePermissions: {
+          create: permissions.map((permission) => ({
+            permissionId: permission.id,
+          })),
+        },
+        employeeRoles: { create: { employeeId } },
+      },
+    });
+    roleId = role.id;
   });
 
   afterAll(async () => {
@@ -99,6 +136,10 @@ describe('Google employee authentication (e2e)', () => {
       }
       if (positionId)
         await prisma.position.delete({ where: { id: positionId } });
+      if (roleId) await prisma.role.delete({ where: { id: roleId } });
+      await prisma.permission.deleteMany({
+        where: { id: { in: createdPermissionIds } },
+      });
     } finally {
       await app?.close();
     }
@@ -198,5 +239,64 @@ describe('Google employee authentication (e2e)', () => {
       expect.any(String),
       'password_reset',
     );
+  });
+
+  it('rejects relation selection and fractional/oversized pagination at HTTP boundaries', async () => {
+    const login = await request(app.getHttpServer())
+      .post(`${prefix}/auth/sign-in`)
+      .send({ email, password })
+      .expect(201);
+    const cookies = cookiesFrom(login).join('; ');
+    for (const path of [
+      '/invoices?select=employee',
+      '/positions?select=employees',
+      '/positions?itemPerPage=1000000',
+      '/positions?page=1.5',
+    ]) {
+      await request(app.getHttpServer())
+        .get(`${prefix}${path}`)
+        .set('Cookie', cookies)
+        .expect(400);
+    }
+    const safe = await request(app.getHttpServer())
+      .get(`${prefix}/positions?select=id,name`)
+      .set('Cookie', cookies)
+      .expect(200);
+    expect(JSON.stringify(safe.body)).not.toContain('password');
+  });
+
+  it('never exempts cookie-only refresh/logout from CSRF because of a Bearer header', async () => {
+    const login = await request(app.getHttpServer())
+      .post(`${prefix}/auth/sign-in`)
+      .send({ email, password })
+      .expect(201);
+    const cookies = cookiesFrom(login);
+    for (const route of ['refresh', 'logout']) {
+      await request(app.getHttpServer())
+        .post(`${prefix}/auth/${route}`)
+        .set('Cookie', cookies.join('; '))
+        .set('Authorization', 'Bearer fake-token')
+        .expect(403);
+    }
+    await request(app.getHttpServer())
+      .get(`${prefix}/auth/me`)
+      .set('Cookie', cookies.join('; '))
+      .set('Authorization', 'Bearer  ignored')
+      .expect(401);
+    const refresh = await request(app.getHttpServer())
+      .post(`${prefix}/auth/refresh`)
+      .set('Cookie', cookies.join('; '))
+      .set('X-CSRF-Token', csrfFrom(cookies))
+      .expect(201);
+    const rotated = cookiesFrom(refresh);
+    await request(app.getHttpServer())
+      .post(`${prefix}/auth/logout`)
+      .set('Cookie', rotated.join('; '))
+      .set('X-CSRF-Token', csrfFrom(rotated))
+      .expect(201);
+    await request(app.getHttpServer())
+      .get(`${prefix}/auth/me`)
+      .set('Cookie', rotated.join('; '))
+      .expect(401);
   });
 });

@@ -4,6 +4,7 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import {
   type ExtendedPrismaClient,
   PRISMA_SERVICE_TOKEN,
@@ -34,19 +35,6 @@ export class AuthorizationService {
     return context.permissionKeys;
   }
 
-  async employeeHasPermissions(
-    employeeId: string,
-    requiredPermissions: PermissionKey[],
-  ) {
-    if (requiredPermissions.length === 0) return true;
-
-    const permissions = await this.getPermissionKeys(employeeId);
-    const permissionSet = new Set(permissions);
-    return requiredPermissions.every((permission) =>
-      permissionSet.has(permission),
-    );
-  }
-
   canGrantPermissions(context: AuthorizationContext, keys: readonly string[]) {
     const granted = new Set<string>(context.permissionKeys);
     return keys.every((key) => granted.has(key));
@@ -65,57 +53,25 @@ export class AuthorizationService {
     employeeId: string,
     client: ExtendedPrismaTransactionClient = this.prisma,
   ): Promise<AuthorizationContext> {
-    const employee = await client.employee.findUnique({
-      where: { id: employeeId, deletedAt: null },
-      select: {
-        id: true,
-        email: true,
-        isActive: true,
-        deletedAt: true,
-        employeeRoles: {
-          where: {
-            role: { deletedAt: null },
-          },
-          select: {
-            role: {
-              select: {
-                name: true,
-                rolePermissions: {
-                  where: {
-                    permission: { deletedAt: null },
-                  },
-                  select: {
-                    permission: {
-                      select: { key: true },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
-
-    if (!employee || !employee.isActive || employee.deletedAt) {
+    const [context] = await client.$queryRaw<AuthorizationContext[]>(Prisma.sql`
+      SELECT e."id" AS "employeeId", e."email" AS "employeeEmail",
+        COALESCE(array_agg(DISTINCT p."key") FILTER (WHERE p."key" IS NOT NULL), ARRAY[]::text[]) AS "permissionKeys",
+        COALESCE(array_agg(DISTINCT r."name") FILTER (WHERE r."name" IS NOT NULL), ARRAY[]::text[]) AS "roleNames"
+      FROM "Employee" e
+      LEFT JOIN "EmployeeRole" er ON er."employeeId" = e."id"
+      LEFT JOIN "Role" r ON r."id" = er."roleId" AND r."deletedAt" IS NULL
+      LEFT JOIN "RolePermission" rp ON rp."roleId" = r."id"
+      LEFT JOIN "Permission" p ON p."id" = rp."permissionId" AND p."deletedAt" IS NULL
+      WHERE e."id" = ${employeeId} AND e."isActive" = true AND e."deletedAt" IS NULL
+      GROUP BY e."id", e."email"
+    `);
+    if (!context) {
       throw new UnauthorizedException(AUTH_ERRORS.INACTIVE_EMPLOYEE);
     }
-
-    const permissionKeys = new Set<PermissionKey>();
-    const roleNames = new Set<string>();
-
-    for (const employeeRole of employee.employeeRoles) {
-      roleNames.add(employeeRole.role.name);
-      for (const rolePermission of employeeRole.role.rolePermissions) {
-        permissionKeys.add(rolePermission.permission.key as PermissionKey);
-      }
-    }
-
     return {
-      employeeId: employee.id,
-      employeeEmail: employee.email,
-      permissionKeys: [...permissionKeys].sort(),
-      roleNames: [...roleNames].sort(),
+      ...context,
+      permissionKeys: context.permissionKeys.sort(),
+      roleNames: context.roleNames.sort(),
     };
   }
 }

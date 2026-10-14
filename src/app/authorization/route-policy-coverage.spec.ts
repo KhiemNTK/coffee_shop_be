@@ -1,9 +1,16 @@
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import {
+  GUARDS_METADATA,
+  METHOD_METADATA,
+  PATH_METADATA,
+} from '@nestjs/common/constants';
 import { readdirSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { AppController } from '../app.controller';
 import { AuditLogsController } from '../audit-logs/audit-logs.controller';
 import { AuthController } from '../auth/auth.controller';
+import { CustomersController } from '../customers/customers.controller';
+import { CustomerGuard } from '../customers/customer.guard';
+import { CUSTOMER_PUBLIC_ROUTE } from '../../common/consts/customer-auth';
 import { IS_SKIP_AUTH } from '../auth/auth.decorator';
 import { BankReconciliationController } from '../cashier-shifts/bank-reconciliation.controller';
 import { CashHandoversController } from '../cashier-shifts/cash-handovers.controller';
@@ -39,6 +46,7 @@ const controllers = [
   AppController,
   AuditLogsController,
   AuthController,
+  CustomersController,
   BankReconciliationController,
   CashHandoversController,
   CashierShiftsController,
@@ -83,6 +91,24 @@ const getControllerFileName = (controller: (typeof controllers)[number]) =>
     .toLowerCase()}.controller.ts`;
 
 describe('Route authorization policy coverage', () => {
+  it('requires customer authentication on every private customer route', () => {
+    expect(Reflect.getMetadata(GUARDS_METADATA, CustomersController)).toContain(
+      CustomerGuard,
+    );
+    const publicHandlers = Object.getOwnPropertyNames(
+      CustomersController.prototype,
+    ).filter((method) => {
+      const handler: unknown = Object.getOwnPropertyDescriptor(
+        CustomersController.prototype,
+        method,
+      )?.value;
+      return (
+        typeof handler === 'function' &&
+        Reflect.getMetadata(CUSTOMER_PUBLIC_ROUTE, handler) === true
+      );
+    });
+    expect(publicHandlers.sort()).toEqual(['logout', 'signIn']);
+  });
   it('includes every controller source file in the coverage suite', () => {
     const discovered = discoverControllerFiles(
       resolve(process.cwd(), 'src', 'app'),

@@ -36,7 +36,10 @@ describe('Distributed rate limit (e2e)', () => {
     try {
       await expect(
         unavailable.increment(randomUUID(), 1_000, 1, 1_000),
-      ).rejects.toThrow();
+      ).rejects.toMatchObject({
+        status: 503,
+        response: { code: 'RATE_LIMIT_UNAVAILABLE' },
+      });
     } finally {
       unavailable.disconnect();
     }

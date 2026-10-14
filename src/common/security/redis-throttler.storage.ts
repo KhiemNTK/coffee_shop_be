@@ -1,4 +1,5 @@
 import type { ThrottlerStorage } from '@nestjs/throttler';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import Redis from 'ioredis';
 
 const INCREMENT_SCRIPT = `
@@ -17,12 +18,21 @@ return { hits, windowTtl, blockTtl }
 
 export class RedisThrottlerStorage implements ThrottlerStorage {
   private readonly redis: Redis;
+  private connecting?: Promise<void>;
 
   constructor(url: string) {
     this.redis = new Redis(url, {
+      lazyConnect: true,
       maxRetriesPerRequest: 1,
       connectTimeout: 1_000,
+      // ioredis also schedules cleanup for an already-closed socket.
+      disconnectTimeout: 100,
+      commandTimeout: 1_000,
+      enableOfflineQueue: false,
       retryStrategy: (attempt) => Math.min(attempt * 100, 1_000),
+    });
+    this.redis.on('error', () => {
+      Logger.warn('Rate limiter Redis connection failed.', 'RedisThrottler');
     });
   }
 
@@ -33,15 +43,17 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
     blockDuration: number,
   ) {
     const prefix = `throttle:v1:{${key}}`;
-    const [totalHits, windowTtl, blockTtl] = (await this.redis.eval(
-      INCREMENT_SCRIPT,
-      2,
-      `${prefix}:hits`,
-      `${prefix}:block`,
+    const [totalHits, windowTtl, blockTtl] = (await this.incrementRedis(
+      prefix,
       ttl,
       limit,
       blockDuration,
-    )) as [number, number, number];
+    ).catch(() => {
+      throw new ServiceUnavailableException({
+        code: 'RATE_LIMIT_UNAVAILABLE',
+        message: 'Rate limiting is temporarily unavailable. Please retry.',
+      });
+    })) as [number, number, number];
 
     return {
       totalHits,
@@ -49,6 +61,29 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
       isBlocked: blockTtl > 0,
       timeToBlockExpire: Math.ceil(Math.max(0, blockTtl) / 1_000),
     };
+  }
+
+  private async incrementRedis(
+    prefix: string,
+    ttl: number,
+    limit: number,
+    blockDuration: number,
+  ) {
+    if (this.redis.status === 'wait') {
+      this.connecting = this.redis.connect().finally(() => {
+        this.connecting = undefined;
+      });
+    }
+    if (this.connecting) await this.connecting;
+    return this.redis.eval(
+      INCREMENT_SCRIPT,
+      2,
+      `${prefix}:hits`,
+      `${prefix}:block`,
+      ttl,
+      limit,
+      blockDuration,
+    );
   }
 
   disconnect() {
