@@ -1,3 +1,4 @@
+import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
   PaymentProvider,
@@ -269,4 +270,64 @@ describe('PaymentReconciliationService', () => {
     expect(result?.status).toBe(PaymentAttemptStatus.SUCCEEDED);
     expect(invoices.completeOnlinePayment).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['failure', 'mismatch', 'timeout'])(
+    'retries a %s against fresh state without querying the provider twice',
+    async (outcome) => {
+      const pending = { ...attempt, reconciliationAttempts: 4 };
+      const confirmed = {
+        ...pending,
+        status: PaymentAttemptStatus.SUCCEEDED,
+        providerTransactionNo: 'CONFIRMED-TRANSACTION',
+        invoice: { ...attempt.invoice, paymentStatus: PaymentStatus.PAID },
+      };
+      tx.paymentAttempt.findUnique
+        .mockReset()
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValue(confirmed);
+      tx.paymentAttempt.update
+        .mockReset()
+        .mockRejectedValueOnce(
+          new Prisma.PrismaClientKnownRequestError('Concurrent confirmation', {
+            code: 'P2034',
+            clientVersion: Prisma.prismaVersion.client,
+          }),
+        )
+        .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ ...confirmed, ...data }),
+        );
+      if (outcome === 'timeout') {
+        vnpay.queryTransaction.mockRejectedValueOnce(new Error('Timeout'));
+      } else {
+        vnpay.queryTransaction.mockResolvedValueOnce({
+          request: {},
+          response: {
+            vnp_ResponseCode: '00',
+            vnp_TransactionStatus: outcome === 'failure' ? '02' : '00',
+            vnp_TxnRef: 'PA123',
+            vnp_Amount: outcome === 'mismatch' ? '9999999' : '10000000',
+            vnp_TransactionType: '01',
+          },
+        });
+      }
+      const result = service.reconcileAttempt(attempt.id, 'manager-id');
+      if (outcome === 'timeout') {
+        await expect(result).rejects.toThrow(BadGatewayException);
+      } else {
+        await expect(result).resolves.toMatchObject({
+          status: PaymentAttemptStatus.SUCCEEDED,
+          providerTransactionNo: 'CONFIRMED-TRANSACTION',
+        });
+      }
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+      expect(vnpay.queryTransaction).toHaveBeenCalledTimes(1);
+      expect(tx.paymentAttempt.update.mock.calls[1][0].data).not.toHaveProperty(
+        'status',
+      );
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    },
+  );
 });

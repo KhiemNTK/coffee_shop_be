@@ -36,6 +36,7 @@ import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import type { PromotionCalculatorService } from '../src/app/promotions/services/promotion-calculator.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../src/common/utils/query-util/query-util.service';
+import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
 
 describe('VNPay payment lifecycle (e2e)', () => {
   const prisma = new PrismaClient();
@@ -60,6 +61,7 @@ describe('VNPay payment lifecycle (e2e)', () => {
     PAYOS_API_KEY: 'fixture-api-key-not-a-real-credential',
     PAYOS_CHECKSUM_KEY: 'fixture-checksum-key-not-a-real-credential',
     PAYOS_RETURN_URL: 'https://coffee.example.com/payment/payos/return',
+    PAYOS_API_TIMEOUT_MS: 5000,
     JWT_SECRET: 'fixture-return-secret-not-a-real-credential',
   });
   const invoices = new InvoicesService(
@@ -342,6 +344,139 @@ describe('VNPay payment lifecycle (e2e)', () => {
       await prisma.$disconnect();
     }
   });
+
+  it.each(['failure', 'mismatch', 'timeout'])(
+    'preserves an IPN success racing a reconciliation %s',
+    async (outcome) => {
+      const { invoice } = await createUnpaidInvoice('100000');
+      const attempt = await payments.createAttempt(
+        invoice.id,
+        employeeId,
+        '127.0.0.1',
+        {
+          idempotencyKey: randomUUID(),
+          locale: 'vn',
+          closeSessionAfterPayment: true,
+        },
+      );
+      await prisma.paymentAttempt.update({
+        where: { id: attempt.id },
+        data: { reconciliationAttempts: 4 },
+      });
+      let release!: () => void;
+      let signalRead!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const read = new Promise<void>((resolve) => {
+        signalRead = resolve;
+      });
+      let reads = 0;
+      const gatedPrisma = prisma.$extends({
+        query: {
+          paymentAttempt: {
+            async findUnique({ args, query }) {
+              const result = await query(args);
+              // The first included read is outside the transaction; pause the next snapshot read.
+              if (
+                args.where.id === attempt.id &&
+                args.include &&
+                ++reads === 2
+              ) {
+                signalRead();
+                await gate;
+              }
+              return result;
+            },
+          },
+        },
+      });
+      const gateway = {
+        assertApiConfigured: jest.fn(),
+        queryTransaction: jest.fn(),
+      };
+      if (outcome === 'timeout') {
+        gateway.queryTransaction.mockRejectedValue(
+          new Error('Provider timeout'),
+        );
+      } else {
+        gateway.queryTransaction.mockResolvedValue({
+          request: {},
+          response: {
+            vnp_ResponseCode: '00',
+            vnp_TransactionStatus: outcome === 'failure' ? '02' : '00',
+            vnp_TxnRef: attempt.merchantReference,
+            vnp_Amount: outcome === 'mismatch' ? '9999999' : '10000000',
+            vnp_TransactionType: '01',
+          },
+        });
+      }
+      const reconciliation = new PaymentReconciliationService(
+        gatedPrisma as unknown as ExtendedPrismaClient,
+        pagination,
+        invoices,
+        outbox,
+        gateway as unknown as VnpayService,
+        new MomoService(config),
+        new PayosService(config),
+        new DomainEventBusService(),
+      );
+      const running = reconciliation
+        .reconcileAttempt(attempt.id, employeeId)
+        .then(
+          (result) => ({ result, error: undefined }),
+          (error: unknown) => ({ result: undefined, error }),
+        );
+      let deadline: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          read,
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(
+              () => reject(new Error('Snapshot was not read')),
+              2_000,
+            );
+          }),
+        ]);
+        const ipn = await payments.handleVnpayIpn(
+          signIpn({
+            merchantReference: attempt.merchantReference,
+            amount: attempt.amount,
+            transactionNo: `RACE-${randomUUID()}`,
+          }),
+        );
+        expect(ipn.RspCode).toBe('00');
+        release();
+        const settled = await running;
+        if (outcome === 'timeout') expect(settled.error).toBeInstanceOf(Error);
+        else {
+          expect(settled.error).toBeUndefined();
+          expect(settled.result?.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+        }
+        const stored = await prisma.paymentAttempt.findUniqueOrThrow({
+          where: { id: attempt.id },
+          include: { invoice: true },
+        });
+        expect(stored.status).toBe(PaymentAttemptStatus.SUCCEEDED);
+        expect(stored.providerTransactionNo).toMatch(/^RACE-/);
+        expect(stored.invoice.paymentStatus).toBe(PaymentStatus.PAID);
+        expect(gateway.queryTransaction).toHaveBeenCalledTimes(1);
+        expect(
+          await prisma.outboxEvent.count({
+            where: {
+              aggregateId: invoice.id,
+              eventName: ORDER_EVENTS.INVOICE_PAID,
+            },
+          }),
+        ).toBe(1);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        release();
+        await running;
+      }
+    },
+    15_000,
+  );
 
   it.each(['full', 'split', 'overpaid'])(
     'handles payOS %s payments through PostgreSQL and Redis exactly once',

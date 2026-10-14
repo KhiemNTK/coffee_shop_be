@@ -1,7 +1,8 @@
 import { ConflictException } from '@nestjs/common';
-import { IdempotencyRequestStatus } from '@prisma/client';
+import { IdempotencyRequestStatus, Prisma } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { IdempotencyService } from './idempotency.service';
+import { convertDecimalsToNumbers } from '../../common/utils/decimal-response.util';
 
 describe('IdempotencyService', () => {
   const tx = {
@@ -105,5 +106,34 @@ describe('IdempotencyService', () => {
         jest.fn(),
       ),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('replays the same monetary JSON shape, including nested Decimal values', async () => {
+    const operation = jest.fn().mockResolvedValue({
+      id: 'invoice',
+      totalAmount: new Prisma.Decimal('42000'),
+      lines: [{ price: new Prisma.Decimal('21000') }],
+      createdAt: new Date('2026-10-13T00:00:00Z'),
+      note: '42000',
+    });
+    const input = {
+      employeeId: 'employee',
+      operation: 'invoice.checkout',
+      key: 'same-request',
+      request: {},
+    };
+    const first = await service.execute(input, operation);
+    const stored = tx.idempotencyRequest.update.mock.calls[0][0].data;
+    prisma.idempotencyRequest.findUnique.mockResolvedValue({
+      ...stored,
+      requestHash:
+        tx.idempotencyRequest.create.mock.calls[0][0].data.requestHash,
+    });
+    const replay = await service.execute(input, operation);
+    expect(stored.response.totalAmount).toBe(42000);
+    expect(JSON.parse(JSON.stringify(convertDecimalsToNumbers(first)))).toEqual(
+      replay,
+    );
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 });

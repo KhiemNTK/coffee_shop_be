@@ -228,7 +228,7 @@ export class PaymentReconciliationService
     employeeId: string,
     dto: ResolvePaymentIncidentDto,
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    return runSerializableTransaction(this.prisma, async (tx) => {
       const incident = await tx.paymentReconciliationIncident.findUnique({
         where: { id },
       });
@@ -241,18 +241,16 @@ export class PaymentReconciliationService
         throw new ConflictException('This incident is already closed.');
       }
       if (dto.action === 'RESOLVE') {
-        const [attempt, refund] = await Promise.all([
-          tx.paymentAttempt.findUnique({
-            where: { id: incident.paymentAttemptId },
-            select: { status: true },
-          }),
-          incident.paymentRefundId
-            ? tx.paymentRefund.findUnique({
-                where: { id: incident.paymentRefundId },
-                select: { status: true },
-              })
-            : null,
-        ]);
+        const attempt = await tx.paymentAttempt.findUnique({
+          where: { id: incident.paymentAttemptId },
+          select: { status: true },
+        });
+        const refund = incident.paymentRefundId
+          ? await tx.paymentRefund.findUnique({
+              where: { id: incident.paymentRefundId },
+              select: { status: true },
+            })
+          : null;
         if (
           attempt?.status === PaymentAttemptStatus.REQUIRES_REVIEW ||
           refund?.status === PaymentRefundStatus.REQUIRES_REVIEW
@@ -267,7 +265,7 @@ export class PaymentReconciliationService
           ? PaymentReconciliationIncidentStatus.RESOLVED
           : PaymentReconciliationIncidentStatus.IGNORED;
       const updated = await tx.paymentReconciliationIncident.update({
-        where: { id },
+        where: { id, status: PaymentReconciliationIncidentStatus.OPEN },
         data: {
           status,
           resolutionNote: dto.resolutionNote,
@@ -487,7 +485,7 @@ export class PaymentReconciliationService
           completedAt: new Date(),
         },
       });
-      return await this.prisma.$transaction(async (tx) => {
+      return await runSerializableTransaction(this.prisma, async (tx) => {
         const current = await tx.paymentAttempt.findUnique({
           where: { id: attempt.id },
           include: ATTEMPT_INCLUDE,
@@ -542,7 +540,7 @@ export class PaymentReconciliationService
     },
     employeeId?: string,
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    return runSerializableTransaction(this.prisma, async (tx) => {
       const current = await tx.paymentAttempt.findUnique({
         where: { id: attempt.id },
         include: ATTEMPT_INCLUDE,
@@ -636,7 +634,7 @@ export class PaymentReconciliationService
         );
       }
       await tx.paymentAttempt.update({
-        where: { id: attempt.id },
+        where: { id: attempt.id, status: attempt.status },
         data: {
           lastReconciledAt: new Date(),
           nextReconcileAt: null,
@@ -668,7 +666,7 @@ export class PaymentReconciliationService
     });
     const completedAt = new Date();
     const updated = await tx.paymentAttempt.update({
-      where: { id: attempt.id },
+      where: { id: attempt.id, status: attempt.status },
       data: {
         status: PaymentAttemptStatus.SUCCEEDED,
         providerTransactionNo,
@@ -701,7 +699,10 @@ export class PaymentReconciliationService
     attempt: AttemptView,
     transactionStatus: string,
   ) {
-    if (attempt.invoice.paymentStatus !== PaymentStatus.UNPAID) {
+    if (
+      attempt.status === PaymentAttemptStatus.SUCCEEDED ||
+      attempt.invoice.paymentStatus !== PaymentStatus.UNPAID
+    ) {
       return this.markForReview(
         tx,
         attempt,
@@ -712,7 +713,7 @@ export class PaymentReconciliationService
     }
     const completedAt = new Date();
     const updated = await tx.paymentAttempt.update({
-      where: { id: attempt.id },
+      where: { id: attempt.id, status: attempt.status },
       data: {
         status: PaymentAttemptStatus.FAILED,
         providerTransactionNo: null,
@@ -741,7 +742,7 @@ export class PaymentReconciliationService
     const attempts = attempt.reconciliationAttempts + 1;
     if (attempt.status === PaymentAttemptStatus.SUCCEEDED) {
       const updated = await tx.paymentAttempt.update({
-        where: { id: attempt.id },
+        where: { id: attempt.id, status: attempt.status },
         data: {
           lastReconciledAt: new Date(),
           nextReconcileAt: null,
@@ -769,7 +770,7 @@ export class PaymentReconciliationService
       );
     }
     return tx.paymentAttempt.update({
-      where: { id: attempt.id },
+      where: { id: attempt.id, status: attempt.status },
       data: {
         lastReconciledAt: new Date(),
         nextReconcileAt: new Date(
@@ -791,7 +792,7 @@ export class PaymentReconciliationService
   ) {
     const now = new Date();
     const updated = await tx.paymentAttempt.update({
-      where: { id: attempt.id },
+      where: { id: attempt.id, status: attempt.status },
       data: {
         ...(attempt.status === PaymentAttemptStatus.SUCCEEDED
           ? {}
@@ -826,7 +827,7 @@ export class PaymentReconciliationService
     error: unknown,
   ) {
     const message = this.errorMessage(error);
-    await this.prisma.$transaction(async (tx) => {
+    await runSerializableTransaction(this.prisma, async (tx) => {
       await tx.paymentProviderRequest.update({
         where: { id: providerRequestId },
         data: {
@@ -912,7 +913,7 @@ export class PaymentReconciliationService
       take: BATCH_SIZE,
     });
     for (const refund of refunds) {
-      await this.prisma.$transaction(async (tx) => {
+      await runSerializableTransaction(this.prisma, async (tx) => {
         const updated = await tx.paymentRefund.updateMany({
           where: {
             id: refund.id,

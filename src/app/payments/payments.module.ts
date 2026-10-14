@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ThrottlerStorageService } from '@nestjs/throttler';
 import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 import { CashierShiftsModule } from '../cashier-shifts/cashier-shifts.module';
 import { InvoicesModule } from '../invoices/invoices.module';
@@ -11,11 +12,14 @@ import { MomoService } from './momo.service';
 import { PayosService } from './payos.service';
 import { PaymentProviderFactory } from './payment-provider.factory';
 import { VnpayService } from './vnpay.service';
+import { PaymentWebhookGuard } from './payment-webhook.guard';
 
 @Module({
   imports: [CashierShiftsModule, InvoicesModule, PaginationUtilModule],
   controllers: [PaymentsController],
   providers: [
+    ThrottlerStorageService,
+    PaymentWebhookGuard,
     PaymentsService,
     PaymentRefundsService,
     PaymentReconciliationService,

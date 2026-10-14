@@ -1,8 +1,9 @@
 import 'dotenv/config';
+import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ConflictException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OutboxEventStatus } from '@prisma/client';
+import { OutboxEventStatus, Prisma } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 import type { Queue } from 'bullmq';
 import type { ClaimedOutboxEvent } from '../src/common/types';
@@ -14,6 +15,7 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { runWithRequestContext } from '../src/common/request-context';
 import { ManagementExceptionsService } from '../src/app/management-exceptions/management-exceptions.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
+import { convertDecimalsToNumbers } from '../src/common/utils/decimal-response.util';
 
 describe('Durable transaction platform (e2e)', () => {
   const basePrisma = new PrismaService();
@@ -27,6 +29,13 @@ describe('Durable transaction platform (e2e)', () => {
   let employeeId: string;
 
   beforeAll(async () => {
+    const target = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['127.0.0.1', 'localhost'].includes(target.hostname) &&
+        target.pathname.endsWith('_test'),
+      'Use only an isolated loopback test database.',
+    );
     if (!process.env.REDIS_URL) {
       throw new Error(
         'REDIS_URL is required for durable outbox integration tests',
@@ -109,6 +118,34 @@ describe('Durable transaction platform (e2e)', () => {
     await expect(
       idempotency.execute({ ...input, request: { value: 2 } }, operation),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('persists the same Decimal response shape returned over HTTP and replays it once', async () => {
+    const input = {
+      employeeId,
+      operation: 'test.decimal',
+      key: `decimal-${suffix}`,
+      request: {},
+    };
+    const operation = jest.fn(
+      async (tx: Parameters<typeof outbox.enqueue>[0]) => {
+        const log = await tx.actionLog.create({
+          data: { employeeId, actionType: 'DECIMAL_TEST', details: {} },
+        });
+        return {
+          id: log.id,
+          amount: new Prisma.Decimal('42.25'),
+          nested: [new Prisma.Decimal(2)],
+        };
+      },
+    );
+    const first = await idempotency.execute(input, operation);
+    const replay = await idempotency.execute(input, operation);
+    expect(JSON.parse(JSON.stringify(convertDecimalsToNumbers(first)))).toEqual(
+      replay,
+    );
+    expect(replay.amount).toBe(42.25);
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 
   it('rolls back an outbox event with its failed business transaction', async () => {
@@ -458,15 +495,18 @@ describe('Durable transaction platform (e2e)', () => {
       }),
     );
 
-    await dispatcher.drainOnce();
-    await expect(withTimeout(received, 10_000)).resolves.toEqual({
-      aggregateId,
-    });
-    unsubscribe();
-    await expect(waitForPublished(created.id)).resolves.toBe(
-      OutboxEventStatus.PUBLISHED,
-    );
-  });
+    try {
+      await dispatcher.drainOnce();
+      await expect(withTimeout(received, 10_000)).resolves.toEqual({
+        aggregateId,
+      });
+      await expect(waitForPublished(created.id)).resolves.toBe(
+        OutboxEventStatus.PUBLISHED,
+      );
+    } finally {
+      unsubscribe();
+    }
+  }, 30_000);
 
   it('stores request IDs and rejects audit updates and deletes', async () => {
     const requestId = `request-${suffix}`;

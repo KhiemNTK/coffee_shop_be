@@ -120,6 +120,12 @@ export class OutboxDispatcherService
         ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
       ) DELETE FROM "PasswordResetToken" t USING candidates c WHERE t."id" = c."id"
     `);
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "CustomerSession" WHERE "expiresAt" < ${now}
+        ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "CustomerSession" s USING candidates c WHERE s."id" = c."id"
+    `);
     this.lastHousekeepingAt = now.getTime();
   }
 

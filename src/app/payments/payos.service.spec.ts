@@ -17,6 +17,7 @@ describe('PayosService with the official SDK', () => {
     PAYOS_API_KEY: 'fixture-api-key-not-a-real-credential',
     PAYOS_CHECKSUM_KEY: checksumKey,
     PAYOS_RETURN_URL: 'https://shop.example.test/payment/payos/return',
+    PAYOS_API_TIMEOUT_MS: 5000,
     JWT_SECRET: jwtSecret,
   });
   const signer = new PayOS({
@@ -84,7 +85,9 @@ describe('PayosService with the official SDK', () => {
   it('is disabled without credentials and never probes the provider', () => {
     const fetchSpy = jest.spyOn(globalThis, 'fetch');
     expect(() =>
-      new PayosService(new ConfigService()).assertConfigured(),
+      new PayosService(
+        new ConfigService({ PAYOS_CLIENT_ID: '' }),
+      ).assertConfigured(),
     ).toThrow(ServiceUnavailableException);
     expect(fetchSpy).not.toHaveBeenCalled();
   });

@@ -9,7 +9,9 @@ import {
   Req,
   Res,
   HttpCode,
+  UseGuards,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { PermissionKeys } from '../../common/consts/permission-keys';
@@ -31,6 +33,7 @@ import {
 import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentRefundsService } from './payment-refunds.service';
 import { PaymentsService } from './payments.service';
+import { PaymentWebhookGuard } from './payment-webhook.guard';
 
 @ApiTags('Payments')
 @Controller()
@@ -134,6 +137,8 @@ export class PaymentsController {
 
   @Get('payments/vnpay/ipn')
   @SkipAuth()
+  @SkipThrottle()
+  @UseGuards(PaymentWebhookGuard)
   async handleVnpayIpn(
     @Query() query: PaymentCallbackQuery,
     @Res() response: Response,
@@ -151,6 +156,8 @@ export class PaymentsController {
   @Post('payments/momo/ipn')
   @SkipAuth()
   @SkipCsrf()
+  @SkipThrottle()
+  @UseGuards(PaymentWebhookGuard)
   @HttpCode(204)
   async handleMomoIpn(@Body() body: unknown) {
     await this.paymentsService.handleMomoIpn(body);
@@ -168,6 +175,8 @@ export class PaymentsController {
   })
   @SkipAuth()
   @SkipCsrf()
+  @SkipThrottle()
+  @UseGuards(PaymentWebhookGuard)
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   async handlePayosWebhook(@Body() body: PayosWebhookDto) {

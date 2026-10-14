@@ -76,7 +76,7 @@ describe('OutboxDispatcherService', () => {
     const statements = prisma.$executeRaw.mock.calls.map(
       ([query]) => query.text as string,
     );
-    expect(statements).toHaveLength(4);
+    expect(statements).toHaveLength(5);
     expect(
       statements.every((sql) => sql.includes('FOR UPDATE SKIP LOCKED')),
     ).toBe(true);
@@ -84,7 +84,8 @@ describe('OutboxDispatcherService', () => {
     for (const [query] of prisma.$executeRaw.mock.calls)
       expect(query.values).toContain(500);
     await service.drainOnce();
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(4);
+    expect(statements[4]).toContain('CustomerSession');
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
   });
 
   it('returns a failed event to pending with exponential backoff', async () => {
