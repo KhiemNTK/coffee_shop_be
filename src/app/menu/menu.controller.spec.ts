@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MenuController } from './menu.controller';
 import { MenuService } from './menu.service';
 import { ConfigService } from '@nestjs/config';
+import { MenuImagesService } from './menu-images.service';
 
 describe('MenuController', () => {
   let controller: MenuController;
@@ -11,6 +12,10 @@ describe('MenuController', () => {
       controllers: [MenuController],
       providers: [
         { provide: MenuService, useValue: {} },
+        {
+          provide: MenuImagesService,
+          useValue: { policy: () => ({ enabled: false }), upload: jest.fn() },
+        },
         {
           provide: ConfigService,
           useValue: new ConfigService({

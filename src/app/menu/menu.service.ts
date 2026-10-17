@@ -15,6 +15,7 @@ import { runSerializableTransaction } from '../../common/prisma/transaction.util
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { PUBLIC_MENU_SELECT, PUBLIC_MENU_WHERE } from './public-menu-query';
+import { MenuImagesService } from './menu-images.service';
 import {
   CreateMenuCategoryDto,
   CreateMenuItemDto,
@@ -67,6 +68,7 @@ export class MenuService {
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
     private readonly paginationUtil: PaginationUtilService,
+    private readonly images: MenuImagesService,
   ) {}
 
   async createCategory(employeeId: string, dto: CreateMenuCategoryDto) {
@@ -220,6 +222,9 @@ export class MenuService {
         },
         include: this.itemInclude,
       });
+
+      if (dto.imageUrl)
+        await this.images.syncReference(tx, employeeId, item.id, dto.imageUrl);
 
       await this.logAction(tx, employeeId, 'MENU_ITEM_CREATED', {
         menuItemId: item.id,
@@ -407,7 +412,7 @@ export class MenuService {
   async updateItem(id: string, employeeId: string, dto: UpdateMenuItemDto) {
     return this.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
-      await this.findActiveItem(tx, id);
+      const existing = await this.findActiveItem(tx, id);
 
       if (dto.categoryId) {
         await this.findActiveCategory(tx, dto.categoryId);
@@ -445,6 +450,9 @@ export class MenuService {
             : {}),
         },
       });
+      if (dto.imageUrl !== undefined && dto.imageUrl !== existing.imageUrl) {
+        await this.images.syncReference(tx, employeeId, id, dto.imageUrl);
+      }
       return item;
     });
   }
@@ -730,6 +738,7 @@ export class MenuService {
         where: { id },
         data: { deletedAt: new Date(), isAvailable: false },
       });
+      await this.images.syncReference(tx, employeeId, id, null);
       await tx.menuItemIngredient.deleteMany({
         where: { menuItemId: id },
       });

@@ -404,11 +404,36 @@ model MenuItem {
   onlineOrderRequestItems OnlineOrderRequestItem[]
   optionGroups            MenuItemOptionGroup[]
   customerWishlists       CustomerWishlist[]
+  imageUploads            MenuImageUpload[]
   recommendationAnchors   MenuItemRecommendationPair[] @relation("RecommendationAnchor")
   recommendationCandidates MenuItemRecommendationPair[] @relation("RecommendationCandidate")
 
   @@index([deletedAt, categoryId, isAvailable])
   @@index([kitchenStationId, deletedAt, isAvailable])
+}
+
+enum MenuImageStatus {
+  UPLOADING
+  READY
+  ATTACHED
+  DELETING
+}
+
+model MenuImageUpload {
+  id         String          @id @default(uuid())
+  objectKey  String          @unique @db.VarChar(255)
+  url        String          @unique @db.VarChar(2048)
+  status     MenuImageStatus @default(UPLOADING)
+  expiresAt  DateTime?
+  createdAt  DateTime        @default(now())
+  employeeId String
+  employee   Employee        @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  menuItemId String?
+  menuItem   MenuItem?       @relation(fields: [menuItemId], references: [id], onDelete: Restrict)
+
+  @@index([status, expiresAt])
+  @@index([menuItemId, status])
+  @@index([employeeId, createdAt])
 }
 
 model Customer {
@@ -637,6 +662,7 @@ model Employee {
   dailySalesCloses            DailySalesClose[]
   resolvedTakeawayFeedbacks   TakeawayFeedback[]              @relation("TakeawayFeedbackResolvedBy")
   reviewedOnlineOrders        OnlineOrderRequest[]            @relation("OnlineOrderReviewedBy")
+  menuImageUploads            MenuImageUpload[]
 }
 
 model AuthSession {

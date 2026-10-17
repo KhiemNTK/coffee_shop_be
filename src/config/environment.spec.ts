@@ -28,6 +28,39 @@ const productionEnvironment = {
 } as const;
 
 describe('validateEnvironment', () => {
+  it('keeps image uploads disabled and validates server-only configuration when enabled', () => {
+    const base = { DATABASE_URL: 'postgresql://localhost/test' };
+    expect(validateEnvironment(base).SUPABASE_IMAGES_ENABLED).toBe(false);
+    expect(() =>
+      validateEnvironment({ ...base, SUPABASE_IMAGES_ENABLED: 'true' }),
+    ).toThrow('Supabase images require');
+    const configured = {
+      ...base,
+      SUPABASE_IMAGES_ENABLED: 'true',
+      SUPABASE_URL: 'https://images.example.test',
+      SUPABASE_SERVICE_ROLE_KEY: 'server-only-fixture-key-with-32-characters',
+    };
+    expect(validateEnvironment(configured).SUPABASE_MENU_BUCKET).toBe(
+      'menu-images',
+    );
+    for (const url of [
+      'not-a-url',
+      'http://images.example.test',
+      'https://secret@images.example.test',
+      'https://images.example.test/path',
+      'https://images.example.test?token=secret',
+    ]) {
+      expect(() =>
+        validateEnvironment({ ...configured, SUPABASE_URL: url }),
+      ).toThrow();
+    }
+    expect(() =>
+      validateEnvironment({
+        ...configured,
+        SUPABASE_MENU_BUCKET: '../private',
+      }),
+    ).toThrow();
+  });
   it('keeps payOS disabled without keys and rejects partial or unsafe configuration', () => {
     const base = { DATABASE_URL: 'postgresql://localhost/test' };
     expect(validateEnvironment(base).PAYOS_CLIENT_ID).toBeUndefined();

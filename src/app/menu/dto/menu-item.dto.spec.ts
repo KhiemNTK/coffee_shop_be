@@ -21,6 +21,8 @@ describe('menu display metadata', () => {
   });
 
   it.each([
+    '',
+    'not-a-url',
     'http://images.example.com/item.jpg',
     'javascript:alert(1)',
     'data:image/png;base64,a',

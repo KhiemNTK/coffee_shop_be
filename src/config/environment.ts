@@ -51,6 +51,29 @@ const EnvironmentSchema = z
         .regex(/^\+?[0-9 ()-]{6,24}$/),
     ),
     DATABASE_URL: z.string().min(1),
+    SUPABASE_IMAGES_ENABLED: BooleanEnvSchema.default(false),
+    SUPABASE_URL: optionalBlank(
+      z.url().refine((value) => {
+        try {
+          const url = new URL(value);
+          return (
+            url.protocol === 'https:' &&
+            url.pathname === '/' &&
+            !url.username &&
+            !url.password &&
+            !url.search &&
+            !url.hash
+          );
+        } catch {
+          return false;
+        }
+      }, 'SUPABASE_URL must be an HTTPS origin without credentials'),
+    ),
+    SUPABASE_SERVICE_ROLE_KEY: OptionalCredentialSchema,
+    SUPABASE_MENU_BUCKET: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_-]{2,62}$/)
+      .default('menu-images'),
     REDIS_URL: z.url().optional(),
     AI_INSIGHTS_ENABLED: BooleanEnvSchema.default(false),
     GEMINI_API_KEY: OptionalCredentialSchema,
@@ -235,6 +258,14 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     ...parsed,
     SWAGGER_ENABLED: parsed.SWAGGER_ENABLED ?? parsed.NODE_ENV !== 'production',
   };
+  if (
+    environment.SUPABASE_IMAGES_ENABLED &&
+    (!environment.SUPABASE_URL || !environment.SUPABASE_SERVICE_ROLE_KEY)
+  ) {
+    throw new Error(
+      'Supabase images require SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
+    );
+  }
   if (
     environment.AI_INSIGHTS_ENABLED &&
     (!environment.REDIS_URL ||

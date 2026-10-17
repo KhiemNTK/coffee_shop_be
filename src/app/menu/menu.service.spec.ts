@@ -2,11 +2,13 @@ import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { MenuService } from './menu.service';
+import type { MenuImagesService } from './menu-images.service';
 
 describe('MenuService', () => {
   let service: MenuService;
   let prisma: any;
   let tx: any;
+  let images: { syncReference: jest.Mock };
 
   const activeItem = {
     id: 'menu-item-id',
@@ -61,10 +63,49 @@ describe('MenuService', () => {
         findMany: jest.fn(),
       },
     };
-    service = new MenuService(prisma as never, new PaginationUtilService());
+    images = { syncReference: jest.fn() };
+    service = new MenuService(
+      prisma as never,
+      new PaginationUtilService(),
+      images as unknown as MenuImagesService,
+    );
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it('attaches a supplied image in the same menu creation transaction', async () => {
+    const imageUrl = 'https://images.test/managed-menu/drink.webp';
+    tx.menuItem.create.mockResolvedValue({
+      ...activeItem,
+      price: new Prisma.Decimal(35000),
+    });
+    await service.createItem('employee-id', {
+      name: 'Coffee',
+      price: '35000',
+      categoryId: 'category-id',
+      imageUrl,
+    });
+    expect(images.syncReference).toHaveBeenCalledWith(
+      tx,
+      'employee-id',
+      activeItem.id,
+      imageUrl,
+    );
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not touch image references for unrelated menu edits', async () => {
+    tx.menuItem.update.mockResolvedValue(activeItem);
+    await service.updateItem(activeItem.id, 'employee-id', { name: 'Renamed' });
+    expect(images.syncReference).not.toHaveBeenCalled();
+    await service.updateItem(activeItem.id, 'employee-id', { imageUrl: null });
+    expect(images.syncReference).toHaveBeenCalledWith(
+      tx,
+      'employee-id',
+      activeItem.id,
+      null,
+    );
+  });
 
   it('returns the full option editor contract without rewriting unchanged options', async () => {
     tx.inventoryItem.findMany.mockResolvedValue([]);
@@ -327,6 +368,13 @@ describe('MenuService', () => {
     ]);
 
     await service.deleteItem('menu-item-id', 'employee-id');
+
+    expect(images.syncReference).toHaveBeenCalledWith(
+      tx,
+      'employee-id',
+      'menu-item-id',
+      null,
+    );
 
     expect(tx.menuItem.update).toHaveBeenCalledWith({
       where: { id: 'menu-item-id' },

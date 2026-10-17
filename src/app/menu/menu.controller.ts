@@ -8,6 +8,7 @@ import {
   Post,
   Put,
   Query,
+  UploadedFile,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
@@ -28,6 +29,8 @@ import {
   UpdateMenuItemDto,
 } from './dto';
 import { MenuService } from './menu.service';
+import { MenuImagesService } from './menu-images.service';
+import { MenuImageUpload } from './menu-image-upload.decorator';
 
 @ApiTags('Menu')
 @Controller('menu')
@@ -35,7 +38,34 @@ export class MenuController {
   constructor(
     private readonly menuService: MenuService,
     private readonly config: ConfigService,
+    private readonly images: MenuImagesService,
   ) {}
+
+  @Get('images/policy')
+  @RequirePermissions(PermissionKeys.MENU_READ)
+  imagePolicy() {
+    return this.images.policy();
+  }
+
+  @Post('images/create')
+  @RequirePermissions(PermissionKeys.MENU_CREATE)
+  @MenuImageUpload()
+  uploadCreateImage(
+    @Employee('employeeId') employeeId: string,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    return this.images.upload(employeeId, file);
+  }
+
+  @Post('images/update')
+  @RequirePermissions(PermissionKeys.MENU_UPDATE)
+  @MenuImageUpload()
+  uploadUpdateImage(
+    @Employee('employeeId') employeeId: string,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    return this.images.upload(employeeId, file);
+  }
 
   @Get('public/store')
   @SkipAuth()

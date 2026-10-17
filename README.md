@@ -447,6 +447,16 @@ existing orders and identical retries remain available. See
 [API contracts, KDS polling and migration checks](docs/online-order-preparation.md)
 before deployment or seeding `/online-orders_manage-intake`.
 
+## Menu Image Storage
+
+Menu images can be uploaded through the backend to Supabase Storage. The feature
+is disabled by default; manual HTTPS image URLs remain supported. No Supabase
+secret or SDK is needed in the frontend. See [setup and release checks](deploy/supabase-images.md).
+
+Apply `20261017000000_menu_image_uploads` before deploying this version, even when
+uploads remain disabled: menu image changes use the tracker to attach and retire
+managed files atomically. No automatic migration or seed runs on application startup.
+
 ## Optional Manager AI Insights
 
 Business analysis runs asynchronously in the existing application, never in POS
