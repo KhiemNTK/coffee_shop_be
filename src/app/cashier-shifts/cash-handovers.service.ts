@@ -3,9 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
-  Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   CashFlowType,
@@ -24,7 +22,9 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
   ApproveCashHandoverDto,
@@ -38,8 +38,6 @@ import {
 
 @Injectable()
 export class CashHandoversService {
-  private readonly logger = new Logger(CashHandoversService.name);
-
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
@@ -48,8 +46,8 @@ export class CashHandoversService {
 
   async create(employeeId: string, dto: CreateCashHandoverDto) {
     try {
-      return await this.runSerializable(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+      return await runSerializableTransaction(this.prisma, async (tx) => {
+        await assertActiveEmployee(tx, employeeId);
         const shift = await tx.cashierShift.findUnique({
           where: { id: dto.shiftId },
           select: {
@@ -228,8 +226,8 @@ export class CashHandoversService {
   }
 
   async approve(id: string, employeeId: string, dto: ApproveCashHandoverDto) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const handover = await this.findOrThrow(tx, id);
       this.assertPending(handover.status);
       if (handover.requestedById === employeeId) {
@@ -350,8 +348,8 @@ export class CashHandoversService {
 
   async settle(id: string, employeeId: string, dto: SettleCashHandoverDto) {
     try {
-      return await this.runSerializable(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+      return await runSerializableTransaction(this.prisma, async (tx) => {
+        await assertActiveEmployee(tx, employeeId);
         const handover = await this.findOrThrow(tx, id);
         if (
           handover.status !== CashHandoverStatus.APPROVED ||
@@ -436,8 +434,8 @@ export class CashHandoversService {
     dto: RegisterBankDepositDto,
   ) {
     try {
-      return await this.runSerializable(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+      return await runSerializableTransaction(this.prisma, async (tx) => {
+        await assertActiveEmployee(tx, employeeId);
         const handover = await this.findOrThrow(tx, id);
         if (
           handover.status !== CashHandoverStatus.APPROVED ||
@@ -508,8 +506,8 @@ export class CashHandoversService {
   }
 
   async reject(id: string, employeeId: string, dto: RejectCashHandoverDto) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const handover = await this.findOrThrow(tx, id);
       this.assertPending(handover.status);
       if (handover.requestedById === employeeId) {
@@ -537,8 +535,8 @@ export class CashHandoversService {
   }
 
   async cancel(id: string, employeeId: string) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const handover = await this.findOrThrow(tx, id);
       this.assertPending(handover.status);
       if (handover.requestedById !== employeeId) {
@@ -682,19 +680,6 @@ export class CashHandoversService {
     }
   }
 
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
-  }
-
   private async log(
     tx: ExtendedPrismaTransactionClient,
     employeeId: string,
@@ -702,27 +687,5 @@ export class CashHandoversService {
     details: Prisma.InputJsonObject,
   ) {
     await tx.actionLog.create({ data: { employeeId, actionType, details } });
-  }
-
-  private async runSerializable<T>(
-    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
-  ): Promise<T> {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        return await this.prisma.$transaction(callback, {
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        });
-      } catch (error) {
-        const retryable =
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2034';
-        if (!retryable || attempt === 3) throw error;
-        this.logger.warn(
-          `Cash handover transaction conflict. Retrying ${attempt + 1}/3`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-      }
-    }
-    throw new ConflictException('Transaction failed. Please try again.');
   }
 }

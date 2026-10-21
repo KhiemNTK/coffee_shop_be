@@ -6,6 +6,19 @@ import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
 describe('CashierShiftLedgerService', () => {
   const service = new CashierShiftLedgerService();
 
+  it('returns a recoverable state conflict when no shift is open', async () => {
+    const tx = {
+      cashierShift: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as ExtendedPrismaTransactionClient;
+
+    await expect(
+      service.requireOpenShift(tx, 'employee-id'),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'CASHIER_SHIFT_REQUIRED' },
+    });
+  });
+
   it('rejects a shift without an active cash fund', async () => {
     const tx = {
       cashierShift: {
@@ -21,6 +34,11 @@ describe('CashierShiftLedgerService', () => {
     await expect(
       service.requireOpenShift(tx, 'employee-id'),
     ).rejects.toBeInstanceOf(ConflictException);
+    await expect(
+      service.requireOpenShift(tx, 'employee-id'),
+    ).rejects.toMatchObject({
+      response: { code: 'CASHIER_SHIFT_FUND_INVALID' },
+    });
   });
 
   it('records one invoice income and increments the fund balance', async () => {

@@ -8,6 +8,7 @@ import { FundsService } from './funds.service';
 describe('FundsService', () => {
   let service: FundsService;
   let tx: any;
+  let prisma: { $transaction: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -23,7 +24,7 @@ describe('FundsService', () => {
       bankStatementImport: { findFirst: jest.fn().mockResolvedValue(null) },
       actionLog: { create: jest.fn() },
     };
-    const prisma = {
+    prisma = {
       $transaction: jest.fn((callback: (client: any) => unknown) =>
         callback(tx),
       ),
@@ -38,6 +39,32 @@ describe('FundsService', () => {
 
     service = module.get(FundsService);
   });
+
+  it.each(['update', 'remove'])(
+    'runs %s with serializable isolation and bounded conflict retry',
+    async (operation) => {
+      tx.fund.findFirst.mockResolvedValue({
+        id: 'fund-id',
+        type: FundType.CASH,
+        balance: new Prisma.Decimal(0),
+      });
+      tx.cashierShift.findFirst.mockResolvedValue(null);
+      prisma.$transaction.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('write conflict', {
+          code: 'P2034',
+          clientVersion: 'test',
+        }),
+      );
+      if (operation === 'update')
+        await service.update('fund-id', 'employee-id', { type: FundType.BANK });
+      else await service.remove('fund-id', 'employee-id');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+      expect(tx.fund.update).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('does not change the type of a fund used by an open shift', async () => {
     tx.fund.findFirst.mockResolvedValue({ id: 'fund-id', type: FundType.CASH });

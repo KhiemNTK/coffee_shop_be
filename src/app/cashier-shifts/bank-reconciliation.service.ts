@@ -5,7 +5,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   BankStatementEntryDirection,
@@ -19,6 +18,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CashHandoversService } from './cash-handovers.service';
@@ -44,7 +44,7 @@ export class BankReconciliationService {
   ) {}
 
   async createImport(employeeId: string, dto: CreateBankStatementImportDto) {
-    await this.assertActiveEmployee(this.prisma, employeeId);
+    await assertActiveEmployee(this.prisma, employeeId);
     const fund = await this.prisma.fund.findFirst({
       where: { id: dto.fundId, type: FundType.BANK, deletedAt: null },
       select: { id: true },
@@ -212,7 +212,7 @@ export class BankReconciliationService {
   }
 
   async reconcile(importId: string, employeeId: string) {
-    await this.assertActiveEmployee(this.prisma, employeeId);
+    await assertActiveEmployee(this.prisma, employeeId);
     const statementImport = await this.prisma.bankStatementImport.findUnique({
       where: { id: importId },
       select: { id: true, fundId: true },
@@ -263,7 +263,7 @@ export class BankReconciliationService {
     dto: IgnoreBankStatementEntryDto,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const entry = await tx.bankStatementEntry.findUnique({
         where: { id },
         select: { id: true, matchStatus: true, importId: true, fundId: true },
@@ -503,19 +503,6 @@ export class BankReconciliationService {
         }),
       )
       .digest('hex');
-  }
-
-  private async assertActiveEmployee(
-    client: ExtendedPrismaTransactionClient | ExtendedPrismaClient,
-    employeeId: string,
-  ) {
-    const employee = await client.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private async log(

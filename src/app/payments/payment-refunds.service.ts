@@ -5,7 +5,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
@@ -23,6 +22,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
@@ -95,7 +95,7 @@ export class PaymentRefundsService {
       const refund = await runSerializableTransaction(
         this.prisma,
         async (tx) => {
-          await this.assertActiveEmployee(tx, employeeId);
+          await assertActiveEmployee(tx, employeeId);
           const replay = await tx.paymentRefund.findUnique({
             where: {
               requestedById_idempotencyKey: {
@@ -660,19 +660,6 @@ export class PaymentRefundsService {
         }),
       )
       .digest('hex');
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private log(

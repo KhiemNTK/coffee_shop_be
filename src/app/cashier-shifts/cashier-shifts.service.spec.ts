@@ -23,6 +23,9 @@ describe('CashierShiftsService', () => {
   let prisma: any;
   let tx: any;
   let ledger: { requireOpenShift: jest.Mock };
+  let idempotency: { execute: jest.Mock };
+  const command = { idempotencyKey: 'cashier-command-key' };
+  const targetedCommand = { ...command, expectedShiftId: 'shift-id' };
 
   beforeEach(async () => {
     tx = {
@@ -73,6 +76,7 @@ describe('CashierShiftsService', () => {
       ),
     };
     ledger = { requireOpenShift: jest.fn() };
+    idempotency = { execute: jest.fn((_input, callback) => callback(tx)) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -80,7 +84,7 @@ describe('CashierShiftsService', () => {
         PaginationUtilService,
         { provide: PRISMA_SERVICE_TOKEN, useValue: prisma },
         { provide: CashierShiftLedgerService, useValue: ledger },
-        { provide: IdempotencyService, useValue: {} },
+        { provide: IdempotencyService, useValue: idempotency },
       ],
     }).compile();
 
@@ -92,6 +96,7 @@ describe('CashierShiftsService', () => {
 
     await expect(
       service.open('employee-id', {
+        ...command,
         fundId: 'fund-id',
         startingCash: '100000',
       }),
@@ -112,6 +117,7 @@ describe('CashierShiftsService', () => {
     }));
 
     const shift = await service.open('employee-id', {
+      ...command,
       fundId: 'fund-id',
       startingCash: '95000',
     });
@@ -130,6 +136,7 @@ describe('CashierShiftsService', () => {
 
     await expect(
       service.open('employee-id', {
+        ...command,
         fundId: 'fund-id',
         startingCash: '100000',
       }),
@@ -147,6 +154,7 @@ describe('CashierShiftsService', () => {
 
     await expect(
       service.addMovement('employee-id', {
+        ...targetedCommand,
         type: CashFlowType.EXPENSE,
         amount: '200000',
         description: 'Petty cash expense',
@@ -168,6 +176,7 @@ describe('CashierShiftsService', () => {
     });
 
     const result = await service.addMovement('employee-id', {
+      ...targetedCommand,
       type: CashFlowType.EXPENSE,
       amount: '100000',
       description: 'Emergency equipment repair',
@@ -254,6 +263,7 @@ describe('CashierShiftsService', () => {
     });
 
     const result = await service.close('employee-id', {
+      ...targetedCommand,
       reportedEndingCash: '160000',
     });
 
@@ -277,7 +287,10 @@ describe('CashierShiftsService', () => {
     tx.orderSession.count.mockResolvedValue(1);
 
     await expect(
-      service.close('employee-id', { reportedEndingCash: '0' }),
+      service.close('employee-id', {
+        ...targetedCommand,
+        reportedEndingCash: '0',
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
@@ -288,7 +301,10 @@ describe('CashierShiftsService', () => {
     tx.cashExpenseRequest.count.mockResolvedValue(1);
 
     await expect(
-      service.close('employee-id', { reportedEndingCash: '0' }),
+      service.close('employee-id', {
+        ...targetedCommand,
+        reportedEndingCash: '0',
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.orderSession.count).not.toHaveBeenCalled();
@@ -299,7 +315,10 @@ describe('CashierShiftsService', () => {
     tx.paymentAttempt.count.mockResolvedValue(1);
 
     await expect(
-      service.close('employee-id', { reportedEndingCash: '0' }),
+      service.close('employee-id', {
+        ...targetedCommand,
+        reportedEndingCash: '0',
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.orderSession.count).not.toHaveBeenCalled();
@@ -317,9 +336,70 @@ describe('CashierShiftsService', () => {
     tx.systemSetting.findFirst.mockResolvedValue({ value: 1000 });
 
     await expect(
-      service.close('employee-id', { reportedEndingCash: '95000' }),
+      service.close('employee-id', {
+        ...targetedCommand,
+        reportedEndingCash: '95000',
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing key before starting any mutation', async () => {
+    await expect(
+      service.open('employee-id', {
+        fundId: 'fund-id',
+        startingCash: '0',
+      } as never),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(idempotency.execute).not.toHaveBeenCalled();
+    expect(tx.fund.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('never selects a replacement shift when closing a stale target', async () => {
+    tx.cashierShift.findFirst.mockResolvedValue(null);
+    await expect(
+      service.close('employee-id', {
+        ...targetedCommand,
+        reportedEndingCash: '0',
+      }),
+    ).rejects.toMatchObject({ response: { code: 'CASHIER_SHIFT_CHANGED' } });
+    expect(tx.cashierShift.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: 'shift-id',
+          employeeId: 'employee-id',
+          status: ShiftStatus.OPEN,
+        },
+      }),
+    );
+    expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not post a movement into a replacement shift', async () => {
+    ledger.requireOpenShift.mockResolvedValue({
+      id: 'new-shift-id',
+      fundId: 'fund-id',
+    });
+    await expect(
+      service.addMovement('employee-id', {
+        ...targetedCommand,
+        type: CashFlowType.INCOME,
+        amount: '10',
+        description: 'Cash float',
+      }),
+    ).rejects.toMatchObject({ response: { code: 'CASHIER_SHIFT_CHANGED' } });
+    expect(tx.fund.updateMany).not.toHaveBeenCalled();
+    expect(tx.cashTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing shift precondition even for an internal caller', async () => {
+    await expect(
+      service.close('employee-id', {
+        ...command,
+        reportedEndingCash: '0',
+      } as never),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(idempotency.execute).not.toHaveBeenCalled();
   });
 });

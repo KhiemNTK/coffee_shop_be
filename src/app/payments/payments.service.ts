@@ -6,7 +6,6 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -22,6 +21,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type {
   ExtendedPrismaTransactionClient,
@@ -121,7 +121,7 @@ export class PaymentsService {
       const attempt = await runSerializableTransaction(
         this.prisma,
         async (tx) => {
-          await this.assertActiveEmployee(tx, employeeId);
+          await assertActiveEmployee(tx, employeeId);
           const replay = await tx.paymentAttempt.findUnique({
             where: {
               createdById_idempotencyKey: {
@@ -953,19 +953,6 @@ export class PaymentsService {
       where: { id },
       data: { processingCode, processedAt: new Date() },
     });
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private async markPaymentReview(

@@ -31,7 +31,11 @@ const OptionalDateSchema = z
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 
-const IdempotencyKeySchema = z.string().trim().min(8).max(120).optional();
+export const CashCommandIdempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(8)
+  .max(120);
 
 export class CreateFundDto extends createZodDto(
   z.object({
@@ -65,24 +69,26 @@ export class OpenCashierShiftDto extends createZodDto(
   z.object({
     fundId: z.uuid('Invalid fund ID'),
     startingCash: CashAmountSchema,
-    idempotencyKey: IdempotencyKeySchema,
+    idempotencyKey: CashCommandIdempotencyKeySchema,
   }),
 ) {}
 
 export class CloseCashierShiftDto extends createZodDto(
   z.object({
+    expectedShiftId: z.uuid('Invalid cashier shift ID'),
     reportedEndingCash: CashAmountSchema,
     closingNote: z.string().trim().min(1).max(500).nullish(),
-    idempotencyKey: IdempotencyKeySchema,
+    idempotencyKey: CashCommandIdempotencyKeySchema,
   }),
 ) {}
 
 export class CreateCashMovementDto extends createZodDto(
   z.object({
+    expectedShiftId: z.uuid('Invalid cashier shift ID'),
     type: z.enum(CashFlowType),
     amount: PositiveCashAmountSchema,
     description: z.string().trim().min(1).max(300),
-    idempotencyKey: IdempotencyKeySchema,
+    idempotencyKey: CashCommandIdempotencyKeySchema,
   }),
 ) {}
 

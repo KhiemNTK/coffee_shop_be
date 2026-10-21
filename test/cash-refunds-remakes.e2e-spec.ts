@@ -22,6 +22,7 @@ import { CreateCashRefundDto } from '../src/app/invoices/dto';
 import { KitchenRoutingService } from '../src/app/kitchen/kitchen-routing.service';
 import { OrderPolicyService } from '../src/app/orders/order-policy.service';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { TakeawayService } from '../src/app/orders/takeaway.service';
 import { PrintingService } from '../src/app/printing/printing.service';
 import { queryProfitability } from '../src/app/reports/profitability.query';
 import { queryOnlineOrderJourney } from '../src/app/reports/online-order-journey.query';
@@ -51,9 +52,13 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     ledger,
     new KitchenRoutingService({} as PrintingService),
     pagination,
-    new ConfigService({
-      JWT_SECRET: 'test-only-pickup-secret-at-least-32-chars',
-    }),
+    new TakeawayService(
+      db,
+      pagination,
+      new ConfigService({
+        JWT_SECRET: 'test-only-pickup-secret-at-least-32-chars',
+      }),
+    ),
     idempotency,
   );
   const menuIds: string[] = [];
@@ -429,7 +434,11 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       where: { id: f.invoice.id },
       data: { paymentMethod: PaymentMethod.CASH },
     });
-    await shifts.close(f.employee.id, { reportedEndingCash: '1100' });
+    await shifts.close(f.employee.id, {
+      expectedShiftId: f.shift.id,
+      idempotencyKey: randomUUID(),
+      reportedEndingCash: '1100',
+    });
     await expect(
       refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
     ).rejects.toThrow('open cashier shift');
@@ -437,7 +446,11 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
 
   it('pays refunds from the current shift without rewriting a closed sales shift', async () => {
     const f = await fixture();
-    await shifts.close(f.employee.id, { reportedEndingCash: '1100' });
+    await shifts.close(f.employee.id, {
+      expectedShiftId: f.shift.id,
+      idempotencyKey: randomUUID(),
+      reportedEndingCash: '1100',
+    });
     const current = await prisma.cashierShift.create({
       data: {
         employeeId: f.employee.id,
@@ -465,7 +478,12 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     const f = await fixture();
     const results = await Promise.allSettled([
       refunds.create(f.invoice.id, f.employee.id, refundDto('50')),
-      shifts.close(f.employee.id, { reportedEndingCash: '1100' }),
+      shifts.close(f.employee.id, {
+        expectedShiftId: f.shift.id,
+        idempotencyKey: randomUUID(),
+        reportedEndingCash: '1100',
+        closingNote: 'Cash count preceded the concurrent refund',
+      }),
     ]);
     const shift = await prisma.cashierShift.findUniqueOrThrow({
       where: { id: f.shift.id },

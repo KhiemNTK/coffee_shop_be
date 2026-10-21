@@ -131,6 +131,9 @@ describe('Cashier shift ledger (e2e)', () => {
   afterAll(async () => {
     try {
       const employeeIds = [employeeOneId, employeeTwoId].filter(Boolean);
+      await prisma.idempotencyRequest.deleteMany({
+        where: { employeeId: { in: employeeIds } },
+      });
       await prisma.cashExpenseRequest.deleteMany({
         where: { requestedById: { in: employeeIds } },
       });
@@ -191,15 +194,20 @@ describe('Cashier shift ledger (e2e)', () => {
 
   it('reconciles cash sales and manual movements in one shift', async () => {
     const shift = await shifts.open(employeeOneId, {
+      idempotencyKey: randomUUID(),
       fundId: mainFundId,
       startingCash: '100000',
     });
     await shifts.addMovement(employeeOneId, {
+      expectedShiftId: shift.id,
+      idempotencyKey: randomUUID(),
       type: CashFlowType.INCOME,
       amount: '10000',
       description: 'Additional float',
     });
     await shifts.addMovement(employeeOneId, {
+      expectedShiftId: shift.id,
+      idempotencyKey: randomUUID(),
       type: CashFlowType.EXPENSE,
       amount: '5000',
       description: 'Petty cash expense',
@@ -237,6 +245,8 @@ describe('Cashier shift ledger (e2e)', () => {
     );
 
     const closed = await shifts.close(employeeOneId, {
+      expectedShiftId: shift.id,
+      idempotencyKey: randomUUID(),
       reportedEndingCash: '154000',
       closingNote: 'One thousand short',
     });
@@ -254,10 +264,12 @@ describe('Cashier shift ledger (e2e)', () => {
   it('allows only one concurrent open shift per cash fund', async () => {
     const results = await Promise.allSettled([
       shifts.open(employeeOneId, {
+        idempotencyKey: randomUUID(),
         fundId: raceFundId,
         startingCash: '0',
       }),
       shifts.open(employeeTwoId, {
+        idempotencyKey: randomUUID(),
         fundId: raceFundId,
         startingCash: '0',
       }),
@@ -273,11 +285,16 @@ describe('Cashier shift ledger (e2e)', () => {
     const openShift = await prisma.cashierShift.findFirstOrThrow({
       where: { fundId: raceFundId, status: 'OPEN' },
     });
-    await shifts.close(openShift.employeeId, { reportedEndingCash: '0' });
+    await shifts.close(openShift.employeeId, {
+      expectedShiftId: openShift.id,
+      idempotencyKey: randomUUID(),
+      reportedEndingCash: '0',
+    });
   });
 
   it('posts a large expense once after independent approval', async () => {
     const shift = await shifts.open(employeeOneId, {
+      idempotencyKey: randomUUID(),
       fundId: approvalFundId,
       startingCash: '990000',
     });
@@ -285,6 +302,8 @@ describe('Cashier shift ledger (e2e)', () => {
     expect(shift.openingDifference.toString()).toBe('-10000');
 
     const pending = await shifts.addMovement(employeeOneId, {
+      expectedShiftId: shift.id,
+      idempotencyKey: randomUUID(),
       type: CashFlowType.EXPENSE,
       amount: '600000',
       description: 'Replace failed espresso machine pump',
@@ -324,6 +343,8 @@ describe('Cashier shift ledger (e2e)', () => {
     expect(transactions).toBe(1);
 
     const closed = await shifts.close(employeeOneId, {
+      expectedShiftId: shift.id,
+      idempotencyKey: randomUUID(),
       reportedEndingCash: '390000',
       closingNote: 'Opening count was ten thousand short',
     });

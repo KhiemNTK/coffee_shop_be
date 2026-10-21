@@ -4,9 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
-  Logger,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   CashExpenseRequestStatus,
@@ -27,12 +25,15 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
 import {
   ApproveCashExpenseRequestDto,
+  CashCommandIdempotencyKeySchema,
   CloseCashierShiftDto,
   CreateCashMovementDto,
   GetCashExpenseRequestsDto,
@@ -43,8 +44,6 @@ import {
 
 @Injectable()
 export class CashierShiftsService {
-  private readonly logger = new Logger(CashierShiftsService.name);
-
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
@@ -62,7 +61,7 @@ export class CashierShiftsService {
         idempotencyKey,
         request,
         async (tx) => {
-          await this.assertActiveEmployee(tx, employeeId);
+          await assertActiveEmployee(tx, employeeId);
           const fund = await tx.fund.findFirst({
             where: { id: dto.fundId, deletedAt: null },
             select: { id: true, type: true, balance: true },
@@ -206,6 +205,9 @@ export class CashierShiftsService {
   }
 
   async addMovement(employeeId: string, dto: CreateCashMovementDto) {
+    if (!dto.expectedShiftId) {
+      throw new BadRequestException('Expected cashier shift ID is required.');
+    }
     const { idempotencyKey, ...request } = dto;
     return this.executeMutation(
       employeeId,
@@ -213,8 +215,15 @@ export class CashierShiftsService {
       idempotencyKey,
       request,
       async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const shift = await this.ledger.requireOpenShift(tx, employeeId);
+        if (shift.id !== dto.expectedShiftId) {
+          throw new ConflictException({
+            code: 'CASHIER_SHIFT_CHANGED',
+            message:
+              'The cashier shift changed. Reload before creating a cash movement.',
+          });
+        }
         const amount = new Prisma.Decimal(dto.amount);
         if (dto.type === CashFlowType.EXPENSE) {
           const threshold = await this.getCashControlThreshold(
@@ -272,8 +281,8 @@ export class CashierShiftsService {
     employeeId: string,
     dto: ApproveCashExpenseRequestDto,
   ) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const request = await this.findExpenseRequestOrThrow(tx, id);
       this.assertPendingExpenseRequest(request.status);
       if (request.requestedById === employeeId) {
@@ -355,6 +364,9 @@ export class CashierShiftsService {
   }
 
   async close(employeeId: string, dto: CloseCashierShiftDto) {
+    if (!dto.expectedShiftId) {
+      throw new BadRequestException('Expected cashier shift ID is required.');
+    }
     const { idempotencyKey, ...request } = dto;
     return this.executeMutation(
       employeeId,
@@ -362,13 +374,21 @@ export class CashierShiftsService {
       idempotencyKey,
       request,
       async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const shift = await tx.cashierShift.findFirst({
-          where: { employeeId, status: ShiftStatus.OPEN },
+          where: {
+            id: dto.expectedShiftId,
+            employeeId,
+            status: ShiftStatus.OPEN,
+          },
           include: this.shiftInclude,
         });
         if (!shift) {
-          throw new ConflictException('An open cashier shift is required.');
+          throw new ConflictException({
+            code: 'CASHIER_SHIFT_CHANGED',
+            message:
+              'The cashier shift changed or is already closed. Reload before retrying.',
+          });
         }
         const pendingExpenseRequests = await tx.cashExpenseRequest.count({
           where: {
@@ -460,16 +480,20 @@ export class CashierShiftsService {
   private executeMutation<T>(
     employeeId: string,
     operation: string,
-    idempotencyKey: string | undefined,
+    idempotencyKey: string,
     request: unknown,
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
   ) {
-    return idempotencyKey
-      ? this.idempotency.execute(
-          { employeeId, operation, key: idempotencyKey, request },
-          callback,
-        )
-      : this.runSerializable(callback);
+    const key = CashCommandIdempotencyKeySchema.safeParse(idempotencyKey);
+    if (!key.success) {
+      throw new BadRequestException(
+        'A valid cashier command idempotency key is required.',
+      );
+    }
+    return this.idempotency.execute(
+      { employeeId, operation, key: key.data, request },
+      callback,
+    );
   }
 
   private readonly shiftInclude = {
@@ -592,19 +616,6 @@ export class CashierShiftsService {
     };
   }
 
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
-  }
-
   private async postMovement(
     tx: ExtendedPrismaTransactionClient,
     input: {
@@ -662,8 +673,8 @@ export class CashierShiftsService {
     requireRequester?: boolean;
     actionType: string;
   }) {
-    return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, input.employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, input.employeeId);
       const request = await this.findExpenseRequestOrThrow(tx, input.id);
       this.assertPendingExpenseRequest(request.status);
       if (
@@ -759,27 +770,5 @@ export class CashierShiftsService {
     details: Prisma.InputJsonObject,
   ) {
     await tx.actionLog.create({ data: { employeeId, actionType, details } });
-  }
-
-  private async runSerializable<T>(
-    callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
-  ): Promise<T> {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        return await this.prisma.$transaction(callback, {
-          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        });
-      } catch (error) {
-        const retryable =
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2034';
-        if (!retryable || attempt === 3) throw error;
-        this.logger.warn(
-          `Cashier shift transaction conflict. Retrying ${attempt + 1}/3`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-      }
-    }
-    throw new ConflictException('Transaction failed. Please try again.');
   }
 }

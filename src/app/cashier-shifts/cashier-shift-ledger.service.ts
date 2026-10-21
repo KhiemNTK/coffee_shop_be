@@ -32,7 +32,10 @@ export class CashierShiftLedgerService {
     });
 
     if (!shift) {
-      throw new ConflictException('An open cashier shift is required.');
+      throw new ConflictException({
+        code: 'CASHIER_SHIFT_REQUIRED',
+        message: 'An open cashier shift is required.',
+      });
     }
     if (
       !shift.fundId ||
@@ -40,9 +43,10 @@ export class CashierShiftLedgerService {
       shift.fund.deletedAt ||
       shift.fund.type !== FundType.CASH
     ) {
-      throw new ConflictException(
-        'The open shift must use an active CASH fund.',
-      );
+      throw new ConflictException({
+        code: 'CASHIER_SHIFT_FUND_INVALID',
+        message: 'The open shift must use an active CASH fund.',
+      });
     }
 
     return { id: shift.id, fundId: shift.fundId };

@@ -3,7 +3,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   CashHandoverSettlementStatus,
@@ -15,7 +14,9 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CreateFundDto, GetFundsDto, UpdateFundDto } from './dto';
 
@@ -30,7 +31,7 @@ export class FundsService {
   async create(employeeId: string, dto: CreateFundDto) {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const fund = await tx.fund.create({
           data: {
             name: dto.name,
@@ -91,8 +92,8 @@ export class FundsService {
 
   async update(id: string, employeeId: string, dto: UpdateFundDto) {
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+      return await runSerializableTransaction(this.prisma, async (tx) => {
+        await assertActiveEmployee(tx, employeeId);
         const existing = await tx.fund.findFirst({
           where: { id, deletedAt: null },
         });
@@ -157,8 +158,8 @@ export class FundsService {
   }
 
   async remove(id: string, employeeId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const fund = await tx.fund.findFirst({
         where: { id, deletedAt: null },
         select: { id: true, balance: true },
@@ -202,19 +203,6 @@ export class FundsService {
       await this.log(tx, employeeId, 'FUND_DELETED', { fundId: id });
       return { success: true, id };
     });
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private async log(
