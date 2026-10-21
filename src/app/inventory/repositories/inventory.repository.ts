@@ -66,6 +66,7 @@ export class InventoryRepository {
         id: true,
         name: true,
         stock: true,
+        reservedStock: true,
         averageUnitCost: true,
         reorderPoint: true,
         categoryId: true,

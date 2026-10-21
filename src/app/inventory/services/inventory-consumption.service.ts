@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { ConflictException, Injectable } from '@nestjs/common';
-import { InventoryTxType } from '@prisma/client';
+import { InventoryTxType, Prisma } from '@prisma/client';
 import type {
   ExtendedPrismaTransactionClient,
   InventoryMovementResult,
+  InventoryRequirement,
 } from '../../../common/types';
 import { OutboxService } from '../../durable/outbox.service';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
@@ -12,6 +13,108 @@ import { calculateInventoryValue } from './inventory-costing';
 @Injectable()
 export class InventoryConsumptionService {
   constructor(private readonly outbox: OutboxService) {}
+
+  async canFulfill(
+    client: Pick<ExtendedPrismaTransactionClient, 'inventoryItem'>,
+    requirements: InventoryRequirement[],
+  ) {
+    const totals = this.totalRequirements(requirements);
+    if (!totals.size) return true;
+    const items = await client.inventoryItem.findMany({
+      where: {
+        id: { in: [...totals.keys()] },
+        deletedAt: null,
+        category: { deletedAt: null },
+        unit: { deletedAt: null },
+      },
+      select: { id: true, stock: true, reservedStock: true },
+    });
+    return (
+      items.length === totals.size &&
+      items.every((item) =>
+        item.stock.minus(item.reservedStock).gte(totals.get(item.id)!),
+      )
+    );
+  }
+
+  async reserveSession(
+    tx: ExtendedPrismaTransactionClient,
+    orderSessionId: string,
+  ) {
+    const recipes = await tx.orderItemRecipeIngredient.findMany({
+      where: { orderItem: { orderSessionId, serveStatus: 'PENDING' } },
+      select: {
+        orderItemId: true,
+        inventoryItemId: true,
+        quantityPerItem: true,
+        orderItem: { select: { quantity: true } },
+      },
+    });
+    const reservations = recipes.map((row) => ({
+      orderItemId: row.orderItemId,
+      inventoryItemId: row.inventoryItemId,
+      quantity: row.quantityPerItem.mul(row.orderItem.quantity),
+    }));
+    for (const [id, quantity] of this.totalRequirements(reservations)) {
+      const changed = await tx.$executeRaw`
+        UPDATE "InventoryItem" i SET "reservedStock" = i."reservedStock" + ${quantity}::numeric,
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE i."id" = ${id} AND i."deletedAt" IS NULL
+          AND i."stock" - i."reservedStock" >= ${quantity}::numeric
+          AND EXISTS (SELECT 1 FROM "Unit" u WHERE u."id" = i."unitId" AND u."deletedAt" IS NULL)
+          AND EXISTS (SELECT 1 FROM "InventoryCategory" c WHERE c."id" = i."categoryId" AND c."deletedAt" IS NULL)
+      `;
+      if (changed !== 1) this.insufficientStock();
+    }
+    if (reservations.length)
+      await tx.inventoryReservation.createMany({ data: reservations });
+  }
+
+  async releaseReservations(
+    tx: ExtendedPrismaTransactionClient,
+    orderItemIds: string[],
+  ) {
+    if (!orderItemIds.length) return;
+    const rows = await tx.inventoryReservation.findMany({
+      where: { orderItemId: { in: orderItemIds } },
+      select: { inventoryItemId: true, quantity: true },
+    });
+    for (const [id, quantity] of this.totalRequirements(rows)) {
+      const changed = await tx.$executeRaw`
+        UPDATE "InventoryItem" SET "reservedStock" = "reservedStock" - ${quantity}::numeric,
+          "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${id} AND "reservedStock" >= ${quantity}::numeric
+      `;
+      if (changed !== 1)
+        throw new ConflictException(
+          'Inventory reservation state changed. Reload before retrying.',
+        );
+    }
+    if (rows.length)
+      await tx.inventoryReservation.deleteMany({
+        where: { orderItemId: { in: orderItemIds } },
+      });
+  }
+
+  private totalRequirements(rows: InventoryRequirement[]) {
+    const totals = new Map<string, Prisma.Decimal>();
+    for (const row of rows)
+      totals.set(
+        row.inventoryItemId,
+        (totals.get(row.inventoryItemId) ?? new Prisma.Decimal(0)).add(
+          row.quantity,
+        ),
+      );
+    return new Map([...totals].sort(([a], [b]) => a.localeCompare(b)));
+  }
+
+  private insufficientStock(): never {
+    throw new ConflictException({
+      code: 'INVENTORY_INSUFFICIENT_STOCK',
+      message:
+        'Insufficient available ingredients. Review the order before retrying.',
+    });
+  }
 
   async consumeOrderItem(
     tx: ExtendedPrismaTransactionClient,
@@ -74,23 +177,38 @@ export class InventoryConsumptionService {
       };
     });
 
+    const reservations = await tx.inventoryReservation.findMany({
+      where: { orderItemId: orderItem.id },
+      select: { inventoryItemId: true, quantity: true },
+    });
+    const held = new Map(
+      reservations.map((row) => [row.inventoryItemId, row.quantity]),
+    );
+    if (
+      held.size &&
+      (held.size !== ingredients.length ||
+        ingredients.some(
+          (row) => !held.get(row.inventoryItemId)?.eq(row.totalQuantity),
+        ))
+    )
+      throw new ConflictException(
+        'Reserved ingredients no longer match the order snapshot.',
+      );
     for (const ingredient of ingredients) {
-      const updated = await tx.inventoryItem.updateMany({
-        where: {
-          id: ingredient.inventoryItemId,
-          deletedAt: null,
-          stock: { gte: ingredient.totalQuantity },
-        },
-        data: { stock: { decrement: ingredient.totalQuantity } },
-      });
-
-      if (updated.count !== 1) {
-        throw new ConflictException({
-          code: 'INVENTORY_INSUFFICIENT_STOCK',
-          message: `Insufficient stock for inventory item '${ingredient.inventoryItemName}'.`,
-        });
-      }
+      const own = held.get(ingredient.inventoryItemId) ?? new Prisma.Decimal(0);
+      const changed = await tx.$executeRaw`
+        UPDATE "InventoryItem" SET "stock" = "stock" - ${ingredient.totalQuantity}::numeric,
+          "reservedStock" = "reservedStock" - ${own}::numeric, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${ingredient.inventoryItemId} AND "deletedAt" IS NULL
+          AND "reservedStock" >= ${own}::numeric
+          AND "stock" - "reservedStock" >= ${ingredient.totalQuantity.minus(own)}::numeric
+      `;
+      if (changed !== 1) this.insufficientStock();
     }
+    if (reservations.length)
+      await tx.inventoryReservation.deleteMany({
+        where: { orderItemId: orderItem.id },
+      });
 
     if (ingredients.length === 0) return [];
 

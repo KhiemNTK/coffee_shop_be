@@ -141,6 +141,7 @@ describe('StocktakeService', () => {
         id: 'item-id',
         deletedAt: null,
         stock: new Decimal(10),
+        reservedStock: { lte: new Decimal(8) },
       },
       data: { stock: new Decimal(8) },
     });
@@ -242,6 +243,7 @@ describe('StocktakeService', () => {
         id: 'item-id',
         deletedAt: null,
         stock: new Decimal(10),
+        reservedStock: { lte: new Decimal(10) },
       },
       data: { stock: new Decimal(10) },
     });

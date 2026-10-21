@@ -307,6 +307,7 @@ export class StocktakeService {
               id: item.id,
               deletedAt: null,
               stock: line.expectedQuantity,
+              reservedStock: { lte: countedQuantity },
             },
             data: { stock: countedQuantity },
           });

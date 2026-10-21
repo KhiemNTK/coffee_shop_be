@@ -9,6 +9,7 @@ describe('InventoryMovementService', () => {
   let tx: any;
   let repository: { ensureActiveItemExists: jest.Mock };
   let outbox: { enqueue: jest.Mock };
+  let idempotency: { execute: jest.Mock };
 
   beforeEach(() => {
     tx = {
@@ -26,16 +27,17 @@ describe('InventoryMovementService', () => {
       ensureActiveItemExists: jest.fn().mockResolvedValue({
         id: 'item-id',
         stock: new Decimal(10),
+        reservedStock: new Decimal(0),
         averageUnitCost: new Decimal(20_000),
       }),
     };
     outbox = { enqueue: jest.fn() };
+    idempotency = { execute: jest.fn((_input, operation) => operation(tx)) };
     service = new InventoryMovementService(
       repository as never,
       new InventoryPolicyService(),
-      { runSerializable: jest.fn((operation) => operation(tx)) } as never,
       { log: jest.fn() },
-      { execute: jest.fn((_input, operation) => operation(tx)) } as never,
+      idempotency as never,
       outbox as never,
     );
   });
@@ -48,6 +50,7 @@ describe('InventoryMovementService', () => {
 
     const result = await service.importItem('item-id', 'employee-id', {
       quantity: 5,
+      idempotencyKey: 'import-key-1',
       unitPrice: 23_000,
       note: 'Opening balance correction',
       transactionDate: undefined,
@@ -75,6 +78,14 @@ describe('InventoryMovementService', () => {
       }),
     );
     expect(outbox.enqueue).toHaveBeenCalledTimes(1);
+    expect(idempotency.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        employeeId: 'employee-id',
+        operation: 'inventory.stock.import',
+        key: 'import-key-1',
+      }),
+      expect.any(Function),
+    );
   });
 
   it('snapshots current cost for a manual export', async () => {
@@ -85,12 +96,17 @@ describe('InventoryMovementService', () => {
 
     await service.exportItem('item-id', 'employee-id', {
       quantity: 2,
+      idempotencyKey: 'export-key-1',
       note: 'Damaged stock correction',
       transactionDate: undefined,
     });
 
     expect(tx.inventoryItem.updateMany).toHaveBeenCalledWith({
-      where: { id: 'item-id', stock: { gte: new Decimal(2) } },
+      where: {
+        id: 'item-id',
+        stock: { gte: new Decimal(2) },
+        reservedStock: new Decimal(0),
+      },
       data: { stock: { decrement: new Decimal(2) } },
     });
     expect(tx.inventoryTransaction.create).toHaveBeenCalledWith({
@@ -107,11 +123,23 @@ describe('InventoryMovementService', () => {
     await expect(
       service.importItem('item-id', 'employee-id', {
         quantity: 1,
+        idempotencyKey: 'import-key-2',
         note: 'Cost correction',
       } as never),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.inventoryItem.update).not.toHaveBeenCalled();
+    expect(tx.inventoryTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an internal movement without a key before touching stock', async () => {
+    await expect(
+      service.exportItem('item-id', 'employee-id', {
+        quantity: 1,
+        note: 'Stock correction',
+      } as never),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(idempotency.execute).not.toHaveBeenCalled();
     expect(tx.inventoryTransaction.create).not.toHaveBeenCalled();
   });
 });

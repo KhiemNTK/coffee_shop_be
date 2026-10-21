@@ -10,6 +10,12 @@ describe('InventoryConsumptionService', () => {
     outbox = { enqueue: jest.fn() };
     service = new InventoryConsumptionService(outbox as never);
     tx = {
+      $executeRaw: jest.fn().mockResolvedValue(1),
+      inventoryReservation: {
+        findMany: jest.fn().mockResolvedValue([]),
+        deleteMany: jest.fn(),
+        createMany: jest.fn(),
+      },
       menuItemIngredient: { findMany: jest.fn() },
       inventoryItem: {
         updateMany: jest.fn(),
@@ -71,14 +77,13 @@ describe('InventoryConsumptionService', () => {
       quantity: 2,
     });
 
-    expect(tx.inventoryItem.updateMany).toHaveBeenNthCalledWith(1, {
-      where: {
-        id: 'coffee-id',
-        deletedAt: null,
-        stock: { gte: new Prisma.Decimal('0.5') },
-      },
-      data: { stock: { decrement: new Prisma.Decimal('0.5') } },
-    });
+    expect(tx.$executeRaw.mock.calls[0].slice(1)).toEqual([
+      new Prisma.Decimal('0.5'),
+      new Prisma.Decimal(0),
+      'coffee-id',
+      new Prisma.Decimal(0),
+      new Prisma.Decimal('0.5'),
+    ]);
     expect(tx.orderItemIngredientSnapshot.createMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -147,7 +152,7 @@ describe('InventoryConsumptionService', () => {
         },
       },
     ]);
-    tx.inventoryItem.updateMany.mockResolvedValue({ count: 0 });
+    tx.$executeRaw.mockResolvedValue(0);
 
     await expect(
       service.consumeOrderItem(tx as never, {
@@ -199,5 +204,33 @@ describe('InventoryConsumptionService', () => {
       select: { id: true, inventoryItemId: true, quantity: true },
     });
     expect(result).toHaveLength(1);
+  });
+
+  it('checks combined ingredient requirements against stock minus reservations in one query', async () => {
+    tx.inventoryItem.findMany.mockResolvedValue([
+      {
+        id: 'milk',
+        stock: new Prisma.Decimal('0.5'),
+        reservedStock: new Prisma.Decimal('0.2'),
+      },
+    ]);
+    expect(
+      await service.canFulfill(tx as never, [
+        { inventoryItemId: 'milk', quantity: new Prisma.Decimal('0.2') },
+        { inventoryItemId: 'milk', quantity: new Prisma.Decimal('0.2') },
+      ]),
+    ).toBe(false);
+    expect(tx.inventoryItem.findMany).toHaveBeenCalledTimes(1);
+    expect(
+      await service.canFulfill(tx as never, [
+        { inventoryItemId: 'milk', quantity: new Prisma.Decimal('0.3') },
+      ]),
+    ).toBe(true);
+    tx.inventoryItem.findMany.mockResolvedValue([]);
+    expect(
+      await service.canFulfill(tx as never, [
+        { inventoryItemId: 'deleted', quantity: new Prisma.Decimal(1) },
+      ]),
+    ).toBe(false);
   });
 });

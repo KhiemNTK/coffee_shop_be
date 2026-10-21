@@ -34,8 +34,6 @@ export const RequiredIdempotencyKeySchema = z
   .min(8, 'Idempotency key must be at least 8 characters')
   .max(120, 'Idempotency key must not exceed 120 characters');
 
-export const IdempotencyKeySchema = RequiredIdempotencyKeySchema.optional();
-
 export const MoneyInputSchema = z.union([
   z
     .string()
@@ -52,11 +50,11 @@ const InventoryMovementBaseSchema = z.object({
 
 export const InventoryImportSchema = InventoryMovementBaseSchema.extend({
   unitPrice: MoneyInputSchema,
-  idempotencyKey: IdempotencyKeySchema,
+  idempotencyKey: RequiredIdempotencyKeySchema,
 });
 
 export const InventoryExportSchema = InventoryMovementBaseSchema.extend({
-  idempotencyKey: IdempotencyKeySchema,
+  idempotencyKey: RequiredIdempotencyKeySchema,
 });
 
 export const BulkInventoryImportItemSchema = InventoryMovementBaseSchema.extend(
@@ -110,7 +108,7 @@ export class BulkInventoryImportDto extends createZodDto(
       .array(BulkInventoryImportItemSchema)
       .min(1, 'At least one inventory movement is required')
       .max(100, 'Cannot process more than 100 inventory movements'),
-    idempotencyKey: IdempotencyKeySchema,
+    idempotencyKey: RequiredIdempotencyKeySchema,
   }),
 ) {}
 
@@ -120,7 +118,7 @@ export class BulkInventoryExportDto extends createZodDto(
       .array(BulkInventoryExportItemSchema)
       .min(1, 'At least one inventory movement is required')
       .max(100, 'Cannot process more than 100 inventory movements'),
-    idempotencyKey: IdempotencyKeySchema,
+    idempotencyKey: RequiredIdempotencyKeySchema,
   }),
 ) {}
 

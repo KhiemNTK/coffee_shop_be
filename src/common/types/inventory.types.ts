@@ -1,6 +1,11 @@
 import type { InventoryTxType } from '@prisma/client';
 import type { Decimal } from '@prisma/client/runtime/library';
 
+export interface InventoryRequirement {
+  inventoryItemId: string;
+  quantity: Decimal;
+}
+
 export interface InventoryMovementInput {
   inventoryItemId: string;
   type: InventoryTxType;

@@ -17,6 +17,7 @@ import {
   BulkInventoryImportDto,
   InventoryExportDto,
   InventoryImportDto,
+  RequiredIdempotencyKeySchema,
 } from '../dto/inventory-common.dto';
 import { INVENTORY_EVENTS } from '../events/inventory.events';
 import { InventoryPolicyService } from '../policies/inventory-policy.service';
@@ -26,14 +27,12 @@ import {
   calculateInventoryValue,
   calculateWeightedAverageCost,
 } from './inventory-costing';
-import { InventoryTransactionService } from './inventory-transaction.service';
 
 @Injectable()
 export class InventoryMovementService {
   constructor(
     private readonly inventoryRepository: InventoryRepository,
     private readonly inventoryPolicy: InventoryPolicyService,
-    private readonly inventoryTransactionService: InventoryTransactionService,
     private readonly inventoryAuditService: InventoryAuditService,
     private readonly idempotency: IdempotencyService,
     private readonly outbox: OutboxService,
@@ -129,7 +128,7 @@ export class InventoryMovementService {
   private executeMovement(
     employeeId: string,
     operation: string,
-    idempotencyKey: string | undefined,
+    idempotencyKey: string,
     request: unknown,
     movements: Array<{
       inventoryItemId: string;
@@ -140,14 +139,16 @@ export class InventoryMovementService {
       note?: string | null;
     }>,
   ) {
-    const execute = (tx: ExtendedPrismaTransactionClient) =>
-      this.moveStockInTransaction(tx, employeeId, movements);
-    return idempotencyKey
-      ? this.idempotency.execute(
-          { employeeId, operation, key: idempotencyKey, request },
-          execute,
-        )
-      : this.inventoryTransactionService.runSerializable(execute);
+    const key = RequiredIdempotencyKeySchema.safeParse(idempotencyKey);
+    if (!key.success) {
+      throw new BadRequestException(
+        'A valid stock movement idempotency key is required.',
+      );
+    }
+    return this.idempotency.execute(
+      { employeeId, operation, key: key.data, request },
+      (tx) => this.moveStockInTransaction(tx, employeeId, movements),
+    );
   }
 
   private async moveStockInTransaction(
@@ -234,7 +235,8 @@ export class InventoryMovementService {
       const updated = await tx.inventoryItem.updateMany({
         where: {
           id: movement.inventoryItemId,
-          stock: { gte: quantity },
+          stock: { gte: quantity.plus(item.reservedStock) },
+          reservedStock: item.reservedStock,
         },
         data: {
           stock: { decrement: quantity },
