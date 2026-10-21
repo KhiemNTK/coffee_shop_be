@@ -226,6 +226,16 @@ const checks: Array<{ name: string; query: Prisma.Sql }> = [
     `,
   },
   {
+    name: 'inventory reservation balance mismatch',
+    query: Prisma.sql`
+      SELECT COUNT(*)::bigint AS violations FROM "InventoryItem" i
+      LEFT JOIN (SELECT "inventoryItemId", SUM("quantity") AS held
+        FROM "InventoryReservation" GROUP BY "inventoryItemId") r ON r."inventoryItemId" = i."id"
+      WHERE i."reservedStock" <> COALESCE(r.held, 0)
+        OR i."reservedStock" < 0 OR i."reservedStock" > i."stock"
+    `,
+  },
+  {
     name: 'non-positive inventory transaction quantity',
     query: Prisma.sql`
       SELECT COUNT(*)::bigint AS violations

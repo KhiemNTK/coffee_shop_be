@@ -1,13 +1,15 @@
-import 'dotenv/config';
+import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
-import { assertDemoTarget, seedDemo } from './demo-data';
+import { assertCatalogTarget, seedCatalog } from './catalog-data';
+
+if (process.env.NODE_ENV !== 'test') config({ quiet: true });
 
 async function main() {
   const argument = (name: string) => {
     const index = process.argv.indexOf(name);
     return index >= 0 ? process.argv[index + 1] : undefined;
   };
-  assertDemoTarget(
+  assertCatalogTarget(
     process.env.NODE_ENV,
     process.env.DATABASE_URL ?? '',
     argument('--database'),
@@ -15,8 +17,12 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     console.log(
-      'Demo data inserted:',
-      await seedDemo(prisma, Number(argument('--seed') ?? 20261013)),
+      `Catalog inserted into ${argument('--database')}:`,
+      await seedCatalog(
+        prisma,
+        Number(argument('--seed') ?? 20261017),
+        process.argv.includes('--replace-demo'),
+      ),
     );
   } finally {
     await prisma.$disconnect();
@@ -24,6 +30,6 @@ async function main() {
 }
 
 void main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : 'Demo seed failed');
+  console.error(error instanceof Error ? error.message : 'Catalog seed failed');
   process.exitCode = 1;
 });

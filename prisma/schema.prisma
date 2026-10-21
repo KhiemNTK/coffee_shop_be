@@ -12,12 +12,6 @@ generator json {
   provider = "prisma-json-types-generator"
 }
 
-generator zod {
-  provider          = "zod-prisma-types"
-  output            = "../src/generated/zod"
-  useTypeAssertions = true
-}
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -446,6 +440,7 @@ model Customer {
   deletedAt     DateTime?
   sessions      CustomerSession[]
   wishlist      CustomerWishlist[]
+  onlineOrders  OnlineOrderRequest[]
 }
 
 model CustomerSession {
@@ -718,6 +713,7 @@ model InventoryItem {
   id              String  @id @default(uuid()) // MaHangHoa
   name            String // TenHangHoa
   stock           Decimal @default(0) @db.Decimal(18, 4) // Số lượng tồn kho hiện tại
+  reservedStock   Decimal @default(0) @db.Decimal(18, 4)
   averageUnitCost Decimal @default(0) @db.Decimal(18, 2)
   reorderPoint    Decimal @default(0) @db.Decimal(18, 4)
 
@@ -738,6 +734,7 @@ model InventoryItem {
   snapshots      OrderItemIngredientSnapshot[]
   receiptItems   PurchaseReceiptItem[]
   stocktakeItems StocktakeItem[]
+  reservations  InventoryReservation[]
 
   @@index([categoryId])
   @@index([unitId])
@@ -1148,6 +1145,9 @@ model OnlineOrderRequest {
   cancelledAt      DateTime?
   noShowAt         DateTime?
 
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
   reviewedById String?
   reviewedBy   Employee? @relation("OnlineOrderReviewedBy", fields: [reviewedById], references: [id], onDelete: Restrict)
 
@@ -1162,6 +1162,20 @@ model OnlineOrderRequest {
   @@index([telegramChatId])
   @@index([createdAt])
   @@index([reviewedById])
+  @@index([customerId, createdAt, id])
+}
+
+model InventoryReservation {
+  orderItemId     String
+  inventoryItemId String
+  quantity        Decimal @db.Decimal(18, 4)
+  createdAt       DateTime @default(now())
+
+  orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@id([orderItemId, inventoryItemId])
+  @@index([inventoryItemId])
 }
 
 model OrderItemRecipeIngredient {
@@ -1247,6 +1261,7 @@ model OrderItem {
   ingredientSnapshots   OrderItemIngredientSnapshot[]
   recipeIngredients     OrderItemRecipeIngredient[]
   inventoryTransactions InventoryTransaction[]
+  inventoryReservations InventoryReservation[]
   kitchenTicketItem     KitchenTicketItem?
   originalRemake        OrderRemake? @relation("RemakeOriginal")
   replacementRemake     OrderRemake? @relation("RemakeReplacement")
@@ -1350,6 +1365,7 @@ model TakeawayFeedback {
   createdAt      DateTime  @default(now())
   resolvedAt     DateTime?
   resolutionNote String? @db.VarChar(500)
+  customerReply  String? @db.VarChar(500)
   resolvedById   String?
   resolvedBy     Employee? @relation("TakeawayFeedbackResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
 
