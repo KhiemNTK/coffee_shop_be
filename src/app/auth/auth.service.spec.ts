@@ -1,6 +1,6 @@
 import { TestingModule } from '@nestjs/testing';
 import { AUTH_ERRORS } from '../../common/consts/message';
-import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import { EmployeesService } from '../employees/employees.service';
 import { AuthSessionService } from './auth-session.service';
 import { AuthService } from './auth.service';
@@ -10,7 +10,7 @@ import { AuthModule } from './auth.module';
 describe('AuthService', () => {
   let service: AuthService;
   let employees: EmployeesService;
-  let stringUtil: StringUtilService;
+  let passwordHash: PasswordHashService;
   let sessions: AuthSessionService;
 
   beforeEach(async () => {
@@ -20,9 +20,9 @@ describe('AuthService', () => {
 
     service = module.get<AuthService>(AuthService);
     employees = module.get(EmployeesService);
-    stringUtil = module
+    passwordHash = module
       .select(AuthModule)
-      .get(StringUtilService, { strict: true });
+      .get(PasswordHashService, { strict: true });
     sessions = module.get(AuthSessionService);
   });
 
@@ -38,7 +38,7 @@ describe('AuthService', () => {
       isActive: true,
     };
     jest.spyOn(employees, 'getEmployee').mockResolvedValue(employee as never);
-    const compare = jest.spyOn(stringUtil, 'compare').mockResolvedValue(true);
+    const compare = jest.spyOn(passwordHash, 'compare').mockResolvedValue(true);
     const tokens = { accessToken: 'access', refreshToken: 'refresh' };
     const createSession = jest
       .spyOn(sessions, 'createSession')
@@ -64,7 +64,9 @@ describe('AuthService', () => {
       password: 'password-hash',
       isActive: true,
     } as never);
-    const compare = jest.spyOn(stringUtil, 'compare').mockResolvedValue(false);
+    const compare = jest
+      .spyOn(passwordHash, 'compare')
+      .mockResolvedValue(false);
     const createSession = jest.spyOn(sessions, 'createSession');
 
     await expect(

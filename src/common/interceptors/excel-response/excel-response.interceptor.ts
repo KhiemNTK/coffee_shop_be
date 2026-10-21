@@ -7,7 +7,6 @@ import {
   StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { DateUtilService } from '../../utils/date-util/date-util.service';
 import { switchMap } from 'rxjs/operators';
 import { Workbook } from 'exceljs';
 
@@ -15,21 +14,19 @@ import { Workbook } from 'exceljs';
 export class ExcelResponseInterceptor implements NestInterceptor {
   private readonly logger = new Logger(ExcelResponseInterceptor.name);
 
-  constructor(private dateUtilService: DateUtilService) {}
-
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const fileName = context
       .getClass()
       .name.replace('Controller', '')
       .toLowerCase();
 
-    const currentDate = this.dateUtilService
-      .getCurrentDate('en-CA', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour12: false,
-      })
+    const currentDate = new Intl.DateTimeFormat('en-CA', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour12: false,
+    })
+      .format(new Date())
       .replaceAll('-', '_');
 
     return next.handle().pipe(

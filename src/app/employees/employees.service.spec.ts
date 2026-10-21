@@ -3,7 +3,7 @@ import { EmployeesService } from './employees.service';
 import { AutoMockingModule } from '../../../test/auto-mocking/auto-mocking.module';
 import { EmployeesModule } from './employees.module';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
-import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { GetEmployeesPaginationDto } from './dto';
 import { AuthorizationService } from '../authorization/authorization.service';
@@ -13,7 +13,7 @@ import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
 describe('EmployeesService', () => {
   let service: EmployeesService;
   let employeeCreate: jest.Mock;
-  let stringUtilService: StringUtilService;
+  let passwordHashService: PasswordHashService;
 
   beforeEach(async () => {
     const module: TestingModule = await AutoMockingModule.createTestingModule({
@@ -21,7 +21,7 @@ describe('EmployeesService', () => {
     });
 
     service = module.get<EmployeesService>(EmployeesService);
-    stringUtilService = module.get(StringUtilService);
+    passwordHashService = module.get(PasswordHashService);
     employeeCreate = jest.fn();
     const prisma = module.get<Record<string, unknown>>(PRISMA_SERVICE_TOKEN);
     prisma.employee = { create: employeeCreate };
@@ -105,7 +105,7 @@ describe('EmployeesService', () => {
   });
 
   it('hashes a password before creating an employee', async () => {
-    jest.spyOn(stringUtilService, 'hash').mockResolvedValue('password-hash');
+    jest.spyOn(passwordHashService, 'hash').mockResolvedValue('password-hash');
     employeeCreate.mockResolvedValue({ id: 'employee-1' });
 
     await service.createEmployee({

@@ -37,6 +37,13 @@ const messages: Readonly<Record<string, string>> = {
 };
 
 const codedMessages: Readonly<Record<string, string>> = {
+  CASHIER_SHIFT_REQUIRED:
+    'Bạn chưa có ca thu ngân đang mở. Mở ca hoặc liên hệ quản lý trước khi thu tiền.',
+  CASHIER_SHIFT_FUND_INVALID:
+    'Quỹ tiền mặt của ca không hợp lệ. Liên hệ quản lý để kiểm tra, không mở thêm ca.',
+  ONLINE_INTAKE_PAUSED: 'Quán đang tạm dừng nhận đơn mới.',
+  ONLINE_INTAKE_CHANGED:
+    'Trạng thái nhận đơn đã được người khác cập nhật. Làm mới trước khi thao tác tiếp.',
   RATE_LIMIT_UNAVAILABLE:
     'Dịch vụ tạm thời không khả dụng. Vui lòng thử lại sau.',
   ONLINE_ASAP_CLOSED:

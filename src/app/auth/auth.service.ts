@@ -15,7 +15,7 @@ import {
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
 import type { AuthRequestMetadata, EmployeeInfo } from '../../common/types';
-import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { EmployeesService } from '../employees/employees.service';
 import {
@@ -42,7 +42,7 @@ export class AuthService {
     @Inject(PRISMA_SERVICE_TOKEN)
     private readonly prisma: ExtendedPrismaClient,
     private readonly employeesService: EmployeesService,
-    private readonly stringUtilService: StringUtilService,
+    private readonly passwordHashService: PasswordHashService,
     private readonly configService: ConfigService,
     private readonly authorizationService: AuthorizationService,
     private readonly authTokenService: AuthTokenService,
@@ -112,7 +112,7 @@ export class AuthService {
       );
     }
 
-    const passwordHashed = await this.stringUtilService.hash(password);
+    const passwordHashed = await this.passwordHashService.hash(password);
     const employee = await this.prisma.$transaction(async (tx) => {
       const created = await tx.employee.create({
         data: {
@@ -148,7 +148,7 @@ export class AuthService {
     if (!employee?.password || !employee.isActive) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
     }
-    const passwordMatches = await this.stringUtilService.compare(
+    const passwordMatches = await this.passwordHashService.compare(
       signInDto.password,
       employee.password,
     );
@@ -193,7 +193,7 @@ export class AuthService {
     });
     if (
       !employee?.isActive ||
-      !(await this.stringUtilService.compare(dto.password, employee.password))
+      !(await this.passwordHashService.compare(dto.password, employee.password))
     ) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
     }
@@ -249,7 +249,7 @@ export class AuthService {
     });
     if (
       !employee?.isActive ||
-      !(await this.stringUtilService.compare(dto.password, employee.password))
+      !(await this.passwordHashService.compare(dto.password, employee.password))
     ) {
       throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
     }

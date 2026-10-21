@@ -54,6 +54,22 @@ describe('HTTP language boundary', () => {
     expect(localizeApiErrors(errors, 'vi', 'HTTP_409')).toEqual(errors);
   });
 
+  it.each([
+    'CASHIER_SHIFT_REQUIRED',
+    'CASHIER_SHIFT_FUND_INVALID',
+    'ONLINE_INTAKE_PAUSED',
+    'ONLINE_INTAKE_CHANGED',
+  ])(
+    'localizes the recovery message for %s without changing English',
+    (code) => {
+      const errors = [{ message: 'Original reason' }];
+      expect(localizeApiErrors(errors, 'vi', code)[0].message).not.toBe(
+        errors[0].message,
+      );
+      expect(localizeApiErrors(errors, 'en', code)).toBe(errors);
+    },
+  );
+
   it('localizes rate-limit outages without changing the stable code contract', () => {
     const errors = [
       { message: 'Rate limiting is temporarily unavailable. Please retry.' },

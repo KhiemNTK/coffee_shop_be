@@ -3,7 +3,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import { EmployeesModule } from '../employees/employees.module';
 import { JWTEnvs } from './consts/jwt.const';
 import { MailUtilModule } from '../../common/utils/mail-util/mail-util.module';
@@ -34,7 +34,7 @@ import { TurnstileModule } from './turnstile.module';
     AuthSessionService,
     PasswordResetService,
     GoogleIdentityService,
-    StringUtilService,
+    PasswordHashService,
   ],
   exports: [AuthService, AuthSessionService],
   controllers: [AuthController],

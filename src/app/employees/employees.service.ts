@@ -22,7 +22,7 @@ import type {
   ExtendedPrismaTransactionClient,
 } from '../../common/types';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
-import { StringUtilService } from '../../common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import {
   CreateEmployeeDto,
   GetEmployeesPaginationDto,
@@ -79,11 +79,11 @@ export class EmployeesService {
     private readonly prisma: ExtendedPrismaClient,
     private paginationUtilService: PaginationUtilService,
     private authorizationService: AuthorizationService,
-    private readonly stringUtilService: StringUtilService,
+    private readonly passwordHashService: PasswordHashService,
   ) {}
 
   async createEmployee(createEmployeeDto: CreateEmployeeDto) {
-    const password = await this.stringUtilService.hash(
+    const password = await this.passwordHashService.hash(
       createEmployeeDto.password,
     );
     return this.prisma.employee.create({
@@ -167,7 +167,7 @@ export class EmployeesService {
     actorId: string,
   ) {
     const password = updateEmployeeDto.password
-      ? await this.stringUtilService.hash(updateEmployeeDto.password)
+      ? await this.passwordHashService.hash(updateEmployeeDto.password)
       : undefined;
 
     const employee = await runSerializableTransaction(

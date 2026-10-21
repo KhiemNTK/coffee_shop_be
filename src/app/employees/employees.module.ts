@@ -3,10 +3,10 @@ import { EmployeesService } from './employees.service';
 import { EmployeesController } from './employees.controller';
 import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 import { AuthorizationModule } from '../authorization/authorization.module';
-import { StringUtilModule } from '../../common/utils/string-util/string-util.module';
+import { PasswordHashModule } from '../../common/utils/password-hash/password-hash.module';
 
 @Module({
-  imports: [AuthorizationModule, PaginationUtilModule, StringUtilModule],
+  imports: [AuthorizationModule, PaginationUtilModule, PasswordHashModule],
   controllers: [EmployeesController],
   providers: [EmployeesService],
   exports: [EmployeesService],

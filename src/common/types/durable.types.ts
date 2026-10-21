@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import type { ExtendedPrismaTransactionClient } from './prisma.types';
 
 export interface OutboxEventInput {
-  topic: 'order' | 'inventory' | 'payment';
+  topic: 'order' | 'inventory' | 'payment' | 'auth';
   eventName: string;
   aggregateType: string;
   aggregateId: string;

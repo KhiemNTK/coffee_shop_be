@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "trainFrom": "2026-01-01T00:00:00Z",
+  "splitAt": "2026-01-08T00:00:00Z",
+  "testTo": "2026-01-10T00:00:00Z",
+  "availableMenuItemIds": ["coffee", "cake", "tea", "juice", "cookie"],
+  "baskets": [
+    {
+      "id": "training-1",
+      "createdAt": "2026-01-02T00:00:00Z",
+      "menuItemIds": ["coffee", "cake"]
+    },
+    {
+      "id": "training-2",
+      "createdAt": "2026-01-03T00:00:00Z",
+      "menuItemIds": ["coffee", "cake"]
+    },
+    {
+      "id": "training-3",
+      "createdAt": "2026-01-04T00:00:00Z",
+      "menuItemIds": ["coffee", "cake"]
+    },
+    {
+      "id": "training-4",
+      "createdAt": "2026-01-02T00:00:00Z",
+      "menuItemIds": ["tea", "juice", "cookie"]
+    },
+    {
+      "id": "training-5",
+      "createdAt": "2026-01-03T00:00:00Z",
+      "menuItemIds": ["tea", "juice", "cookie"]
+    },
+    {
+      "id": "training-6",
+      "createdAt": "2026-01-04T00:00:00Z",
+      "menuItemIds": ["tea", "juice", "cookie"]
+    },
+    {
+      "id": "training-7",
+      "createdAt": "2026-01-05T00:00:00Z",
+      "menuItemIds": ["tea", "juice", "cookie"]
+    },
+    {
+      "id": "held-out-1",
+      "createdAt": "2026-01-08T00:00:00Z",
+      "menuItemIds": ["coffee", "cake"]
+    }
+  ]
+}

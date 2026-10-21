@@ -14,7 +14,7 @@ import { EmployeesService } from '../src/app/employees/employees.service';
 import { AUTH_ERRORS } from '../src/common/consts/message';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
-import { StringUtilService } from '../src/common/utils/string-util/string-util.service';
+import { PasswordHashService } from '../src/common/utils/password-hash/password-hash.service';
 import type { AuthTokenPair } from '../src/common/types';
 
 // Run with --maxWorkers=1 against a dedicated loopback *_test database.
@@ -27,7 +27,7 @@ describe('Password sign-in races (PostgreSQL)', () => {
   let auth: AuthService;
   let sessions: AuthSessionService;
   let tokens: AuthTokenService;
-  let stringUtil: StringUtilService;
+  let passwordHash: PasswordHashService;
 
   beforeAll(async () => {
     assert(originalUrl, 'DATABASE_URL must be explicitly set.');
@@ -49,26 +49,28 @@ describe('Password sign-in races (PostgreSQL)', () => {
       JWT_REFRESH_SECRET: 'test-only-password-race-refresh-secret',
       TURNSTILE_SECRET_KEY: '',
     });
-    stringUtil = new StringUtilService();
+    passwordHash = new PasswordHashService();
     tokens = new AuthTokenService(new JwtService(), config);
     sessions = new AuthSessionService(prisma, tokens);
     const reset = new PasswordResetService(
       prisma,
       config,
-      stringUtil,
+      passwordHash,
       {} as never,
       tokens,
+      {} as never,
+      {} as never,
     );
     const employees = new EmployeesService(
       prisma,
       new PaginationUtilService(),
       {} as never,
-      stringUtil,
+      passwordHash,
     );
     auth = new AuthService(
       prisma,
       employees,
-      stringUtil,
+      passwordHash,
       config,
       {} as never,
       tokens,
@@ -126,10 +128,10 @@ describe('Password sign-in races (PostgreSQL)', () => {
     });
     const verified = Promise.withResolvers<boolean>();
     const resume = Promise.withResolvers<void>();
-    const compare: StringUtilService['compare'] =
-      stringUtil.compare.bind(stringUtil);
+    const compare: PasswordHashService['compare'] =
+      passwordHash.compare.bind(passwordHash);
     const compareSpy = jest
-      .spyOn(stringUtil, 'compare')
+      .spyOn(passwordHash, 'compare')
       .mockImplementationOnce(async (value, hash) => {
         const matches = await compare(value, hash);
         verified.resolve(matches);

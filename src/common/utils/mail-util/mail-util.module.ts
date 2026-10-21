@@ -23,6 +23,9 @@ import { MailUtilService } from './mail-util.service';
             host: config.get<string>('MAIL_HOST'),
             port: config.get<number>('MAIL_PORT'),
             secure: false,
+            connectionTimeout: 10_000,
+            greetingTimeout: 10_000,
+            socketTimeout: 20_000,
             auth: {
               user: config.get<string>('MAIL_USER'),
               pass: config.get<string>('MAIL_PASS'),
