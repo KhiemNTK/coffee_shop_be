@@ -21,6 +21,9 @@ const isRetryableError = (
   return (
     error instanceof Prisma.PrismaClientKnownRequestError &&
     (error.code === 'P2034' ||
+      // Raw queries expose PostgreSQL transaction conflicts through P2010.
+      (error.code === 'P2010' &&
+        (error.meta?.code === '40001' || error.meta?.code === '40P01')) ||
       (retryUniqueViolations && error.code === 'P2002'))
   );
 };

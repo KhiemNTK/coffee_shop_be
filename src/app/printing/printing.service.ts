@@ -18,6 +18,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type {
   AuthenticatedPrintDevice,
@@ -78,7 +79,7 @@ export class PrintingService {
     }
     const apiKey = this.generateApiKey();
     const device = await this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const defaultCount =
         dto.type === PrintDeviceType.RECEIPT
           ? await tx.printDevice.count({
@@ -156,7 +157,7 @@ export class PrintingService {
   ) {
     return this.transaction(async (tx) => {
       await this.lockDevice(tx, id);
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await tx.printDevice.findFirst({
         where: { id, deletedAt: null },
         include: {
@@ -241,7 +242,7 @@ export class PrintingService {
   async deleteDevice(id: string, employeeId: string) {
     await this.transaction(async (tx) => {
       await this.lockDevice(tx, id);
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const device = await tx.printDevice.findFirst({
         where: { id, deletedAt: null },
         select: { id: true },
@@ -284,7 +285,7 @@ export class PrintingService {
   async rotateDeviceKey(id: string, employeeId: string) {
     const apiKey = this.generateApiKey();
     await this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const updated = await tx.printDevice.updateMany({
         where: { id, deletedAt: null },
         data: { apiKeyHash: this.hash(apiKey) },
@@ -338,7 +339,7 @@ export class PrintingService {
 
   async retryJob(id: string, employeeId: string, dto: RetryPrintJobDto) {
     return this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const job = await tx.printJob.findUnique({
         where: { id },
         include: { kitchenTicket: { select: { availableAt: true } } },
@@ -891,19 +892,6 @@ export class PrintingService {
       WHERE "id" = ${deviceId}
       FOR UPDATE
     `);
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private audit(
