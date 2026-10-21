@@ -33,6 +33,7 @@ import {
   UpdateOrderItemStatusDto,
 } from './dto';
 import { OrdersService } from './orders.service';
+import { TakeawayService } from './takeaway.service';
 import { IDDto } from '../../common/dto/param.dto';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
@@ -43,7 +44,10 @@ import { ApiTags } from '@nestjs/swagger';
 @ApiTags('Orders')
 @Controller('orders')
 export class OrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(
+    private readonly ordersService: OrdersService,
+    private readonly takeaway: TakeawayService,
+  ) {}
 
   @Post('sessions')
   @RequirePermissions(PermissionKeys.ORDERS_SESSIONS_CREATE)
@@ -77,7 +81,7 @@ export class OrdersController {
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,
   ) {
-    return this.ordersService.issuePickupCode(id, employeeId);
+    return this.takeaway.issuePickupCode(id, employeeId);
   }
 
   @Post('takeaway/invoices/:id/pickup-code/rotate')
@@ -89,7 +93,7 @@ export class OrdersController {
     @Employee('employeeId') employeeId: string,
     @Body() { code }: PickupCurrentCodeDto,
   ) {
-    return this.ordersService.rotatePickupCode(id, code, employeeId);
+    return this.takeaway.rotatePickupCode(id, code, employeeId);
   }
 
   @Post('takeaway/invoices/:id/pickup-code/revoke')
@@ -100,7 +104,7 @@ export class OrdersController {
     @Employee('employeeId') employeeId: string,
     @Body() { code }: PickupCurrentCodeDto,
   ) {
-    return this.ordersService.revokePickupCode(id, code, employeeId);
+    return this.takeaway.revokePickupCode(id, code, employeeId);
   }
 
   @Post('takeaway/pickup/status')
@@ -109,7 +113,7 @@ export class OrdersController {
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   getPickupStatus(@Body() { invoiceId, code }: PickupCodeDto) {
-    return this.ordersService.getPickupStatus(invoiceId, code);
+    return this.takeaway.getPickupStatus(invoiceId, code);
   }
 
   @Post('takeaway/pickup/collect')
@@ -133,13 +137,13 @@ export class OrdersController {
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   submitTakeawayFeedback(@Body() dto: SubmitTakeawayFeedbackDto) {
-    return this.ordersService.submitTakeawayFeedback(dto);
+    return this.takeaway.submitTakeawayFeedback(dto);
   }
 
   @Get('takeaway/feedback/summary')
   @RequirePermissions(PermissionKeys.REPORTS_READ)
   getTakeawayFeedbackSummary(@Query() query: GetTakeawayFeedbackSummaryDto) {
-    return this.ordersService.getTakeawayFeedbackSummary(query);
+    return this.takeaway.getTakeawayFeedbackSummary(query);
   }
 
   @Get('takeaway/feedback/cases')
@@ -147,7 +151,7 @@ export class OrdersController {
   getOpenTakeawayFeedbackCases(
     @Query() query: GetOpenTakeawayFeedbackCasesDto,
   ) {
-    return this.ordersService.getOpenTakeawayFeedbackCases(query);
+    return this.takeaway.getOpenTakeawayFeedbackCases(query);
   }
 
   @Post('takeaway/feedback/:id/resolve')
@@ -158,13 +162,13 @@ export class OrdersController {
     @Employee('employeeId') employeeId: string,
     @Body() dto: ResolveTakeawayFeedbackDto,
   ) {
-    return this.ordersService.resolveTakeawayFeedback(id, employeeId, dto);
+    return this.takeaway.resolveTakeawayFeedback(id, employeeId, dto);
   }
 
   @Get('takeaway/feedback')
   @RequirePermissions(PermissionKeys.REPORTS_READ)
   getTakeawayFeedback(@Query() query: GetTakeawayFeedbackDto) {
-    return this.ordersService.getTakeawayFeedback(query);
+    return this.takeaway.getTakeawayFeedback(query);
   }
 
   @Get('sessions/:id')

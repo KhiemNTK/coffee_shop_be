@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OrdersService } from './orders.service';
+import { TakeawayService } from './takeaway.service';
 import { OrdersController } from './orders.controller';
 import { OrderPolicyService } from './order-policy.service';
 import { InventoryModule } from '../inventory/inventory.module';
@@ -15,7 +16,7 @@ import { PaginationUtilModule } from '../../common/utils/pagination-util/paginat
     PaginationUtilModule,
   ],
   controllers: [OrdersController],
-  providers: [OrdersService, OrderPolicyService],
+  providers: [OrdersService, OrderPolicyService, TakeawayService],
   exports: [OrdersService, OrderPolicyService],
 })
 export class OrdersModule {}

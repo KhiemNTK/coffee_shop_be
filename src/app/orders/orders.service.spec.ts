@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { OrdersService } from './orders.service';
+import { TakeawayService } from './takeaway.service';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { OutboxService } from '../durable/outbox.service';
 import { IdempotencyService } from '../durable/idempotency.service';
@@ -24,6 +25,7 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 
 describe('OrdersService', () => {
   let service: OrdersService;
+  let takeaway: TakeawayService;
   let prisma: any;
   let tx: any;
   let outbox: { enqueue: jest.Mock };
@@ -31,6 +33,8 @@ describe('OrdersService', () => {
   let inventoryConsumption: {
     consumeOrderItem: jest.Mock;
     recordWaste: jest.Mock;
+    reserveSession: jest.Mock;
+    releaseReservations: jest.Mock;
   };
   let cashierShiftLedger: { findOpenShiftId: jest.Mock };
   let kitchenRouting: { createTickets: jest.Mock };
@@ -191,6 +195,8 @@ describe('OrdersService', () => {
     inventoryConsumption = {
       consumeOrderItem: jest.fn().mockResolvedValue([]),
       recordWaste: jest.fn().mockResolvedValue([]),
+      reserveSession: jest.fn().mockResolvedValue(undefined),
+      releaseReservations: jest.fn().mockResolvedValue(undefined),
     };
     cashierShiftLedger = {
       findOpenShiftId: jest.fn().mockResolvedValue(null),
@@ -202,6 +208,7 @@ describe('OrdersService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         OrdersService,
+        TakeawayService,
         { provide: IdempotencyService, useValue: idempotency },
         {
           provide: PRISMA_SERVICE_TOKEN,
@@ -237,6 +244,7 @@ describe('OrdersService', () => {
     }).compile();
 
     service = module.get<OrdersService>(OrdersService);
+    takeaway = module.get(TakeawayService);
   });
 
   it('does not cancel an online session outside the online order workflow', async () => {
@@ -561,8 +569,11 @@ describe('OrdersService', () => {
     });
 
     it('issues a stable code and exposes only paid takeaway status', async () => {
-      const first = await service.issuePickupCode('invoice-id', 'employee-id');
-      const second = await service.issuePickupCode('invoice-id', 'employee-id');
+      const first = await takeaway.issuePickupCode('invoice-id', 'employee-id');
+      const second = await takeaway.issuePickupCode(
+        'invoice-id',
+        'employee-id',
+      );
       expect(first).toEqual(second);
       expect(currentInvoice.pickupCodeVersion).toBe(1);
       expect(tx.invoice.updateMany).toHaveBeenCalledTimes(1);
@@ -575,11 +586,12 @@ describe('OrdersService', () => {
       });
       expect(first.code).toMatch(/^[A-Za-z0-9_-]{43}$/);
       await expect(
-        service.getPickupStatus('invoice-id', first.code),
+        takeaway.getPickupStatus('invoice-id', first.code),
       ).resolves.toEqual({
         invoiceId: 'invoice-id',
         status: 'PREPARING',
         expiresAt: first.expiresAt,
+        feedback: null,
         items: [
           {
             id: 'item-id',
@@ -597,13 +609,13 @@ describe('OrdersService', () => {
         ],
       };
       await expect(
-        service.getPickupStatus('invoice-id', first.code),
+        takeaway.getPickupStatus('invoice-id', first.code),
       ).resolves.toMatchObject({ status: 'READY' });
     });
 
     it('rejects a wrong code without changing business state', async () => {
       await expect(
-        service.getPickupStatus('invoice-id', 'A'.repeat(43)),
+        takeaway.getPickupStatus('invoice-id', 'A'.repeat(43)),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(prisma.invoice.findUnique).toHaveBeenCalledTimes(1);
       expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
@@ -617,21 +629,24 @@ describe('OrdersService', () => {
     ])('does not issue a code for a %s invoice', async (paymentStatus) => {
       currentInvoice = { ...currentInvoice, paymentStatus };
       await expect(
-        service.issuePickupCode('invoice-id', 'employee-id'),
+        takeaway.issuePickupCode('invoice-id', 'employee-id'),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(tx.invoice.updateMany).not.toHaveBeenCalled();
     });
 
     it('expires 72 hours after issuance and can issue a new code', async () => {
-      const first = await service.issuePickupCode('invoice-id', 'employee-id');
+      const first = await takeaway.issuePickupCode('invoice-id', 'employee-id');
       currentInvoice = {
         ...currentInvoice,
         pickupCodeIssuedAt: new Date(Date.now() - 73 * 60 * 60 * 1000),
       };
       await expect(
-        service.getPickupStatus('invoice-id', first.code),
+        takeaway.getPickupStatus('invoice-id', first.code),
       ).rejects.toBeInstanceOf(NotFoundException);
-      const second = await service.issuePickupCode('invoice-id', 'employee-id');
+      const second = await takeaway.issuePickupCode(
+        'invoice-id',
+        'employee-id',
+      );
       expect(second.code).not.toBe(first.code);
       expect(currentInvoice.pickupCodeVersion).toBe(2);
     });
@@ -642,54 +657,57 @@ describe('OrdersService', () => {
         pickupCodeVersion: null,
         pickupCodeIssuedAt: null,
       };
-      const legacy = await service.issuePickupCode('invoice-id', 'employee-id');
+      const legacy = await takeaway.issuePickupCode(
+        'invoice-id',
+        'employee-id',
+      );
       expect(tx.invoice.updateMany).not.toHaveBeenCalled();
       await expect(
-        service.getPickupStatus('invoice-id', legacy.code),
+        takeaway.getPickupStatus('invoice-id', legacy.code),
       ).resolves.toMatchObject({ status: 'PREPARING' });
 
-      const rotated = await service.rotatePickupCode(
+      const rotated = await takeaway.rotatePickupCode(
         'invoice-id',
         legacy.code,
         'employee-id',
       );
       expect(rotated.code).not.toBe(legacy.code);
       await expect(
-        service.getPickupStatus('invoice-id', legacy.code),
+        takeaway.getPickupStatus('invoice-id', legacy.code),
       ).rejects.toBeInstanceOf(NotFoundException);
       await expect(
-        service.getPickupStatus('invoice-id', rotated.code),
+        takeaway.getPickupStatus('invoice-id', rotated.code),
       ).resolves.toMatchObject({ status: 'PREPARING' });
     });
 
     it('rotates, revokes and reissues only the current code', async () => {
-      const first = await service.issuePickupCode('invoice-id', 'employee-id');
-      const rotated = await service.rotatePickupCode(
+      const first = await takeaway.issuePickupCode('invoice-id', 'employee-id');
+      const rotated = await takeaway.rotatePickupCode(
         'invoice-id',
         first.code,
         'employee-id',
       );
       expect(rotated.code).not.toBe(first.code);
       await expect(
-        service.rotatePickupCode('invoice-id', first.code, 'employee-id'),
+        takeaway.rotatePickupCode('invoice-id', first.code, 'employee-id'),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(currentInvoice.pickupCodeVersion).toBe(2);
       await expect(
-        service.getPickupStatus('invoice-id', first.code),
+        takeaway.getPickupStatus('invoice-id', first.code),
       ).rejects.toBeInstanceOf(NotFoundException);
 
       await expect(
-        service.revokePickupCode('invoice-id', rotated.code, 'employee-id'),
+        takeaway.revokePickupCode('invoice-id', rotated.code, 'employee-id'),
       ).resolves.toEqual({ revoked: true });
       await expect(
-        service.getPickupStatus('invoice-id', rotated.code),
+        takeaway.getPickupStatus('invoice-id', rotated.code),
       ).rejects.toBeInstanceOf(NotFoundException);
       await expect(
-        service.revokePickupCode('invoice-id', rotated.code, 'employee-id'),
+        takeaway.revokePickupCode('invoice-id', rotated.code, 'employee-id'),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(tx.invoice.updateMany).toHaveBeenCalledTimes(3);
 
-      const reissued = await service.issuePickupCode(
+      const reissued = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -707,26 +725,26 @@ describe('OrdersService', () => {
     it('does not issue a code for an inactive employee', async () => {
       tx.employee.findFirst.mockResolvedValue(null);
       await expect(
-        service.issuePickupCode('invoice-id', 'employee-id'),
+        takeaway.issuePickupCode('invoice-id', 'employee-id'),
       ).rejects.toThrow('Employee is inactive or not found.');
       expect(tx.invoice.findUnique).not.toHaveBeenCalled();
     });
 
     it('does not audit or return a code after a concurrent change', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
       tx.actionLog.create.mockClear();
       tx.invoice.updateMany.mockResolvedValue({ count: 0 });
       await expect(
-        service.rotatePickupCode('invoice-id', code, 'employee-id'),
+        takeaway.rotatePickupCode('invoice-id', code, 'employee-id'),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(tx.actionLog.create).not.toHaveBeenCalled();
     });
 
     it('hands off only a paid item from the matching invoice once', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -794,7 +812,7 @@ describe('OrdersService', () => {
     });
 
     it('rejects a valid code paired with an item from another invoice', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -827,7 +845,7 @@ describe('OrdersService', () => {
     });
 
     it('rejects a refunded item even with a previously valid code', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -860,13 +878,13 @@ describe('OrdersService', () => {
     });
 
     it('requires collection and a valid code before accepting feedback', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
       const input = { invoiceId: 'invoice-id', code, rating: 5 };
       await expect(
-        service.submitTakeawayFeedback(input),
+        takeaway.submitTakeawayFeedback(input),
       ).rejects.toBeInstanceOf(ConflictException);
       currentInvoice = {
         ...currentInvoice,
@@ -876,13 +894,13 @@ describe('OrdersService', () => {
         })),
       };
       await expect(
-        service.submitTakeawayFeedback({ ...input, code: 'A'.repeat(43) }),
+        takeaway.submitTakeawayFeedback({ ...input, code: 'A'.repeat(43) }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(tx.takeawayFeedback.createMany).not.toHaveBeenCalled();
     });
 
     it('makes identical feedback retries idempotent and rejects changes', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -907,10 +925,10 @@ describe('OrdersService', () => {
         rating: 5,
         comment: ' Great ',
       };
-      await expect(service.submitTakeawayFeedback(input)).resolves.toEqual(
+      await expect(takeaway.submitTakeawayFeedback(input)).resolves.toEqual(
         stored,
       );
-      await expect(service.submitTakeawayFeedback(input)).resolves.toEqual(
+      await expect(takeaway.submitTakeawayFeedback(input)).resolves.toEqual(
         stored,
       );
       expect(tx.takeawayFeedback.createMany).toHaveBeenCalledWith({
@@ -922,12 +940,12 @@ describe('OrdersService', () => {
         skipDuplicates: true,
       });
       await expect(
-        service.submitTakeawayFeedback({ ...input, rating: 1 }),
+        takeaway.submitTakeawayFeedback({ ...input, rating: 1 }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('denies feedback after the invoice is refunded', async () => {
-      const { code } = await service.issuePickupCode(
+      const { code } = await takeaway.issuePickupCode(
         'invoice-id',
         'employee-id',
       );
@@ -940,7 +958,7 @@ describe('OrdersService', () => {
         })),
       };
       await expect(
-        service.submitTakeawayFeedback({
+        takeaway.submitTakeawayFeedback({
           invoiceId: 'invoice-id',
           code,
           rating: 5,
@@ -953,7 +971,7 @@ describe('OrdersService', () => {
         { rating: 4, _count: { _all: 1 } },
         { rating: 5, _count: { _all: 1 } },
       ]);
-      const summary = await service.getTakeawayFeedbackSummary({
+      const summary = await takeaway.getTakeawayFeedbackSummary({
         from: undefined,
         to: undefined,
       });
@@ -974,7 +992,7 @@ describe('OrdersService', () => {
       prisma.takeawayFeedback.findMany.mockResolvedValue([
         { id: 'feedback-id' },
       ]);
-      const list = await service.getTakeawayFeedback({
+      const list = await takeaway.getTakeawayFeedback({
         from: undefined,
         to: undefined,
         page: 1,
@@ -1000,7 +1018,7 @@ describe('OrdersService', () => {
       prisma.takeawayFeedback.findMany.mockResolvedValue([
         { id: 'feedback-id' },
       ]);
-      const page = await service.getOpenTakeawayFeedbackCases({
+      const page = await takeaway.getOpenTakeawayFeedbackCases({
         page: 1,
         itemPerPage: 20,
       });
@@ -1030,8 +1048,11 @@ describe('OrdersService', () => {
         Object.assign(stored, data);
         return { count: 1 };
       });
-      const input = { resolutionNote: 'Discussed at closing shift' };
-      const resolved = await service.resolveTakeawayFeedback(
+      const input = {
+        resolutionNote: 'Discussed at closing shift',
+        customerReply: 'We contacted you and resolved the preparation issue.',
+      };
+      const resolved = await takeaway.resolveTakeawayFeedback(
         stored.id,
         'employee-id',
         input,
@@ -1040,6 +1061,7 @@ describe('OrdersService', () => {
         id: stored.id,
         resolvedById: 'employee-id',
         resolutionNote: input.resolutionNote,
+        customerReply: input.customerReply,
       });
       expect(tx.actionLog.create).toHaveBeenCalledWith({
         data: {
@@ -1049,12 +1071,18 @@ describe('OrdersService', () => {
         },
       });
       await expect(
-        service.resolveTakeawayFeedback(stored.id, 'employee-id', input),
+        takeaway.resolveTakeawayFeedback(stored.id, 'employee-id', input),
       ).resolves.toEqual(resolved);
       expect(tx.takeawayFeedback.updateMany).toHaveBeenCalledTimes(1);
       expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
       await expect(
-        service.resolveTakeawayFeedback(stored.id, 'employee-id', {
+        takeaway.resolveTakeawayFeedback(stored.id, 'employee-id', {
+          ...input,
+          customerReply: 'A different public commitment',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        takeaway.resolveTakeawayFeedback(stored.id, 'employee-id', {
           resolutionNote: 'Different reason',
         }),
       ).rejects.toBeInstanceOf(ConflictException);
@@ -1063,7 +1091,7 @@ describe('OrdersService', () => {
     it('rejects missing, high-rated, inactive, and concurrently resolved feedback', async () => {
       tx.takeawayFeedback.findUnique.mockResolvedValue(null);
       await expect(
-        service.resolveTakeawayFeedback('missing', 'employee-id', {
+        takeaway.resolveTakeawayFeedback('missing', 'employee-id', {
           resolutionNote: 'Checked',
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
@@ -1073,7 +1101,7 @@ describe('OrdersService', () => {
         resolvedAt: null,
       });
       await expect(
-        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+        takeaway.resolveTakeawayFeedback('feedback-id', 'employee-id', {
           resolutionNote: 'Checked',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -1085,14 +1113,14 @@ describe('OrdersService', () => {
       });
       tx.takeawayFeedback.updateMany.mockResolvedValue({ count: 0 });
       await expect(
-        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+        takeaway.resolveTakeawayFeedback('feedback-id', 'employee-id', {
           resolutionNote: 'Checked',
         }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(tx.actionLog.create).not.toHaveBeenCalled();
       tx.employee.findFirst.mockResolvedValue(null);
       await expect(
-        service.resolveTakeawayFeedback('feedback-id', 'employee-id', {
+        takeaway.resolveTakeawayFeedback('feedback-id', 'employee-id', {
           resolutionNote: 'Checked',
         }),
       ).rejects.toThrow('Employee is inactive or not found.');

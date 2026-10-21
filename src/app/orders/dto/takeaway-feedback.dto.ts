@@ -45,5 +45,8 @@ export class GetOpenTakeawayFeedbackCasesDto extends createZodDto(
 ) {}
 
 export class ResolveTakeawayFeedbackDto extends createZodDto(
-  z.object({ resolutionNote: z.string().trim().min(1).max(500) }),
+  z.object({
+    resolutionNote: z.string().trim().min(1).max(500),
+    customerReply: z.string().trim().min(1).max(500).optional(),
+  }),
 ) {}

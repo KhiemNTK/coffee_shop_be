@@ -6,6 +6,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { ServeStatus, SessionStatus } from '@prisma/client';
 import { AppModule } from '../src/app/app.module';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { TakeawayService } from '../src/app/orders/takeaway.service';
 import { KitchenService } from '../src/app/kitchen/kitchen.service';
 import { DailySalesCloseService } from '../src/app/reports/daily-sales-close.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -17,6 +18,7 @@ describe('Paid order handoff (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
   let orders: OrdersService;
+  let takeaway: TakeawayService;
   let kitchen: KitchenService;
   let dailyClose: DailySalesCloseService;
   let prefix: string;
@@ -33,6 +35,7 @@ describe('Paid order handoff (e2e)', () => {
     app = expressApp;
     prisma = module.get(PrismaService);
     orders = module.get(OrdersService);
+    takeaway = module.get(TakeawayService);
     kitchen = module.get(KitchenService);
     dailyClose = module.get(DailySalesCloseService);
     prefix = module.get(ConfigService).get<string>('APP_PREFIX', '/api/v1');
@@ -206,9 +209,9 @@ describe('Paid order handoff (e2e)', () => {
       state: 'COMPLETED',
     });
 
-    const pickup = await orders.issuePickupCode(ids.invoice, ids.employee);
+    const pickup = await takeaway.issuePickupCode(ids.invoice, ids.employee);
     expect(pickup.code).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(await orders.issuePickupCode(ids.invoice, ids.employee)).toEqual(
+    expect(await takeaway.issuePickupCode(ids.invoice, ids.employee)).toEqual(
       pickup,
     );
     const publicStatus = await request(app.getHttpServer())
@@ -233,7 +236,7 @@ describe('Paid order handoff (e2e)', () => {
       .send({ invoiceId: ids.invoice, code: pickup.code, rating: 5 })
       .expect(409);
 
-    const rotated = await orders.rotatePickupCode(
+    const rotated = await takeaway.rotatePickupCode(
       ids.invoice,
       pickup.code,
       ids.employee,
@@ -252,18 +255,18 @@ describe('Paid order handoff (e2e)', () => {
       ),
     ).rejects.toThrow('Pickup is no longer available.');
     await expect(
-      orders.rotatePickupCode(ids.invoice, pickup.code, ids.employee),
+      takeaway.rotatePickupCode(ids.invoice, pickup.code, ids.employee),
     ).rejects.toThrow('Pickup code changed or expired.');
-    await orders.revokePickupCode(ids.invoice, rotated.code, ids.employee);
+    await takeaway.revokePickupCode(ids.invoice, rotated.code, ids.employee);
     await request(app.getHttpServer())
       .post(`${prefix}/orders/takeaway/pickup/status`)
       .send({ invoiceId: ids.invoice, code: rotated.code })
       .expect(404);
-    const reissued = await orders.issuePickupCode(ids.invoice, ids.employee);
+    const reissued = await takeaway.issuePickupCode(ids.invoice, ids.employee);
     expect(reissued.code).not.toBe(rotated.code);
     const rotations = await Promise.allSettled([
-      orders.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
-      orders.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
+      takeaway.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
+      takeaway.rotatePickupCode(ids.invoice, reissued.code, ids.employee),
     ]);
     expect(
       rotations.filter((result) => result.status === 'fulfilled'),
@@ -271,7 +274,10 @@ describe('Paid order handoff (e2e)', () => {
     expect(
       rotations.filter((result) => result.status === 'rejected'),
     ).toHaveLength(1);
-    const currentCode = await orders.issuePickupCode(ids.invoice, ids.employee);
+    const currentCode = await takeaway.issuePickupCode(
+      ids.invoice,
+      ids.employee,
+    );
     expect(currentCode.code).not.toBe(reissued.code);
 
     await prisma.invoice.update({
@@ -360,7 +366,7 @@ describe('Paid order handoff (e2e)', () => {
         data: { rating: 6 },
       }),
     ).rejects.toThrow();
-    const feedbackList = await orders.getTakeawayFeedback({
+    const feedbackList = await takeaway.getTakeawayFeedback({
       from: undefined,
       to: undefined,
       page: 1,
@@ -377,7 +383,7 @@ describe('Paid order handoff (e2e)', () => {
       where: { invoiceId: ids.invoice },
       select: { id: true },
     });
-    const openCases = await orders.getOpenTakeawayFeedbackCases({
+    const openCases = await takeaway.getOpenTakeawayFeedbackCases({
       page: 1,
       itemPerPage: 20,
     });
@@ -387,8 +393,10 @@ describe('Paid order handoff (e2e)', () => {
     const notes = ['Reviewed with bar staff', 'Reviewed with shift lead'];
     const resolutions = await Promise.allSettled(
       notes.map((resolutionNote) =>
-        orders.resolveTakeawayFeedback(feedbackId, ids.employee, {
+        takeaway.resolveTakeawayFeedback(feedbackId, ids.employee, {
           resolutionNote,
+          customerReply:
+            'We contacted you about the delay. Thank you for your feedback.',
         }),
       ),
     );
@@ -410,10 +418,26 @@ describe('Paid order handoff (e2e)', () => {
     expect(savedFeedback.resolvedById).toBe(ids.employee);
     expect(notes).toContain(savedFeedback.resolutionNote);
     await expect(
-      orders.resolveTakeawayFeedback(savedFeedback.id, ids.employee, {
+      takeaway.resolveTakeawayFeedback(savedFeedback.id, ids.employee, {
         resolutionNote: savedFeedback.resolutionNote!,
+        customerReply: savedFeedback.customerReply!,
       }),
     ).resolves.toMatchObject({ id: savedFeedback.id });
+    const feedbackStatus = await request(app.getHttpServer())
+      .post(`${prefix}/orders/takeaway/pickup/status`)
+      .send({ invoiceId: ids.invoice, code: currentCode.code })
+      .expect(200);
+    expect(feedbackStatus.body.data.feedback).toMatchObject({
+      id: savedFeedback.id,
+      customerReply: savedFeedback.customerReply,
+      resolvedAt: savedFeedback.resolvedAt!.toISOString(),
+    });
+    expect(feedbackStatus.body.data.feedback).not.toHaveProperty(
+      'resolutionNote',
+    );
+    expect(feedbackStatus.body.data.feedback).not.toHaveProperty(
+      'resolvedById',
+    );
     expect(
       await prisma.actionLog.count({
         where: {
@@ -422,7 +446,7 @@ describe('Paid order handoff (e2e)', () => {
         },
       }),
     ).toBe(1);
-    const remainingCases = await orders.getOpenTakeawayFeedbackCases({
+    const remainingCases = await takeaway.getOpenTakeawayFeedbackCases({
       page: 1,
       itemPerPage: 20,
     });

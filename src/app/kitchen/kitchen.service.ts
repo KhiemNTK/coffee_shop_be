@@ -3,13 +3,13 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, PrintDeviceType, ServeStatus } from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type {
   ExtendedPrismaTransactionClient,
@@ -61,7 +61,7 @@ export class KitchenService {
 
   createStation(employeeId: string, dto: CreateKitchenStationDto) {
     return this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       if (dto.printDeviceId) {
         await this.assertKitchenDevice(tx, dto.printDeviceId);
       }
@@ -129,7 +129,7 @@ export class KitchenService {
 
   updateStation(id: string, employeeId: string, dto: UpdateKitchenStationDto) {
     return this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const station = await tx.kitchenStation.findFirst({
         where: { id, deletedAt: null },
       });
@@ -163,7 +163,7 @@ export class KitchenService {
 
   async deleteStation(id: string, employeeId: string) {
     await this.transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const station = await tx.kitchenStation.findFirst({
         where: { id, deletedAt: null },
         select: { id: true },
@@ -394,19 +394,6 @@ export class KitchenService {
       throw new ConflictException(
         'An active kitchen print device is required.',
       );
-    }
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
     }
   }
 
