@@ -81,7 +81,10 @@ export class OnlineOrderIntakeService {
   ) {
     const status = await this.getStatus(tx);
     if (!status.acceptingOrders) {
-      throw new ConflictException('Online ordering is temporarily paused.');
+      throw new ConflictException({
+        code: 'ONLINE_INTAKE_PAUSED',
+        message: 'Online ordering is temporarily paused.',
+      });
     }
     if (!scheduled && !this.isAsapOpen()) {
       throw new ConflictException({
@@ -128,9 +131,10 @@ export class OnlineOrderIntakeService {
         }
         const before = await this.getStatus(tx);
         if (before.version !== expectedVersion) {
-          throw new ConflictException(
-            'Online intake was modified by another request.',
-          );
+          throw new ConflictException({
+            code: 'ONLINE_INTAKE_CHANGED',
+            message: 'Online intake was modified by another request.',
+          });
         }
         const data = { value, updatedById: employeeId };
         if (expectedVersion === 0) {
@@ -153,9 +157,10 @@ export class OnlineOrderIntakeService {
             data: { ...data, version: { increment: 1 } },
           });
           if (changed.count !== 1)
-            throw new ConflictException(
-              'Online intake was modified by another request.',
-            );
+            throw new ConflictException({
+              code: 'ONLINE_INTAKE_CHANGED',
+              message: 'Online intake was modified by another request.',
+            });
         }
         const setting = await tx.systemSetting.findUniqueOrThrow({
           where: { key: ONLINE_ORDER_INTAKE_SETTING_KEY },

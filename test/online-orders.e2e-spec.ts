@@ -30,6 +30,7 @@ import { vietnamDate } from '../src/app/online-orders/pickup-schedule';
 import { MenuService } from '../src/app/menu/menu.service';
 import { OrdersService } from '../src/app/orders/orders.service';
 import { InvoicesService } from '../src/app/invoices/invoices.service';
+import { InventoryConsumptionService } from '../src/app/inventory/services/inventory-consumption.service';
 import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
 import { CashierShiftsService } from '../src/app/cashier-shifts/cashier-shifts.service';
 import { ReportsService } from '../src/app/reports/reports.service';
@@ -151,6 +152,13 @@ describe('Remote takeaway orders (e2e)', () => {
         select: { id: true },
       });
       const orderItemIds = orderItems.map((item) => item.id);
+      await prisma
+        .getExtendedClient()
+        .$transaction((tx) =>
+          app
+            .get(InventoryConsumptionService)
+            .releaseReservations(tx, orderItemIds),
+        );
       const invoices = await prisma.invoice.findMany({
         where: { orderSessionId: { in: sessionIds } },
         select: { id: true },
@@ -728,6 +736,7 @@ describe('Remote takeaway orders (e2e)', () => {
     ids.fund = fund.id;
     ids.shift = (
       await shifts.open(ids.employee, {
+        idempotencyKey: randomUUID(),
         fundId: fund.id,
         startingCash: '0',
       })

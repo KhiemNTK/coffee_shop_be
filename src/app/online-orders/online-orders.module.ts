@@ -23,5 +23,6 @@ import { TelegramNotificationsService } from './telegram-notifications.service';
     TelegramNotificationsService,
     OnlineOrderIntakeService,
   ],
+  exports: [OnlineOrdersService],
 })
 export class OnlineOrdersModule {}

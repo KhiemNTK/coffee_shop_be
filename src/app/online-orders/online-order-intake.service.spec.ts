@@ -84,6 +84,10 @@ describe('OnlineOrderIntakeService', () => {
     await expect(service.assertAccepting(tx as never)).rejects.toBeInstanceOf(
       ConflictException,
     );
+    await expect(service.assertAccepting(tx as never)).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'ONLINE_INTAKE_PAUSED' },
+    });
   });
 
   it('rejects inactive actors, stale versions, and unbounded pauses before writing', async () => {
@@ -93,7 +97,7 @@ describe('OnlineOrderIntakeService', () => {
     );
     await expect(
       service.update('employee', { ...pause, expectedVersion: 1 }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({ response: { code: 'ONLINE_INTAKE_CHANGED' } });
     await expect(
       service.update('employee', {
         ...pause,

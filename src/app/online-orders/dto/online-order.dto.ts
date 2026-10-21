@@ -15,34 +15,39 @@ const PublicOrderItemSchema = z.object({
     .optional(),
 });
 
+const OnlineOrderItemsSchema = z
+  .array(PublicOrderItemSchema)
+  .min(1)
+  .max(20)
+  .refine(
+    (items) => items.reduce((sum, item) => sum + item.quantity, 0) <= 50,
+    'An online order cannot contain more than 50 units.',
+  );
+
+export class QuoteOnlineOrderDto extends createZodDto(
+  z.object({ items: OnlineOrderItemsSchema }).strict(),
+) {}
+
 export class CreateOnlineOrderDto extends createZodDto(
-  z
-    .object({
-      clientRequestId: z.uuid(),
-      turnstileToken: z.string().min(1).max(2048).optional(),
-      pickupName: z.string().trim().min(2).max(80),
-      phoneNumber: z
-        .string()
-        .trim()
-        .regex(/^\+?[0-9]{8,15}$/, 'Invalid phone number'),
-      pickupAt: z.iso
-        .datetime({ offset: true })
-        .transform((value) => new Date(value))
-        .optional(),
-      maxSubtotal: z
-        .string()
-        .trim()
-        .regex(/^(0|[1-9]\d{0,15})(\.\d{1,2})?$/)
-        .optional(),
-      items: z.array(PublicOrderItemSchema).min(1).max(20),
-    })
-    .refine(
-      ({ items }) => items.reduce((sum, item) => sum + item.quantity, 0) <= 50,
-      {
-        message: 'An online order cannot contain more than 50 units.',
-        path: ['items'],
-      },
-    ),
+  z.object({
+    clientRequestId: z.uuid(),
+    turnstileToken: z.string().min(1).max(2048).optional(),
+    pickupName: z.string().trim().min(2).max(80),
+    phoneNumber: z
+      .string()
+      .trim()
+      .regex(/^\+?[0-9]{8,15}$/, 'Invalid phone number'),
+    pickupAt: z.iso
+      .datetime({ offset: true })
+      .transform((value) => new Date(value))
+      .optional(),
+    maxSubtotal: z
+      .string()
+      .trim()
+      .regex(/^(0|[1-9]\d{0,15})(\.\d{1,2})?$/)
+      .optional(),
+    items: OnlineOrderItemsSchema,
+  }),
 ) {}
 
 const OnlineOrderAccessSchema = z.object({

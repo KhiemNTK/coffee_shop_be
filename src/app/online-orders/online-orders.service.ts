@@ -27,11 +27,16 @@ import {
 } from '../../common/prisma/prisma.service';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
-import type { ExtendedPrismaTransactionClient } from '../../common/types';
+import type {
+  CustomerReorderSource,
+  ExtendedPrismaTransactionClient,
+  InventoryRequirement,
+} from '../../common/types';
 import { ONLINE_ORDER_NO_SHOW_GRACE_MS } from '../../common/consts/online-order-settings';
 import { TurnstileService } from '../auth/turnstile.service';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OrdersService } from '../orders/orders.service';
+import { PUBLIC_TAKEAWAY_FEEDBACK_SELECT } from '../orders/takeaway-feedback.select';
 import { InvoicesService } from '../invoices/invoices.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import { IdempotencyService } from '../durable/idempotency.service';
@@ -48,6 +53,7 @@ import {
   CollectOnlineOrderDto,
   GetPendingOnlineOrdersDto,
   OnlineOrderAccessDto,
+  QuoteOnlineOrderDto,
   ReorderTemplateDto,
   RevokeReorderKeyDto,
 } from './dto';
@@ -68,6 +74,7 @@ const publicRequestSelect = {
   id: true,
   requestHash: true,
   reorderNonce: true,
+  customerId: true,
   status: true,
   createdAt: true,
   expiresAt: true,
@@ -128,7 +135,50 @@ export class OnlineOrdersService {
       .digest();
   }
 
-  async createPublicRequest(dto: CreateOnlineOrderDto, ipAddress?: string) {
+  async quoteBasket({ items }: QuoteOnlineOrderDto) {
+    const ids = [...new Set(items.map((item) => item.menuItemId))];
+    const menuById = await this.availableMenuItems(ids);
+    if (menuById.size !== ids.length)
+      throw new NotFoundException('One or more menu items are unavailable.');
+    const planned = items.map((item) => ({
+      ...resolveMenuSelection(menuById.get(item.menuItemId)!, item.optionIds),
+      menuItemId: item.menuItemId,
+      quantity: item.quantity,
+    }));
+    const canFulfill = await this.inventoryConsumption.canFulfill(
+      this.prisma,
+      planned.flatMap((item) =>
+        item.recipe.map((ingredient) => ({
+          inventoryItemId: ingredient.inventoryItemId,
+          quantity: ingredient.quantityPerItem.mul(item.quantity),
+        })),
+      ),
+    );
+    return {
+      canFulfill,
+      reason: canFulfill ? null : 'INVENTORY_INSUFFICIENT_STOCK',
+      subtotal: planned
+        .reduce(
+          (sum, item) => sum.add(item.unitPrice.mul(item.quantity)),
+          new Prisma.Decimal(0),
+        )
+        .toFixed(2),
+      items: planned.map(
+        ({ menuItemId, quantity, unitPrice, selectedOptions }) => ({
+          menuItemId,
+          quantity,
+          unitPrice: unitPrice.toFixed(2),
+          selectedOptions,
+        }),
+      ),
+    };
+  }
+
+  async createPublicRequest(
+    dto: CreateOnlineOrderDto,
+    ipAddress?: string,
+    customerId?: string,
+  ) {
     const maxSubtotal = dto.maxSubtotal
       ? new Prisma.Decimal(dto.maxSubtotal).toFixed(2)
       : undefined;
@@ -140,6 +190,7 @@ export class OnlineOrdersService {
           pickupAt: dto.pickupAt?.toISOString(),
           maxSubtotal,
           items: dto.items,
+          ...(customerId ? { customerId } : {}),
         }),
       )
       .digest('hex');
@@ -147,7 +198,7 @@ export class OnlineOrdersService {
       where: { clientRequestId: dto.clientRequestId },
       select: publicRequestSelect,
     });
-    if (existing) return this.replay(existing, requestHash);
+    if (existing) return this.replay(existing, requestHash, customerId);
     await this.turnstile.verify(dto.turnstileToken, ipAddress, 'online_order');
     if (dto.pickupAt)
       assertPickupAt(dto.pickupAt, this.pickupSchedule, new Date());
@@ -157,9 +208,16 @@ export class OnlineOrdersService {
     if (menuById.size !== menuItemIds.length) {
       throw new NotFoundException('One or more menu items are unavailable.');
     }
+    const requirements: InventoryRequirement[] = [];
     const items = dto.items.map((item, index) => {
       const menuItem = menuById.get(item.menuItemId)!;
       const selection = resolveMenuSelection(menuItem, item.optionIds);
+      requirements.push(
+        ...selection.recipe.map((ingredient) => ({
+          inventoryItemId: ingredient.inventoryItemId,
+          quantity: ingredient.quantityPerItem.mul(item.quantity),
+        })),
+      );
       return {
         lineNumber: index + 1,
         menuItemId: item.menuItemId,
@@ -179,6 +237,13 @@ export class OnlineOrdersService {
         'Order price increased; review the current quote.',
       );
     }
+    if (
+      !(await this.inventoryConsumption.canFulfill(this.prisma, requirements))
+    )
+      throw new ConflictException({
+        code: 'INVENTORY_INSUFFICIENT_STOCK',
+        message: 'Insufficient available ingredients. Review the order.',
+      });
 
     try {
       const created = await runSerializableTransaction(
@@ -189,11 +254,20 @@ export class OnlineOrdersService {
             select: publicRequestSelect,
           });
           if (replay) return replay;
+          if (
+            customerId &&
+            !(await tx.customer.findFirst({
+              where: { id: customerId, isActive: true, deletedAt: null },
+              select: { id: true },
+            }))
+          )
+            throw new UnauthorizedException('Customer is inactive.');
           await this.intake.assertAccepting(tx, Boolean(dto.pickupAt));
           return tx.onlineOrderRequest.create({
             data: {
               clientRequestId: dto.clientRequestId,
               requestHash,
+              customerId,
               reorderNonce: randomBytes(32).toString('hex'),
               pickupName: dto.pickupName,
               phoneNumber: dto.phoneNumber,
@@ -207,7 +281,7 @@ export class OnlineOrdersService {
         },
         { loggerContext: 'Online order submission' },
       );
-      return this.replay(created, requestHash);
+      return this.replay(created, requestHash, customerId);
     } catch (error) {
       if (
         !(error instanceof Prisma.PrismaClientKnownRequestError) ||
@@ -220,7 +294,7 @@ export class OnlineOrdersService {
         select: publicRequestSelect,
       });
       if (!duplicate) throw error;
-      return this.replay(duplicate, requestHash);
+      return this.replay(duplicate, requestHash, customerId);
     }
   }
 
@@ -260,8 +334,50 @@ export class OnlineOrdersService {
 
   async trackPublicRequest({ requestId, accessToken }: OnlineOrderAccessDto) {
     this.assertAccess(requestId, accessToken);
+    return this.readTrackedRequest(requestId);
+  }
+
+  async getCustomerOrders(
+    customerId: string,
+    query: Pick<GetPendingOnlineOrdersDto, 'page' | 'itemPerPage'>,
+  ) {
+    const where = { customerId };
+    const paging = this.pagination.paging(query);
+    const totalItems = await this.prisma.onlineOrderRequest.count({ where });
+    const list = await this.prisma.onlineOrderRequest.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: paging.skip,
+      take: paging.itemPerPage,
+      select: {
+        id: true,
+        status: true,
+        createdAt: true,
+        expiresAt: true,
+        pickupAt: true,
+        quotedSubtotal: true,
+        _count: { select: { items: true } },
+      },
+    });
+    return this.pagination.paging({ ...query, totalItems }).format(
+      list.map((row) => ({
+        ...row,
+        status:
+          row.status === OnlineOrderStatus.PENDING &&
+          row.expiresAt <= new Date()
+            ? 'EXPIRED'
+            : row.status,
+      })),
+    );
+  }
+
+  getCustomerOrder(customerId: string, requestId: string) {
+    return this.readTrackedRequest(requestId, customerId);
+  }
+
+  private async readTrackedRequest(requestId: string, customerId?: string) {
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: { id: requestId },
+      where: { id: requestId, ...(customerId ? { customerId } : {}) },
       select: {
         id: true,
         status: true,
@@ -276,6 +392,20 @@ export class OnlineOrdersService {
         items: publicRequestSelect.items,
         orderSession: {
           select: {
+            invoices: {
+              select: {
+                id: true,
+                takeawayFeedback: { select: PUBLIC_TAKEAWAY_FEEDBACK_SELECT },
+                ...(customerId
+                  ? {
+                      invoiceNumber: true,
+                      totalAmount: true,
+                      paymentStatus: true,
+                      createdAt: true,
+                    }
+                  : {}),
+              },
+            },
             orderItems: {
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
               where: { replacementRemake: { is: null } },
@@ -295,7 +425,8 @@ export class OnlineOrdersService {
     });
     if (
       !request ||
-      onlineOrderAccessExpiresAt(request).getTime() <= Date.now()
+      (!customerId &&
+        onlineOrderAccessExpiresAt(request).getTime() <= Date.now())
     ) {
       throw new NotFoundException('Order request not found.');
     }
@@ -327,6 +458,24 @@ export class OnlineOrdersService {
       isPaid:
         activeItems.length > 0 && activeItems.every((item) => item.isPaid),
       orderItems,
+      feedback:
+        request.orderSession?.invoices?.flatMap((invoice) =>
+          invoice.takeawayFeedback
+            ? [{ invoiceId: invoice.id, ...invoice.takeawayFeedback }]
+            : [],
+        ) ?? [],
+      ...(customerId
+        ? {
+            invoices: request.orderSession?.invoices ?? [],
+            pickupAccessToken:
+              request.status === OnlineOrderStatus.ACCEPTED &&
+              fulfillmentStatus !== 'COLLECTED' &&
+              !request.noShowAt &&
+              onlineOrderAccessExpiresAt(request).getTime() > Date.now()
+                ? this.signAccess(request.id)
+                : null,
+          }
+        : {}),
       telegram: {
         enabled: Boolean(this.telegramBotUsername),
         subscribed: Boolean(request.telegramChatId),
@@ -373,6 +522,32 @@ export class OnlineOrdersService {
         request.createdAt,
       );
     }
+    return this.buildReorderTemplate(request);
+  }
+
+  async customerReorderTemplate(customerId: string, requestId: string) {
+    const request = await this.prisma.onlineOrderRequest.findFirst({
+      where: { id: requestId, customerId },
+      select: {
+        quotedSubtotal: true,
+        items: {
+          orderBy: { lineNumber: 'asc' },
+          select: {
+            menuItemId: true,
+            quantity: true,
+            note: true,
+            quotedName: true,
+            quotedUnitPrice: true,
+            quotedOptions: true,
+          },
+        },
+      },
+    });
+    if (!request) throw new NotFoundException('Order request not found.');
+    return this.buildReorderTemplate(request);
+  }
+
+  private async buildReorderTemplate(request: CustomerReorderSource) {
     const items = request.items.map((item) => ({
       menuItemId: item.menuItemId,
       quantity: item.quantity,
@@ -384,6 +559,7 @@ export class OnlineOrdersService {
     const menuById = await this.availableMenuItems([
       ...new Set(items.map((item) => item.menuItemId)),
     ]);
+    const requirements: InventoryRequirement[] = [];
     const lines = request.items.map((item, index) => {
       const menuItem = menuById.get(item.menuItemId);
       const previous = {
@@ -405,6 +581,12 @@ export class OnlineOrdersService {
           menuItem,
           items[index].optionIds,
         );
+        requirements.push(
+          ...selection.recipe.map((ingredient) => ({
+            inventoryItemId: ingredient.inventoryItemId,
+            quantity: ingredient.quantityPerItem.mul(item.quantity),
+          })),
+        );
         return {
           ...previous,
           available: true,
@@ -423,7 +605,11 @@ export class OnlineOrdersService {
         };
       }
     });
-    const canSubmit = lines.every((line) => line.available);
+    const selectionsAvailable = lines.every((line) => line.available);
+    const stockAvailable =
+      selectionsAvailable &&
+      (await this.inventoryConsumption.canFulfill(this.prisma, requirements));
+    const canSubmit = selectionsAvailable && stockAvailable;
     return {
       items,
       quote: {
@@ -442,6 +628,7 @@ export class OnlineOrdersService {
               .toFixed(2)
           : null,
         canSubmit,
+        stockAvailable,
         lines,
       },
     };
@@ -702,6 +889,10 @@ export class OnlineOrdersService {
             'Online order changed during cancellation.',
           );
         }
+        await this.inventoryConsumption.releaseReservations(
+          tx,
+          items.map((item) => item.id),
+        );
         await this.enqueueCancellationEvents(
           tx,
           requestId,
@@ -1147,6 +1338,10 @@ export class OnlineOrdersService {
             );
           }
         }
+        await this.inventoryConsumption.releaseReservations(
+          tx,
+          activeItems.map((item) => item.id),
+        );
         await tx.printJob.updateMany({
           where: {
             kitchenTicket: { orderSessionId: request.orderSessionId },
@@ -1441,8 +1636,15 @@ export class OnlineOrdersService {
     );
   }
 
-  private replay(request: PublicRequest, requestHash: string) {
-    if (request.requestHash !== requestHash) {
+  private replay(
+    request: PublicRequest,
+    requestHash: string,
+    customerId?: string,
+  ) {
+    if (
+      request.requestHash !== requestHash ||
+      (request.customerId ?? null) !== (customerId ?? null)
+    ) {
       throw new ConflictException(
         'Client request ID was already used with a different order.',
       );

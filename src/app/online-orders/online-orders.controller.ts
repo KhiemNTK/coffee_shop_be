@@ -27,6 +27,7 @@ import {
   GetPendingOnlineOrdersDto,
   GetPickupSlotsDto,
   OnlineOrderAccessDto,
+  QuoteOnlineOrderDto,
   ReorderTemplateDto,
   RejectOnlineOrderDto,
   RevokeReorderKeyDto,
@@ -95,6 +96,15 @@ export class OnlineOrdersController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   createRequest(@Body() dto: CreateOnlineOrderDto, @Req() req: Request) {
     return this.onlineOrders.createPublicRequest(dto, req.ip);
+  }
+
+  @Post('quote')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  quote(@Body() dto: QuoteOnlineOrderDto) {
+    return this.onlineOrders.quoteBasket(dto);
   }
 
   @Post('requests/status')

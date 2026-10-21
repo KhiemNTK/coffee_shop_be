@@ -15,7 +15,7 @@ import {
 } from '../src/common/consts/customer-auth';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
-import { buildDemoData, seedDemo } from '../prisma/demo-data';
+import { buildCatalogData, seedCatalog } from '../prisma/catalog-data';
 
 describe('Customer wishlist with isolated PostgreSQL', () => {
   let app: INestApplication<App>;
@@ -32,8 +32,8 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
   let csrfB: string;
   let throttle: jest.SpyInstance;
 
-  const clearDemoFixtures = async () => {
-    const demo = buildDemoData(1);
+  const clearCatalogFixtures = async () => {
+    const demo = buildCatalogData(1);
     const menuIds = demo.menuItems.map((item) => item.id);
     const stockIds = demo.inventoryItems.map((item) => item.id);
     await prisma.$transaction(async (tx) => {
@@ -60,7 +60,6 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
       await tx.diningTable.deleteMany({
         where: { id: { in: demo.tables.map((item) => item.id) } },
       });
-      await tx.fund.deleteMany({ where: { id: demo.fund.id } });
     });
   };
 
@@ -172,7 +171,7 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
   afterAll(async () => {
     try {
       if (prisma) {
-        await clearDemoFixtures();
+        await clearCatalogFixtures();
         await prisma.customer.deleteMany({
           where: { googleSubject: { endsWith: suffix } },
         });
@@ -446,45 +445,78 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
     expect(await prisma.customer.count()).toBe(before);
   });
 
-  it('seeds valid linked catalog/stock once and never overwrites user edits or restocks on replay', async () => {
-    await clearDemoFixtures();
+  it('seeds catalog once without financial writes and preserves edits/stock on replay', async () => {
+    await clearCatalogFixtures();
     const before = {
       invoices: await prisma.invoice.count(),
       payments: await prisma.paymentAttempt.count(),
+      cashTransactions: await prisma.cashTransaction.count(),
+      inventoryTransactions: await prisma.inventoryTransaction.count(),
+      funds: await prisma.fund.count(),
     };
-    const inserted = await seedDemo(prisma, 1);
+    const inserted = await seedCatalog(prisma, 1);
     expect(inserted).toMatchObject({
-      menuItems: 24,
-      inventoryItems: 8,
-      tables: 6,
+      menuItems: 44,
+      inventoryItems: 32,
+      tables: 10,
     });
-    const demo = buildDemoData(1);
+    const demo = buildCatalogData(1);
     const stock = demo.inventoryItems[0];
+    expect(
+      await prisma.menuItem.count({
+        where: {
+          id: { in: demo.menuItems.map((item) => item.id) },
+          isAvailable: true,
+        },
+      }),
+    ).toBe(0);
+    expect(await prisma.inventoryTransaction.count()).toBe(
+      before.inventoryTransactions,
+    );
+    expect(await prisma.fund.count()).toBe(before.funds);
     await prisma.$transaction(async (tx) => {
       await tx.inventoryItem.update({
         where: { id: stock.id },
-        data: { stock: { decrement: 1 } },
+        data: { stock: '2.5000', averageUnitCost: '320000' },
       });
       await tx.inventoryTransaction.create({
         data: {
           inventoryItemId: stock.id,
-          type: 'EXPORT',
-          quantity: 1,
-          unitPrice: stock.averageUnitCost,
-          totalAmount: stock.averageUnitCost,
+          type: 'IMPORT',
+          quantity: '2.5000',
+          unitPrice: '320000',
+          totalAmount: '800000',
           transactionDate: new Date(),
         },
       });
     });
     await prisma.menuItem.update({
       where: { id: demo.menuItems[0].id },
-      data: { name: 'Edited demo name', price: '49999' },
+      data: { name: 'Edited catalog name', price: '49999', isAvailable: true },
     });
-    expect(await seedDemo(prisma, 999)).toEqual({
+    const firstRecipe = demo.recipes[0];
+    const recipeKey = {
+      menuItemId: firstRecipe.menuItemId,
+      inventoryItemId: firstRecipe.inventoryItemId,
+    };
+    await prisma.menuItemIngredient.update({
+      where: { menuItemId_inventoryItemId: recipeKey },
+      data: { quantity: '0.0300' },
+    });
+    const retired = demo.menuItems[1];
+    const retiredAt = new Date();
+    await prisma.menuItem.update({
+      where: { id: retired.id },
+      data: { deletedAt: retiredAt, isAvailable: false },
+    });
+    expect(await seedCatalog(prisma, 999)).toEqual({
       units: 0,
       inventoryItems: 0,
+      inventoryCategories: 0,
+      kitchenStations: 0,
       menuCategories: 0,
       menuItems: 0,
+      recipes: 0,
       tables: 0,
     });
     expect(
@@ -492,7 +524,7 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
         await prisma.inventoryItem.findUniqueOrThrow({
           where: { id: stock.id },
         })
-      ).stock.equals(stock.stock.minus(1)),
+      ).stock.equals('2.5000'),
     ).toBe(true);
     expect(
       (
@@ -500,7 +532,20 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
           where: { id: demo.menuItems[0].id },
         })
       ).name,
-    ).toBe('Edited demo name');
+    ).toBe('Edited catalog name');
+    expect(
+      await prisma.menuItem.findUnique({ where: { id: retired.id } }),
+    ).toMatchObject({ deletedAt: retiredAt, isAvailable: false });
+    expect(
+      await prisma.menuItem.findUnique({ where: { id: demo.menuItems[0].id } }),
+    ).toMatchObject({ isAvailable: true });
+    expect(
+      (
+        await prisma.menuItemIngredient.findUniqueOrThrow({
+          where: { menuItemId_inventoryItemId: recipeKey },
+        })
+      ).quantity.toString(),
+    ).toBe('0.03');
     const rows = await prisma.inventoryTransaction.findMany({
       where: { inventoryItemId: stock.id },
     });
@@ -513,8 +558,288 @@ describe('Customer wishlist with isolated PostgreSQL', () => {
             : -Number(row.quantity)),
         0,
       ),
-    ).toBe(Number(stock.stock.minus(1)));
+    ).toBe(2.5);
     expect(await prisma.invoice.count()).toBe(before.invoices);
     expect(await prisma.paymentAttempt.count()).toBe(before.payments);
+    expect(await prisma.cashTransaction.count()).toBe(before.cashTransactions);
+    expect(await prisma.inventoryTransaction.count()).toBe(
+      before.inventoryTransactions + 1,
+    );
+    expect(await prisma.fund.count()).toBe(before.funds);
+  });
+
+  it('rolls back the seed instead of linking new dishes to inactive catalog data', async () => {
+    await clearCatalogFixtures();
+    const demo = buildCatalogData(1);
+    const category = demo.categories[0];
+    const deletedAt = new Date();
+    await prisma.menuCategory.create({ data: { ...category, deletedAt } });
+    await expect(seedCatalog(prisma, 1)).rejects.toThrow(
+      'Catalog references inactive data',
+    );
+    expect(
+      await prisma.menuItem.count({
+        where: { id: { in: demo.menuItems.map((item) => item.id) } },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.inventoryItem.count({
+        where: { id: { in: demo.inventoryItems.map((item) => item.id) } },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.unit.count({
+        where: { id: { in: demo.units.map((item) => item.id) } },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.menuCategory.findUnique({ where: { id: category.id } }),
+    ).toMatchObject({ deletedAt });
+  });
+
+  it('replaces only owned demo records, preserves history and rolls back cleanup on seed failure', async () => {
+    await clearCatalogFixtures();
+    const catalog = buildCatalogData(1);
+    const ids = {
+      unit: '1eea391b-3e26-41e0-8e19-e74caf3870d9',
+      inventoryCategory: 'ca986d92-0317-483c-800e-76b7deb0a5d2',
+      inventory: 'a608a615-a24e-4b0f-b1e9-1093df7d68f3',
+      unusedInventory: '2157d7cb-0cda-4477-961b-9a2a0f474d92',
+      menuCategory: '0ebaf6b8-8646-4e66-b262-16bd252794b2',
+      unusedMenu: 'a2b77190-df27-4c70-a6b0-1eaa86ee726f',
+      usedMenu: '433ce616-514d-4046-9120-82c3aae99b25',
+      fund: '0a9d50be-37fc-4389-a0c1-e72a28ec8646',
+      customer: randomUUID(),
+      unrelatedMenu: randomUUID(),
+      unrelatedCategory: randomUUID(),
+      transaction: randomUUID(),
+    };
+    try {
+      await prisma.unit.create({ data: { id: ids.unit, name: 'Demo kg' } });
+      await prisma.inventoryCategory.create({
+        data: { id: ids.inventoryCategory, name: 'Demo ingredients' },
+      });
+      await prisma.inventoryItem.createMany({
+        data: [
+          {
+            id: ids.inventory,
+            name: 'Demo Coffee beans',
+            categoryId: ids.inventoryCategory,
+            unitId: ids.unit,
+            stock: '2.5000',
+            averageUnitCost: '320000',
+          },
+          {
+            id: ids.unusedInventory,
+            name: 'Demo Pastry',
+            categoryId: ids.inventoryCategory,
+            unitId: ids.unit,
+          },
+        ],
+      });
+      await prisma.inventoryTransaction.create({
+        data: {
+          id: ids.transaction,
+          inventoryItemId: ids.inventory,
+          type: 'IMPORT',
+          quantity: '2.5000',
+          unitPrice: '320000',
+          totalAmount: '800000',
+          transactionDate: new Date(),
+        },
+      });
+      await prisma.menuCategory.createMany({
+        data: [
+          { id: ids.menuCategory, name: 'Demo Coffee' },
+          { id: ids.unrelatedCategory, name: `Other catalog ${suffix}` },
+        ],
+      });
+      await prisma.menuItem.createMany({
+        data: [
+          {
+            id: ids.unusedMenu,
+            name: 'Demo Espresso',
+            categoryId: ids.menuCategory,
+            price: 30000,
+          },
+          {
+            id: ids.usedMenu,
+            name: 'Demo Americano',
+            categoryId: ids.menuCategory,
+            price: 35000,
+          },
+          {
+            id: ids.unrelatedMenu,
+            name: 'Demo Staff special',
+            categoryId: ids.unrelatedCategory,
+            price: 40000,
+          },
+        ],
+      });
+      await prisma.menuItemIngredient.createMany({
+        data: [ids.unusedMenu, ids.usedMenu].map((menuItemId) => ({
+          menuItemId,
+          inventoryItemId: ids.inventory,
+          quantity: '0.0180',
+        })),
+      });
+      await prisma.customer.create({
+        data: {
+          id: ids.customer,
+          googleSubject: `catalog-fixture-${suffix}`,
+          email: 'catalog-fixture@example.test',
+          wishlist: { create: { menuItemId: ids.usedMenu } },
+        },
+      });
+      await prisma.diningTable.create({
+        data: {
+          id: catalog.tables[0].id,
+          name: 'Demo Table 01',
+          status: 'OCCUPIED',
+        },
+      });
+      await prisma.kitchenStation.create({
+        data: {
+          id: catalog.stations[0].id,
+          name: 'Demo Drinks',
+          code: 'DEMO_DRINKS',
+          prepSlaSeconds: 321,
+        },
+      });
+      await prisma.fund.create({
+        data: {
+          id: ids.fund,
+          name: 'Demo Cash',
+          type: 'CASH',
+          balance: '57000',
+        },
+      });
+      const ledger = await prisma.inventoryTransaction.findUniqueOrThrow({
+        where: { id: ids.transaction },
+      });
+      const before = {
+        invoices: await prisma.invoice.count(),
+        payments: await prisma.paymentAttempt.count(),
+        cash: await prisma.cashTransaction.count(),
+        inventory: await prisma.inventoryTransaction.count(),
+      };
+      await prisma.menuCategory.create({
+        data: { ...catalog.categories[0], deletedAt: new Date() },
+      });
+      await expect(seedCatalog(prisma, 1, true)).rejects.toThrow(
+        'Catalog references inactive data',
+      );
+      expect(
+        await prisma.menuItem.findUnique({ where: { id: ids.unusedMenu } }),
+      ).toMatchObject({ name: 'Demo Espresso', deletedAt: null });
+      expect(
+        await prisma.diningTable.findUnique({
+          where: { id: catalog.tables[0].id },
+        }),
+      ).toMatchObject({ name: 'Demo Table 01', status: 'OCCUPIED' });
+      expect(
+        await prisma.fund.findUnique({ where: { id: ids.fund } }),
+      ).toMatchObject({ name: 'Demo Cash' });
+      await prisma.menuCategory.delete({
+        where: { id: catalog.categories[0].id },
+      });
+
+      const result = await seedCatalog(prisma, 1, true);
+      expect(result).toMatchObject({
+        menuItems: 44,
+        inventoryItems: 32,
+        cleanup: {
+          deletedMenuItems: 1,
+          archivedMenuItems: 1,
+          deletedInventoryItems: 1,
+          archivedInventoryItems: 1,
+          renamedTables: 1,
+          renamedStations: 1,
+          renamedFunds: 1,
+        },
+      });
+      expect(
+        await prisma.menuItem.findUnique({ where: { id: ids.unusedMenu } }),
+      ).toBeNull();
+      expect(
+        await prisma.inventoryItem.findUnique({
+          where: { id: ids.unusedInventory },
+        }),
+      ).toBeNull();
+      expect(
+        await prisma.menuItem.findUnique({ where: { id: ids.usedMenu } }),
+      ).toMatchObject({ deletedAt: expect.any(Date), isAvailable: false });
+      expect(
+        await prisma.customerWishlist.count({
+          where: { customerId: ids.customer },
+        }),
+      ).toBe(1);
+      expect(
+        await prisma.menuItem.findUnique({ where: { id: ids.unrelatedMenu } }),
+      ).toMatchObject({ name: 'Demo Staff special', deletedAt: null });
+      const stock = await prisma.inventoryItem.findUniqueOrThrow({
+        where: { id: ids.inventory },
+      });
+      expect(stock.deletedAt).toBeInstanceOf(Date);
+      expect(stock.stock.toString()).toBe('2.5');
+      expect(stock.averageUnitCost.toString()).toBe('320000');
+      expect(
+        await prisma.inventoryTransaction.findUnique({
+          where: { id: ids.transaction },
+        }),
+      ).toEqual(ledger);
+      expect(
+        await prisma.diningTable.findUnique({
+          where: { id: catalog.tables[0].id },
+        }),
+      ).toMatchObject({ name: 'Bàn 01', status: 'OCCUPIED' });
+      expect(
+        await prisma.kitchenStation.findUnique({
+          where: { id: catalog.stations[0].id },
+        }),
+      ).toMatchObject({
+        name: 'Quầy pha chế',
+        code: 'BAR',
+        prepSlaSeconds: 321,
+      });
+      expect(
+        (
+          await prisma.fund.findUniqueOrThrow({ where: { id: ids.fund } })
+        ).balance.toString(),
+      ).toBe('57000');
+      const replay = await seedCatalog(prisma, 999, true);
+      expect(Object.values(replay.cleanup!).every((value) => value === 0)).toBe(
+        true,
+      );
+      expect(replay.menuItems).toBe(0);
+      expect(await prisma.invoice.count()).toBe(before.invoices);
+      expect(await prisma.paymentAttempt.count()).toBe(before.payments);
+      expect(await prisma.cashTransaction.count()).toBe(before.cash);
+      expect(await prisma.inventoryTransaction.count()).toBe(before.inventory);
+    } finally {
+      await prisma.customer.deleteMany({ where: { id: ids.customer } });
+      await prisma.menuItemIngredient.deleteMany({
+        where: { menuItemId: { in: [ids.unusedMenu, ids.usedMenu] } },
+      });
+      await prisma.menuItem.deleteMany({
+        where: {
+          id: { in: [ids.unusedMenu, ids.usedMenu, ids.unrelatedMenu] },
+        },
+      });
+      await prisma.inventoryTransaction.deleteMany({
+        where: { id: ids.transaction },
+      });
+      await prisma.inventoryItem.deleteMany({
+        where: { id: { in: [ids.inventory, ids.unusedInventory] } },
+      });
+      await prisma.inventoryCategory.deleteMany({
+        where: { id: ids.inventoryCategory },
+      });
+      await prisma.unit.deleteMany({ where: { id: ids.unit } });
+      await prisma.menuCategory.deleteMany({
+        where: { id: { in: [ids.menuCategory, ids.unrelatedCategory] } },
+      });
+      await prisma.fund.deleteMany({ where: { id: ids.fund } });
+    }
   });
 });
