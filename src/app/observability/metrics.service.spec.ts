@@ -2,6 +2,7 @@ import type { ConfigService } from '@nestjs/config';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import type { HealthService } from '../health/health.service';
 import { MetricsService } from './metrics.service';
+import type { BusinessInsightsService } from '../reports/business-insights.service';
 
 describe('MetricsService', () => {
   it('caches operational snapshots between nearby scrapes', async () => {
@@ -26,10 +27,12 @@ describe('MetricsService', () => {
     const config = {
       get: jest.fn((_key: string, fallback: unknown) => fallback),
     };
+    const insights = { collectMetrics: jest.fn().mockResolvedValue(undefined) };
     const service = new MetricsService(
       prisma as unknown as ExtendedPrismaClient,
       health as unknown as HealthService,
       config as unknown as ConfigService,
+      insights as unknown as BusinessInsightsService,
     );
 
     const first = await service.render();
@@ -42,5 +45,6 @@ describe('MetricsService', () => {
       1,
     );
     expect(health.redisStatus).toHaveBeenCalledTimes(1);
+    expect(insights.collectMetrics).toHaveBeenCalledTimes(1);
   });
 });

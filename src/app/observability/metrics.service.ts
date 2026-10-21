@@ -22,6 +22,7 @@ import {
   postgresMaxConnections,
 } from '../../common/observability/metrics';
 import { HealthService } from '../health/health.service';
+import { BusinessInsightsService } from '../reports/business-insights.service';
 
 interface OperationalSnapshot {
   postgresConnections: number;
@@ -49,6 +50,7 @@ export class MetricsService {
     private readonly prisma: ExtendedPrismaClient,
     private readonly healthService: HealthService,
     private readonly config: ConfigService,
+    private readonly insights: BusinessInsightsService,
   ) {}
 
   get contentType() {
@@ -79,6 +81,7 @@ export class MetricsService {
     await Promise.all([
       this.collectDatabaseMetrics(),
       this.collectRedisMetric(),
+      this.insights.collectMetrics(),
     ]);
   }
 

@@ -26,6 +26,16 @@ import {
 import { BusinessInsightSnapshotService } from './business-insight-snapshot.service';
 import { GeminiInsightsService } from './gemini-insights.service';
 import { buildBusinessInsightAnalysis } from './business-insight.analysis';
+import { BUSINESS_INSIGHT_ERROR_CODES } from '../../common/consts/business-insights';
+import {
+  aiInsightEnabled,
+  aiInsightJobDurationSeconds,
+  aiInsightJobsTotal,
+  aiInsightQueueHeadAgeSeconds,
+  aiInsightQueueJobs,
+  aiInsightQueueUp,
+  metricsCollectionFailuresTotal,
+} from '../../common/observability/metrics';
 
 const QUEUE_NAME = 'business-insights';
 const RETENTION_SECONDS = BUSINESS_INSIGHT_RETENTION_DAYS * 86_400;
@@ -97,6 +107,44 @@ export class BusinessInsightsService
       this.closeRedisResource(this.worker, true),
       this.closeRedisResource(this.queue),
     ]);
+  }
+
+  async collectMetrics() {
+    const enabled = this.getConfiguration().enabled;
+    aiInsightEnabled.set(enabled ? 1 : 0);
+    aiInsightQueueJobs.reset();
+    aiInsightQueueHeadAgeSeconds.set(0);
+    if (!enabled) {
+      aiInsightQueueUp.set(0);
+      return;
+    }
+    try {
+      const queue = await this.getQueue();
+      const [counts, heads] = await this.withRedisTimeout(
+        Promise.all([
+          queue.getJobCounts('waiting', 'active', 'delayed', 'failed'),
+          // Only read queue heads, never all retained snapshots on a metrics scrape.
+          queue.getJobs(['waiting', 'active'], 0, 0, true),
+        ]),
+      );
+      for (const state of ['waiting', 'active', 'delayed', 'failed']) {
+        aiInsightQueueJobs.set(
+          { state },
+          (counts[state] ?? 0) +
+            (state === 'waiting' ? (counts.paused ?? 0) : 0),
+        );
+      }
+      const timestamps = heads.flatMap((job) => (job ? [job.timestamp] : []));
+      aiInsightQueueHeadAgeSeconds.set(
+        timestamps.length
+          ? Math.max(0, (Date.now() - Math.min(...timestamps)) / 1_000)
+          : 0,
+      );
+      aiInsightQueueUp.set(1);
+    } catch {
+      aiInsightQueueUp.set(0);
+      metricsCollectionFailuresTotal.inc({ collector: 'ai_insights' });
+    }
   }
 
   async create(employeeId: string, dto: CreateBusinessInsightDto) {
@@ -207,6 +255,12 @@ export class BusinessInsightsService
   ): Promise<BusinessInsightResult> {
     if (job.data.promptVersion !== BUSINESS_INSIGHT_PROMPT_VERSION)
       throw new UnrecoverableError('AI_VERSION_CHANGED');
+    const requestedAt = Date.parse(job.data.requestedAt);
+    if (
+      !Number.isFinite(requestedAt) ||
+      Date.now() - requestedAt >= RETENTION_SECONDS * 1_000
+    )
+      throw new UnrecoverableError('AI_JOB_EXPIRED');
     if (!job.data.snapshot) {
       const snapshot = await this.snapshots.capture(job.data.from, job.data.to);
       await job.updateData({ ...job.data, snapshot });
@@ -290,8 +344,9 @@ export class BusinessInsightsService
       this.worker.on('error', () =>
         this.logger.warn({ event: 'ai.insights.worker_error' }),
       );
-      this.worker.on('failed', (job) =>
-        this.logger.warn({ event: 'ai.insights.failed', jobId: job?.id }),
+      this.worker.on('completed', (job) => this.recordJobOutcome(job));
+      this.worker.on('failed', (job, error) =>
+        this.recordJobOutcome(job, error),
       );
     }
     this.ready = this.queue
@@ -329,13 +384,6 @@ export class BusinessInsightsService
           : state === 'active'
             ? 'PROCESSING'
             : 'QUEUED';
-    const allowedErrors = [
-      'AI_PROVIDER_UNAVAILABLE',
-      'AI_PROVIDER_REJECTED',
-      'AI_INVALID_OUTPUT',
-      'AI_DAILY_LIMIT',
-      'AI_VERSION_CHANGED',
-    ];
     return {
       id: job.id!,
       status,
@@ -356,11 +404,46 @@ export class BusinessInsightsService
       errorCode: obsolete
         ? 'AI_VERSION_CHANGED'
         : status === 'FAILED'
-          ? allowedErrors.includes(job.failedReason)
-            ? job.failedReason
-            : 'AI_JOB_FAILED'
+          ? this.errorCode(job.failedReason)
           : null,
     };
+  }
+
+  private errorCode(reason: string) {
+    return (
+      BUSINESS_INSIGHT_ERROR_CODES.find((code) => code === reason) ??
+      'AI_JOB_FAILED'
+    );
+  }
+
+  private recordJobOutcome(
+    job:
+      | Job<BusinessInsightJobData, BusinessInsightResult, 'generate'>
+      | undefined,
+    error?: Error,
+  ) {
+    if (!job) return;
+    // BullMQ sets finishedOn only after a terminal transition, including permanent errors.
+    const outcome = error
+      ? job.finishedOn === undefined
+        ? 'retry'
+        : 'failed'
+      : 'completed';
+    const errorCode = error ? this.errorCode(error.message) : 'NONE';
+    aiInsightJobsTotal.inc({ outcome, error_code: errorCode });
+    if (outcome !== 'retry' && job.finishedOn !== undefined)
+      aiInsightJobDurationSeconds.observe(
+        { outcome },
+        Math.max(0, (job.finishedOn - job.timestamp) / 1_000),
+      );
+    if (error)
+      this.logger.warn({
+        event: 'ai.insights.failed',
+        jobId: job.id,
+        outcome,
+        errorCode,
+        attempts: job.attemptsMade,
+      });
   }
 
   private hash(value: string) {

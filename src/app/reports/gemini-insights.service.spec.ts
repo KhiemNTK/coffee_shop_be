@@ -7,6 +7,7 @@ import type {
 } from '../../common/types';
 import { GeminiInsightsService } from './gemini-insights.service';
 import { BusinessInsightSuggestionsSchema } from './business-insight.schema';
+import { aiInsightProviderDurationSeconds } from '../../common/observability/metrics';
 
 const snapshot: BusinessInsightSnapshot = {
   schemaVersion: 2,
@@ -66,6 +67,7 @@ describe('GeminiInsightsService', () => {
     );
 
   beforeEach(() => {
+    aiInsightProviderDurationSeconds.reset();
     service = new GeminiInsightsService(
       new ConfigService({
         GEMINI_API_KEY: 'fixture-secret-never-in-url',
@@ -333,6 +335,14 @@ describe('GeminiInsightsService', () => {
       service.generate(snapshot, 'gemini-3.5-flash-lite'),
     ).rejects.toThrow('AI_PROVIDER_UNAVAILABLE');
     expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect((await aiInsightProviderDurationSeconds.get()).values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          metricName: 'coffee_shop_ai_insight_provider_duration_seconds_count',
+          value: 3,
+        }),
+      ]),
+    );
   });
 
   it('cancels pending provider requests on shutdown', async () => {

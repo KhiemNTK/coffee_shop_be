@@ -21,6 +21,53 @@ export const aiInsightTokensTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+export const aiInsightJobsTotal = new Counter({
+  name: 'coffee_shop_ai_insight_jobs_total',
+  help: 'Observed BullMQ insight transitions, separating retries from terminal outcomes.',
+  labelNames: ['outcome', 'error_code'] as const,
+  registers: [metricsRegistry],
+});
+
+export const aiInsightJobDurationSeconds = new Histogram({
+  name: 'coffee_shop_ai_insight_job_duration_seconds',
+  help: 'Terminal insight job elapsed time, including queue wait and retries.',
+  labelNames: ['outcome'] as const,
+  buckets: [1, 5, 15, 30, 60, 120, 300],
+  registers: [metricsRegistry],
+});
+
+export const aiInsightProviderDurationSeconds = new Histogram({
+  name: 'coffee_shop_ai_insight_provider_duration_seconds',
+  help: 'Gemini adapter attempt duration, including response validation.',
+  buckets: [0.5, 1, 2, 5, 10, 15, 30],
+  registers: [metricsRegistry],
+});
+
+export const aiInsightEnabled = new Gauge({
+  name: 'coffee_shop_ai_insight_enabled',
+  help: 'Whether manager AI insights are configured as enabled.',
+  registers: [metricsRegistry],
+});
+
+export const aiInsightQueueUp = new Gauge({
+  name: 'coffee_shop_ai_insight_queue_up',
+  help: 'Whether the last enabled insight queue collection succeeded.',
+  registers: [metricsRegistry],
+});
+
+export const aiInsightQueueJobs = new Gauge({
+  name: 'coffee_shop_ai_insight_queue_jobs',
+  help: 'Current insight jobs by state; waiting includes a paused queue.',
+  labelNames: ['state'] as const,
+  registers: [metricsRegistry],
+});
+
+export const aiInsightQueueHeadAgeSeconds = new Gauge({
+  name: 'coffee_shop_ai_insight_queue_head_age_seconds',
+  help: 'Maximum age of FIFO waiting/paused heads and active insight job; excludes delayed retries.',
+  registers: [metricsRegistry],
+});
+
 metricsRegistry.setDefaultLabels({
   service: process.env.APP_NAME ?? 'coffee_shop_be',
 });

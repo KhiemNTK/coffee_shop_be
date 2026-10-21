@@ -14,6 +14,14 @@ import { BusinessInsightsService } from './business-insights.service';
 import { BusinessInsightSnapshotService } from './business-insight-snapshot.service';
 import { GeminiInsightsService } from './gemini-insights.service';
 import { CreateBusinessInsightSchema } from './dto/business-insight.dto';
+import {
+  aiInsightJobsTotal,
+  aiInsightJobDurationSeconds,
+  aiInsightEnabled,
+  aiInsightQueueUp,
+  aiInsightQueueJobs,
+  aiInsightQueueHeadAgeSeconds,
+} from '../../common/observability/metrics';
 
 describe('BusinessInsightsService', () => {
   const employeeId = randomUUID();
@@ -35,6 +43,8 @@ describe('BusinessInsightsService', () => {
     client: Promise.resolve(client),
     getJob: jest.fn(),
     add: jest.fn(),
+    getJobCounts: jest.fn(),
+    getJobs: jest.fn(),
     close: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn().mockResolvedValue(undefined),
   };
@@ -54,6 +64,8 @@ describe('BusinessInsightsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    aiInsightJobsTotal.reset();
+    aiInsightJobDurationSeconds.reset();
     service = new BusinessInsightsService(
       config,
       snapshots as unknown as BusinessInsightSnapshotService,
@@ -63,6 +75,14 @@ describe('BusinessInsightsService', () => {
     Reflect.set(service, 'ready', Promise.resolve());
     client.runCommand.mockResolvedValue(1);
     queue.getJob.mockResolvedValue(undefined);
+    queue.getJobCounts.mockResolvedValue({
+      waiting: 2,
+      paused: 1,
+      active: 1,
+      delayed: 1,
+      failed: 0,
+    });
+    queue.getJobs.mockResolvedValue([{ timestamp: Date.now() - 5_000 }]);
     queue.add.mockImplementation(
       (
         _name: string,
@@ -280,6 +300,21 @@ describe('BusinessInsightsService', () => {
     expect(jest.getTimerCount()).toBe(0);
   });
 
+  it('does not spend provider budget on an expired queued job after a long outage', async () => {
+    await service.create(employeeId, dto);
+    const job = (await queue.add.mock.results[0].value) as Job<
+      BusinessInsightJobData,
+      BusinessInsightResult,
+      'generate'
+    >;
+    job.data.requestedAt = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    client.runCommand.mockClear();
+    await expect(service.process(job)).rejects.toThrow('AI_JOB_EXPIRED');
+    expect(snapshots.capture).not.toHaveBeenCalled();
+    expect(client.runCommand).not.toHaveBeenCalled();
+    expect(gemini.generate).not.toHaveBeenCalled();
+  });
+
   it('aborts Gemini and force-disconnects a stalled Redis close within a deadline', async () => {
     jest.useFakeTimers();
     const warn = jest
@@ -338,5 +373,116 @@ describe('BusinessInsightsService', () => {
       errorCode: 'AI_JOB_FAILED',
       analysis: null,
     });
+  });
+
+  it('collects bounded queue heads and combines paused jobs without loading retained history', async () => {
+    await service.collectMetrics();
+    expect(queue.getJobs).toHaveBeenCalledWith(
+      ['waiting', 'active'],
+      0,
+      0,
+      true,
+    );
+    expect((await aiInsightQueueJobs.get()).values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: expect.objectContaining({ state: 'waiting' }),
+          value: 3,
+        }),
+      ]),
+    );
+    expect((await aiInsightQueueUp.get()).values[0].value).toBe(1);
+    expect(
+      (await aiInsightQueueHeadAgeSeconds.get()).values[0].value,
+    ).toBeGreaterThanOrEqual(5);
+    queue.getJobs.mockResolvedValue([]);
+    await service.collectMetrics();
+    expect((await aiInsightQueueHeadAgeSeconds.get()).values[0].value).toBe(0);
+  });
+
+  it('does not initialize Redis for metrics while AI is disabled and clears stale gauges', async () => {
+    const disabled = new BusinessInsightsService(
+      new ConfigService(),
+      snapshots as unknown as BusinessInsightSnapshotService,
+      gemini as unknown as GeminiInsightsService,
+    );
+    await disabled.collectMetrics();
+    expect(queue.getJobCounts).not.toHaveBeenCalled();
+    expect((await aiInsightEnabled.get()).values[0].value).toBe(0);
+    expect((await aiInsightQueueJobs.get()).values).toHaveLength(0);
+  });
+
+  it('bounds a stuck metrics scrape and marks its queue unavailable', async () => {
+    jest.useFakeTimers();
+    queue.getJobCounts.mockReturnValue(new Promise(() => {}));
+    const collecting = service.collectMetrics();
+    await jest.advanceTimersByTimeAsync(2_000);
+    await collecting;
+    expect((await aiInsightQueueUp.get()).values[0].value).toBe(0);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('counts retries separately from terminal failures and never uses raw errors as metric labels', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    const record = service['recordJobOutcome'].bind(service);
+    const job = jobFor({} as BusinessInsightJobData, 'job-id');
+    job.timestamp = 1_000;
+    job.attemptsMade = 1;
+    record(job, new Error('database password and private SQL'));
+    job.attemptsMade = 2;
+    job.finishedOn = 4_000;
+    record(job, new Error('AI_PROVIDER_UNAVAILABLE'));
+    job.finishedOn = 2_000;
+    record(job);
+    // An unrecoverable first attempt is already terminal, regardless of attemptsMade.
+    job.attemptsMade = 1;
+    job.finishedOn = 3_000;
+    record(job, new Error('AI_INVALID_OUTPUT'));
+    const metric = await aiInsightJobsTotal.get();
+    expect(metric.values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            outcome: 'retry',
+            error_code: 'AI_JOB_FAILED',
+          }),
+          value: 1,
+        }),
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            outcome: 'failed',
+            error_code: 'AI_PROVIDER_UNAVAILABLE',
+          }),
+          value: 1,
+        }),
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            outcome: 'failed',
+            error_code: 'AI_INVALID_OUTPUT',
+          }),
+          value: 1,
+        }),
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            outcome: 'completed',
+            error_code: 'NONE',
+          }),
+          value: 1,
+        }),
+      ]),
+    );
+    expect(JSON.stringify(metric)).not.toContain('password');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('private SQL');
+    expect((await aiInsightJobDurationSeconds.get()).values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          metricName: 'coffee_shop_ai_insight_job_duration_seconds_count',
+          labels: expect.objectContaining({ outcome: 'failed' }),
+          value: 2,
+        }),
+      ]),
+    );
   });
 });

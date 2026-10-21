@@ -1,11 +1,22 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OutboxEventStatus } from '@prisma/client';
-import type { Job } from 'bullmq';
+import { Queue, Worker, type Job } from 'bullmq';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import type { ClaimedOutboxEvent } from '../../common/types';
 import { DomainEventBusService } from './domain-event-bus.service';
 import { OutboxDispatcherService } from './outbox-dispatcher.service';
+
+jest.mock('bullmq', () => ({
+  Queue: jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    close: jest.fn().mockResolvedValue(undefined),
+  })),
+  Worker: jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    close: jest.fn().mockResolvedValue(undefined),
+  })),
+}));
 
 describe('OutboxDispatcherService', () => {
   const event = {
@@ -33,6 +44,7 @@ describe('OutboxDispatcherService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    config.get.mockReturnValue(undefined);
     prisma.$queryRaw.mockResolvedValue([event]);
     prisma.$executeRaw.mockResolvedValue(0);
     prisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
@@ -77,6 +89,10 @@ describe('OutboxDispatcherService', () => {
       ([query]) => query.text as string,
     );
     expect(statements).toHaveLength(5);
+    expect(statements[0]).toContain(
+      '"operation" NOT LIKE \'inventory.stock.%\'',
+    );
+    expect(statements[0]).toContain('"operation" NOT LIKE \'cashier-shift.%\'');
     expect(
       statements.every((sql) => sql.includes('FOR UPDATE SKIP LOCKED')),
     ).toBe(true);
@@ -86,6 +102,33 @@ describe('OutboxDispatcherService', () => {
     await service.drainOnce();
     expect(statements[4]).toContain('CustomerSession');
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
+  });
+
+  it('decodes credentials and preserves TLS and DB when starting BullMQ', async () => {
+    config.get.mockImplementation((key) =>
+      key === 'REDIS_URL'
+        ? 'rediss://staff%40coffee:p%40ss%3Aword%25@redis.example.test:6380/2'
+        : 0,
+    );
+    await service.onApplicationBootstrap();
+    const connection = expect.objectContaining({
+      host: 'redis.example.test',
+      port: 6380,
+      db: 2,
+      username: 'staff@coffee',
+      password: 'p@ss:word%',
+      tls: {},
+    });
+    expect(Queue).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ connection }),
+    );
+    expect(Worker).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Function),
+      expect.objectContaining({ connection }),
+    );
+    await service.onModuleDestroy();
   });
 
   it('returns a failed event to pending with exponential backoff', async () => {

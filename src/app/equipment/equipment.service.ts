@@ -4,13 +4,13 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { EquipmentStatus, Prisma } from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
@@ -52,7 +52,7 @@ export class EquipmentService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const equipment = await tx.equipment.create({
           data: {
             ...dto,
@@ -165,7 +165,7 @@ export class EquipmentService {
   async update(id: string, employeeId: string, dto: UpdateEquipmentDto) {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const existing = await tx.equipment.findFirst({
           where: { id, deletedAt: null },
         });
@@ -220,7 +220,7 @@ export class EquipmentService {
     const cost = new Prisma.Decimal(dto.cost);
 
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await tx.equipment.findFirst({
         where: { id, deletedAt: null },
       });
@@ -313,19 +313,6 @@ export class EquipmentService {
       throw new BadRequestException('Equipment totalAmount is too large.');
     }
     return total;
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private async logAction(

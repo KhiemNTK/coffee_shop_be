@@ -20,12 +20,15 @@ import {
   PUBLIC_MENU_SELECT,
   PUBLIC_MENU_WHERE,
 } from '../menu/public-menu-query';
+import {
+  RECOMMENDATION_MIN_SUPPORT as MIN_PAIR_SUPPORT,
+  RECOMMENDATION_PAIRS_PER_ANCHOR as MAX_PAIRS_PER_ANCHOR,
+  RECOMMENDATION_LIMIT as MAX_RECOMMENDATIONS,
+} from '../../common/consts/recommendations';
+import { rankRecommendationCandidates } from './recommendation-ranking';
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TRAINING_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
-const MIN_PAIR_SUPPORT = 3;
-const MAX_PAIRS_PER_ANCHOR = 10;
-const MAX_RECOMMENDATIONS = 3;
 
 type Variant = 'CONTROL' | 'TREATMENT';
 type ExperimentRow = {
@@ -324,16 +327,7 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
       orderBy: [{ support: 'desc' }, { candidateId: 'asc' }],
       take: menuItemIds.length * MAX_PAIRS_PER_ANCHOR,
     });
-    const scores = new Map<string, number>();
-    for (const pair of pairs) {
-      scores.set(
-        pair.candidateId,
-        (scores.get(pair.candidateId) ?? 0) + pair.support,
-      );
-    }
-    const rankedIds = [...scores]
-      .sort(([a, scoreA], [b, scoreB]) => scoreB - scoreA || a.localeCompare(b))
-      .map(([id]) => id);
+    const rankedIds = rankRecommendationCandidates(pairs);
     const available = await this.availableItems(rankedIds);
     const availableIds = new Set(available.map((item) => item.id));
     return rankedIds

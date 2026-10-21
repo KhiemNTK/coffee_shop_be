@@ -15,6 +15,7 @@ import {
   type ExtendedPrismaClient,
 } from '../src/common/prisma/prisma.service';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { TakeawayService } from '../src/app/orders/takeaway.service';
 import { OrderPolicyService } from '../src/app/orders/order-policy.service';
 import { OutboxService } from '../src/app/durable/outbox.service';
 import { OutboxDispatcherService } from '../src/app/durable/outbox-dispatcher.service';
@@ -80,7 +81,7 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
       {} as never,
       {} as never,
       pagination,
-      config,
+      new TakeawayService(prisma, pagination, config),
       {} as never,
     );
   }, 60_000);

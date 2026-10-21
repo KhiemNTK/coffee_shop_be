@@ -97,6 +97,9 @@ export class OutboxDispatcherService
       WITH candidates AS (
         SELECT "id" FROM "IdempotencyRequest"
         WHERE "status" = 'COMPLETED' AND "expiresAt" < ${now}
+          -- Stock and cashier commands have no other durable replay identity.
+          AND "operation" NOT LIKE 'inventory.stock.%'
+          AND "operation" NOT LIKE 'cashier-shift.%'
         ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
       ) DELETE FROM "IdempotencyRequest" r USING candidates c WHERE r."id" = c."id"
     `);
@@ -134,8 +137,8 @@ export class OutboxDispatcherService
     const connection = {
       host: url.hostname,
       port: Number(url.port || 6379),
-      username: url.username || undefined,
-      password: url.password || undefined,
+      username: url.username ? decodeURIComponent(url.username) : undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
       db: url.pathname.length > 1 ? Number(url.pathname.slice(1)) : 0,
       connectTimeout: 1_000,
       ...(url.protocol === 'rediss:' ? { tls: {} } : {}),

@@ -5,7 +5,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, SettingValueType } from '@prisma/client';
 import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../../common/consts/online-order-settings';
@@ -13,6 +12,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
@@ -36,7 +36,7 @@ export class SystemSettingsService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const setting = await tx.systemSetting.create({
           data: {
             key: dto.key,
@@ -138,7 +138,7 @@ export class SystemSettingsService {
   ) {
     this.assertWritableKey(key);
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await tx.systemSetting.findFirst({
         where: { key, deletedAt: null },
       });
@@ -184,7 +184,7 @@ export class SystemSettingsService {
   async remove(key: string, employeeId: string, expectedVersion: number) {
     this.assertWritableKey(key);
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await tx.systemSetting.findFirst({
         where: { key, deletedAt: null },
       });
@@ -282,19 +282,6 @@ export class SystemSettingsService {
         deletedAt: setting.deletedAt,
       },
     });
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
-    }
   }
 
   private async logAction(

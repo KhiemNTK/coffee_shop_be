@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { DateUtilModule } from '../../common/utils/date-util/date-util.module';
 import { ExcelUtilModule } from '../../common/utils/excel-util/excel-util.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
@@ -10,7 +9,7 @@ import { BusinessInsightSnapshotService } from './business-insight-snapshot.serv
 import { GeminiInsightsService } from './gemini-insights.service';
 
 @Module({
-  imports: [DateUtilModule, ExcelUtilModule],
+  imports: [ExcelUtilModule],
   controllers: [ReportsController, BusinessInsightsController],
   providers: [
     ReportsService,
@@ -19,5 +18,6 @@ import { GeminiInsightsService } from './gemini-insights.service';
     BusinessInsightSnapshotService,
     GeminiInsightsService,
   ],
+  exports: [BusinessInsightsService],
 })
 export class ReportsModule {}

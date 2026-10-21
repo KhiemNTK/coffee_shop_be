@@ -9,6 +9,7 @@ import { AppController } from '../app.controller';
 import { AuditLogsController } from '../audit-logs/audit-logs.controller';
 import { AuthController } from '../auth/auth.controller';
 import { CustomersController } from '../customers/customers.controller';
+import { CustomerOrdersController } from '../customers/customer-orders.controller';
 import { CustomerGuard } from '../customers/customer.guard';
 import { CUSTOMER_PUBLIC_ROUTE } from '../../common/consts/customer-auth';
 import { IS_SKIP_AUTH } from '../auth/auth.decorator';
@@ -47,6 +48,7 @@ const controllers = [
   AuditLogsController,
   AuthController,
   CustomersController,
+  CustomerOrdersController,
   BankReconciliationController,
   CashHandoversController,
   CashierShiftsController,
@@ -92,6 +94,9 @@ const getControllerFileName = (controller: (typeof controllers)[number]) =>
 
 describe('Route authorization policy coverage', () => {
   it('requires customer authentication on every private customer route', () => {
+    expect(
+      Reflect.getMetadata(GUARDS_METADATA, CustomerOrdersController),
+    ).toContain(CustomerGuard);
     expect(Reflect.getMetadata(GUARDS_METADATA, CustomersController)).toContain(
       CustomerGuard,
     );

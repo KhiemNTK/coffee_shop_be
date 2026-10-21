@@ -23,17 +23,18 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:load": "k6 run test/load/coffee-shop.k6.js",
+    "ai:smoke": "ts-node src/cli/ai-smoke.ts",
+    "recommendations:evaluate": "ts-node src/cli/recommendation-evaluation.ts",
     "prepare": "husky",
     "prisma:migrate:dev": "prisma migrate dev --name init",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:preflight": "ts-node prisma/preflight/production-baseline.ts",
     "prisma:generate:prod": "prisma generate --schema=prisma/schema.prod.prisma",
-    "prisma:generate:zod": "prisma generate",
     "prisma:seed": "prisma db seed -- --environment dev",
     "prisma:seed:prod": "prisma db seed -- --environment prod",
     "prisma:seed:permissions": "ts-node prisma/seed.ts --permissions-only",
-    "prisma:seed:demo": "ts-node prisma/seed-demo.ts",
+    "prisma:seed:catalog": "ts-node prisma/seed-catalog.ts",
     "prisma:reset": "prisma migrate reset"
   },
   "dependencies": {
@@ -118,8 +119,7 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.59.4",
-    "zod-prisma-types": "^3.3.11"
+    "typescript-eslint": "^8.59.4"
   },
   "jest": {
     "moduleFileExtensions": [

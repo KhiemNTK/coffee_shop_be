@@ -1,6 +1,10 @@
 # Coffee Shop Backend
 
-## Customer Wishlist And Demo Data
+Customer-owned order history and ingredient reservations are documented in
+[Customer Orders And Ingredient Commitments](docs/customer-orders-stock.md).
+Deploy the migration before the new API, with old inventory writers stopped.
+
+## Customer Wishlist And Catalog
 
 Apply `20261013000000_customer_wishlist` before deploying the API. Customers use
 Google sign-in and are separate from employees and role/permission grants. Configure
@@ -19,20 +23,38 @@ Cookies `customerSession` (HttpOnly) and `customerCsrfToken` are separate from s
   The server always uses the authenticated session as the owner. Cookie mutations
   require `X-CSRF-Token` from `customerCsrfToken`, even with a Bearer header present.
 
-Demo data is opt-in and is never part of production permission/OWNER seeding:
+The Coffee Homes catalog is opt-in, separate from permission/OWNER seeding:
 
 ```powershell
-pnpm prisma:seed:demo --database db_nestjs_coffee_shop_be --seed 20261013
+pnpm prisma:seed:catalog --database db_nestjs_coffee_shop_be --seed 20261017
 ```
 
 Only a loopback PostgreSQL database whose name exactly matches `--database` is
-allowed; production is rejected. Stable demo IDs make replay non-destructive even
+allowed; production is rejected. Stable catalog IDs make replay non-destructive even
 with another random seed: existing prices, recipes, soft deletions and consumed stock
-are preserved. New rows include four categories, 24 menu items/recipes, eight ingredients,
-three units, two kitchen stations, six empty tables and a zero-balance cash fund.
-Opening stock has matching IMPORT ledger rows, never fake invoices, payments,
-customers, staff accounts or cash revenue. Everything is explicitly named `Demo`.
-Seed randomness changes new prices and quantities only; it is not sales analytics data.
+are preserved. A fresh database receives five categories, 44 menu items with
+item-specific recipes, 32 ingredients, three units, two kitchen stations and ten
+empty tables. On an already seeded database only missing rows are inserted.
+Names and descriptions are customer-facing, without demo labels. Prices vary in VND 5,000 steps within
+product-specific ranges, bounded by reference ingredient costs; those reference
+costs are not written as accounting costs. Reorder thresholds also vary by seed.
+
+New ingredients start with zero stock and zero average cost. New menu items are
+unavailable until staff review them and post actual purchase receipts. This script
+creates no inventory/cash transactions, funds, invoices, payments, customers or staff
+accounts. Prices and recipes are proposed catalog values, not verified supplier or
+shop records. No supplier/customer PII or unverified image URLs are seeded.
+
+To replace the old demo catalog on this local database, explicitly add `--replace-demo`.
+Cleanup and catalog insertion commit together or roll back together. Only records
+whose IDs and names match the old seed are eligible: an unrelated record named
+`Demo ...` is not enough. Unused menu items and empty, unreferenced ingredients are
+deleted; records with orders, favorites, inventory ledger or other dependencies are
+soft-deleted instead. Active external catalog references prevent ingredient archival.
+Existing table/station IDs, occupancy, tickets, cash shifts and fund balance are
+preserved; only their old demo labels are replaced. Historical order snapshots and
+stock/cash transactions are never rewritten or deleted. Archived opening stock is
+not transferred into the new catalog: post real purchase receipts or stocktake first.
 
 NestJS, Prisma, PostgreSQL and Redis backend for a single coffee shop. API
 routes use `/api/v1` by default. PostgreSQL stores business state; Redis is
@@ -52,8 +74,8 @@ a shared database without reviewing the target URL and backup first.
   remain valid. Permission grants use one parameterized PostgreSQL query per load,
   retain active/deleted filters, and stay transaction-bound for delegation checks.
 - New idempotency snapshots use the same numeric Decimal JSON shape as HTTP
-  responses. Existing snapshots are preserved for safe retries; legacy Decimal
-  strings can remain until their 24-hour retention expires. Never clear them during
+  responses. Existing snapshots, including legacy Decimal strings, remain valid
+  for safe retries. Never clear them during
   deployment merely to change response types.
 - HTTP logging/metrics run before guards and record 401/403/429 and client aborts
   once, with request IDs and stable error codes. Query strings and request credentials
@@ -80,8 +102,31 @@ a shared database without reviewing the target URL and backup first.
 - Housekeeping deletes at most 500 rows per table per five-minute cycle:
   published outbox older than 30 days, auth sessions expired over 30 days ago,
   password-reset tokens expired over 7 days ago, and completed idempotency records
-  past their existing expiry. Pending/processing/dead-letter events, still-valid
+  past their existing expiry, except `inventory.stock.*` and `cashier-shift.*`.
+  Stock and cashier commands keep their request hashes and response snapshots so
+  delayed retries cannot repeat a movement or reopen/close another shift.
+  All four manual import/export endpoints require an
+  `idempotencyKey`; generate it once per command and reuse it on retry.
+  Pending/processing/dead-letter events, still-valid
   tokens, audit logs and financial records are not purged.
+- Password-reset requests commit the hashed token and email outbox intent in one
+  transaction. Outbox/Redis contain only the reset-token ID, never the bearer
+  token, email address or reset URL. The worker derives the link using a
+  purpose-scoped HMAC with `JWT_SECRET`, checks expiry/consumption/employee state,
+  and retries delivery failures. Rotating the secret invalidates unsent links;
+  request a new reset instead of reusing obsolete jobs. SMTP delivery is
+  at-least-once: a crash after sending may resend the same one-time link.
+  Stop previous API/outbox workers before starting this version; old workers
+  do not handle the new auth email event. Stock/cashier replay keys already
+  purged by an older version cannot be recovered by this change.
+- Cashier open/close/manual transactions require an `idempotencyKey`.
+  Close and manual transactions also require `expectedShiftId`, captured from
+  the shift the employee is viewing, not inferred again during recovery. A stale
+  target returns `409 CASHIER_SHIFT_CHANGED`; never substitute a new shift ID or
+  key for an uncertain command. Deploy the matching frontend with this API.
+  Legacy recovery commands without a shift ID remain blocked for reconciliation.
+  Fund type/deletion and cashier/handover retries use the shared serializable
+  transaction helper, including retry metrics. No new schema migration is needed.
 
 ## payOS Integration
 
@@ -461,8 +506,13 @@ managed files atomically. No automatic migration or seed runs on application sta
 
 Business analysis runs asynchronously in the existing application, never in POS
 checkout or public recommendations. It is disabled by default. See
-[configuration, API and activation checks](docs/business-insights.md) before
+[configuration, API and activation checks](deploy/ai/README.md) before
 enabling Gemini or seeding `/reports_insights_generate` on the intended database.
+
+The runbook includes queue alerts, synthetic quality cases, explicit provider
+smoke and the offline recommendation baseline. `pnpm ai:smoke`
+does not call Gemini unless `--live` is supplied. These tools do not migrate,
+seed or mutate business data.
 
 ## Cash Refunds And Order Remakes
 

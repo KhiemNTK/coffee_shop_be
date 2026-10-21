@@ -33,7 +33,7 @@ const optionalBlank = <T extends z.ZodType>(schema: T) =>
     schema.optional(),
   );
 
-const EnvironmentSchema = z
+export const EnvironmentSchema = z
   .object({
     NODE_ENV: z
       .enum(['development', 'test', 'production'])

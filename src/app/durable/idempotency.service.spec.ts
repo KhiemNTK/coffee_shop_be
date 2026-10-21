@@ -108,6 +108,35 @@ describe('IdempotencyService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it.each([
+    'inventory.stock.export',
+    'cashier-shift.open',
+    'cashier-shift.close',
+    'cashier-shift.movement.create',
+  ])(
+    'replays a retained %s command after its original 24-hour expiry',
+    async (operationName) => {
+      const input = {
+        employeeId: 'employee-id',
+        operation: operationName,
+        key: 'stock-command-key',
+        request: { quantity: '1' },
+      };
+      const operation = jest
+        .fn()
+        .mockResolvedValue({ transactionId: 'movement-id' });
+      const first = await service.execute(input, operation);
+      prisma.idempotencyRequest.findUnique.mockResolvedValue({
+        ...tx.idempotencyRequest.create.mock.calls[0][0].data,
+        expiresAt: new Date(0),
+        status: IdempotencyRequestStatus.COMPLETED,
+        response: first,
+      });
+      await expect(service.execute(input, operation)).resolves.toEqual(first);
+      expect(operation).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('replays the same monetary JSON shape, including nested Decimal values', async () => {
     const operation = jest.fn().mockResolvedValue({
       id: 'invoice',

@@ -37,3 +37,11 @@ OTEL_TRACES_SAMPLER_ARG=0.1
 
 HTTP, Express, NestJS and ioredis are instrumented. Application metrics remain
 Prometheus-native and logs remain JSON stdout to avoid duplicate telemetry.
+
+## Optional AI Queue
+
+When manager AI is enabled, the same scrape collects bounded BullMQ queue heads
+and counts. AI disabled means no queue connection for metrics. Rules include AI
+queue inspection failure, stalled queue heads and repeated terminal job failures.
+See the [AI runbook](../ai/README.md) for metric meanings, retry accounting and
+activation checks. Do not interpret token/job counters as a billing ledger.

@@ -31,6 +31,11 @@ import type {
   BusinessInsightSnapshot,
 } from '../src/common/types/business-insight.types';
 import { validateEnvironment } from '../src/config/environment';
+import {
+  aiInsightQueueJobs,
+  aiInsightQueueUp,
+  aiInsightQueueHeadAgeSeconds,
+} from '../src/common/observability/metrics';
 import { initApp } from '../src/init';
 
 jest.setTimeout(35_000);
@@ -594,6 +599,9 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       expect(warn).toHaveBeenCalledWith({
         event: 'ai.insights.failed',
         jobId: created.id,
+        outcome: 'retry',
+        errorCode: 'AI_PROVIDER_UNAVAILABLE',
+        attempts: 1,
       });
       const fresh = await snapshots.capture(
         from.toISOString(),
@@ -645,6 +653,39 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
+  it('collects real paused queue depth and clears its head age after processing', async () => {
+    await queue.pause();
+    try {
+      const created = await insights!.create(ids.employee, request());
+      await insights!.collectMetrics();
+      expect((await aiInsightQueueUp.get()).values[0].value).toBe(1);
+      expect((await aiInsightQueueJobs.get()).values).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            labels: expect.objectContaining({ state: 'waiting' }),
+            value: 1,
+          }),
+        ]),
+      );
+      await queue.resume();
+      expect((await terminal(created.id)).status).toBe('COMPLETED');
+      await insights!.collectMetrics();
+      expect((await aiInsightQueueHeadAgeSeconds.get()).values[0].value).toBe(
+        0,
+      );
+      expect((await aiInsightQueueJobs.get()).values).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            labels: expect.objectContaining({ state: 'waiting' }),
+            value: 0,
+          }),
+        ]),
+      );
+    } finally {
+      await queue.resume();
+    }
+  });
+
   it('enforces the shared provider-call budget across jobs and their retries', async () => {
     generate!.mockRejectedValue(new Error('AI_PROVIDER_UNAVAILABLE'));
     const jobs = await Promise.all([
@@ -665,6 +706,9 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       expect(warn).toHaveBeenCalledWith({
         event: 'ai.insights.failed',
         jobId: job.id,
+        outcome: 'failed',
+        errorCode: 'AI_DAILY_LIMIT',
+        attempts: 2,
       });
     }
   });

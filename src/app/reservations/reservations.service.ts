@@ -8,7 +8,6 @@ import {
   NotFoundException,
   OnApplicationBootstrap,
   OnApplicationShutdown,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   Prisma,
@@ -19,6 +18,7 @@ import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { OrdersService } from '../orders/orders.service';
@@ -248,7 +248,7 @@ export class ReservationsService
   ) {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const request = await tx.reservationRequest.findUnique({
           where: { id },
         });
@@ -306,7 +306,7 @@ export class ReservationsService
     { reason }: RejectReservationRequestDto,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const request = await tx.reservationRequest.findUnique({
         where: { id },
         select: { id: true },
@@ -337,7 +337,7 @@ export class ReservationsService
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         await this.assertActiveTable(tx, dto.tableId);
 
         const reservation = await tx.reservation.create({
@@ -399,7 +399,7 @@ export class ReservationsService
     const { expectedUpdatedAt, ...changes } = dto;
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await this.assertActiveEmployee(tx, employeeId);
+        await assertActiveEmployee(tx, employeeId);
         const existing = await tx.reservation.findUnique({ where: { id } });
         if (!existing) {
           throw new NotFoundException(`Reservation with ID ${id} not found.`);
@@ -459,7 +459,7 @@ export class ReservationsService
     { reason }: CancelReservationDto,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await tx.reservation.findUnique({
         where: { id },
         select: { id: true, status: true },
@@ -581,19 +581,6 @@ export class ReservationsService
     }
     if (endsAt <= new Date()) {
       throw new BadRequestException('endsAt must be in the future.');
-    }
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
     }
   }
 

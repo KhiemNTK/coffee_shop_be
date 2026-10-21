@@ -4,13 +4,13 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma, ServeStatus, SessionStatus } from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
+import { assertActiveEmployee } from '../../common/prisma/employee.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
@@ -73,7 +73,7 @@ export class MenuService {
 
   async createCategory(employeeId: string, dto: CreateMenuCategoryDto) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
 
       const category = await tx.menuCategory.create({
         data: dto,
@@ -154,7 +154,7 @@ export class MenuService {
     dto: UpdateMenuCategoryDto,
   ) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       await this.findActiveCategory(tx, id);
 
       const category = await tx.menuCategory.update({
@@ -176,7 +176,7 @@ export class MenuService {
 
   async deleteCategory(id: string, employeeId: string) {
     await this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       await this.findActiveCategory(tx, id);
 
       const activeItemCount = await tx.menuItem.count({
@@ -205,7 +205,7 @@ export class MenuService {
 
   async createItem(employeeId: string, dto: CreateMenuItemDto) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       await this.findActiveCategory(tx, dto.categoryId);
       if (dto.kitchenStationId) {
         await this.findActiveKitchenStation(tx, dto.kitchenStationId);
@@ -411,7 +411,7 @@ export class MenuService {
 
   async updateItem(id: string, employeeId: string, dto: UpdateMenuItemDto) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await this.findActiveItem(tx, id);
 
       if (dto.categoryId) {
@@ -463,7 +463,7 @@ export class MenuService {
     dto: UpdateMenuItemAvailabilityDto,
   ) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const existing = await this.findActiveItem(tx, id);
 
       if (existing.isAvailable === dto.isAvailable) {
@@ -510,7 +510,7 @@ export class MenuService {
     dto: ReplaceMenuRecipeDto,
   ) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       const item = await this.findActiveItem(tx, id);
       const ingredientIds = dto.ingredients.map(
         (ingredient) => ingredient.inventoryItemId,
@@ -620,7 +620,7 @@ export class MenuService {
     dto: ReplaceMenuOptionsDto,
   ) {
     return this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       await this.findActiveItem(tx, id);
       const ingredientIds = [
         ...new Set(
@@ -713,7 +713,7 @@ export class MenuService {
 
   async deleteItem(id: string, employeeId: string) {
     await this.runSerializable(async (tx) => {
-      await this.assertActiveEmployee(tx, employeeId);
+      await assertActiveEmployee(tx, employeeId);
       await this.findActiveItem(tx, id);
 
       const activeOrderItemCount = await tx.orderItem.count({
@@ -815,19 +815,6 @@ export class MenuService {
       throw new NotFoundException(
         `Active kitchen station with ID ${id} not found.`,
       );
-    }
-  }
-
-  private async assertActiveEmployee(
-    tx: ExtendedPrismaTransactionClient,
-    employeeId: string,
-  ) {
-    const employee = await tx.employee.findFirst({
-      where: { id: employeeId, isActive: true, deletedAt: null },
-      select: { id: true },
-    });
-    if (!employee) {
-      throw new UnauthorizedException('Employee is inactive or not found.');
     }
   }
 

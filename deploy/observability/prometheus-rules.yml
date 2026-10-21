@@ -1,4 +1,41 @@
 groups:
+  - name: coffee-shop-ai-insights
+    rules:
+      - alert: CoffeeShopAiQueueUnavailable
+        expr: coffee_shop_ai_insight_enabled == 1 and coffee_shop_ai_insight_queue_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: AI insight queue cannot be inspected
+          description: Check Redis and worker logs; do not blindly resubmit paid analyses.
+
+      - alert: CoffeeShopAiQueueStalled
+        expr: coffee_shop_ai_insight_queue_head_age_seconds > 120 and coffee_shop_ai_insight_queue_up == 1 and coffee_shop_ai_insight_enabled == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: AI insight queue head has not finished
+          description: Inspect worker health, SQL latency and delayed retries before restarting.
+
+      - alert: CoffeeShopAiJobsFailing
+        expr: sum(increase(coffee_shop_ai_insight_jobs_total{outcome="failed"}[1h])) >= 3
+        labels:
+          severity: warning
+        annotations:
+          summary: Multiple AI insight jobs failed
+          description: Inspect bounded error codes, provider configuration and daily call budget.
+
+      - alert: CoffeeShopAiRetriesStalled
+        expr: coffee_shop_ai_insight_queue_jobs{state="delayed"} > 0 and on(instance) coffee_shop_ai_insight_queue_up == 1 and on(instance) coffee_shop_ai_insight_enabled == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: AI insight retries have remained delayed
+          description: Normal retry delays are seconds; inspect worker and scheduler recovery.
+
   - name: coffee-shop-api
     rules:
       - alert: CoffeeShopApiTargetDown
