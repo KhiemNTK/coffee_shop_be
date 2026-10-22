@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { Prisma } from '@prisma/client';
 import type {
   BusinessInsightAnalysisSchema,
   BusinessInsightSuggestionsSchema,
@@ -48,4 +49,14 @@ export interface BusinessInsightJobData {
 export interface BusinessInsightResult {
   snapshot: BusinessInsightSnapshot;
   analysis: BusinessInsightAnalysis;
+}
+
+export interface BusinessInsightBreakdownRow {
+  kind: 'item' | 'category';
+  id: string;
+  name: string;
+  quantity: bigint;
+  previousQuantity: bigint;
+  sales: Prisma.Decimal;
+  previousSales: Prisma.Decimal;
 }

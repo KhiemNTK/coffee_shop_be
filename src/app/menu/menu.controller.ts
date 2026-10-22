@@ -22,6 +22,7 @@ import {
   CreateMenuItemDto,
   GetMenuCategoriesDto,
   GetMenuItemsDto,
+  GetPublicMenuItemsDto,
   ReplaceMenuOptionsDto,
   ReplaceMenuRecipeDto,
   UpdateMenuCategoryDto,
@@ -85,7 +86,7 @@ export class MenuController {
 
   @Get('public/items')
   @SkipAuth()
-  getPublicItems(@Query() query: GetMenuItemsDto) {
+  getPublicItems(@Query() query: GetPublicMenuItemsDto) {
     return this.menuService.getPublicItems(query);
   }
 

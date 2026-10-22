@@ -51,7 +51,7 @@ export class PromotionQueryService {
       select: this.promotionSelect,
       skip: paging.skip,
       take: paging.itemPerPage,
-      orderBy: { [sortBy]: sortOrder },
+      orderBy: [{ [sortBy]: sortOrder }, { id: 'asc' }],
     });
 
     return paging.format(

@@ -156,6 +156,29 @@ export const EnvironmentSchema = z
       .default('22:00'),
     ONLINE_REORDER_SECRET: z.string().min(32).optional(),
     TELEGRAM_BOT_TOKEN: OptionalCredentialSchema,
+    TELEGRAM_STAFF_CHAT_ID: optionalBlank(
+      z
+        .string()
+        .trim()
+        .regex(/^-[1-9]\d{0,15}$/)
+        .refine(
+          (value) => Math.abs(Number(value)) < 2 ** 52,
+          'Invalid Telegram group ID',
+        ),
+    ),
+    TELEGRAM_WEB_APP_URL: optionalBlank(
+      z.url().refine((value) => {
+        const url = new URL(value);
+        return (
+          url.protocol === 'https:' &&
+          url.pathname === '/' &&
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash
+        );
+      }, 'TELEGRAM_WEB_APP_URL must be an HTTPS origin without credentials, path or query'),
+    ),
     TELEGRAM_BOT_USERNAME: optionalBlank(
       z
         .string()
@@ -304,7 +327,16 @@ export function validateEnvironment(raw: Record<string, unknown>) {
     environment.TELEGRAM_BOT_USERNAME,
     environment.TELEGRAM_WEBHOOK_SECRET,
   ];
-  if (telegram.some(Boolean) && telegram.some((value) => !value)) {
+  const staffOnly =
+    environment.TELEGRAM_STAFF_CHAT_ID &&
+    telegram[0] &&
+    !telegram[1] &&
+    !telegram[2];
+  if (
+    (telegram.some(Boolean) || environment.TELEGRAM_STAFF_CHAT_ID) &&
+    !staffOnly &&
+    telegram.some((value) => !value)
+  ) {
     throw new Error(
       'Telegram requires bot token, username and webhook secret.',
     );

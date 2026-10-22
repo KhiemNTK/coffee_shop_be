@@ -98,6 +98,12 @@ export const httpRequestsInFlight = new Gauge({
   registers: [metricsRegistry],
 });
 
+export const kitchenSseActiveConnections = new Gauge({
+  name: 'coffee_shop_kitchen_sse_active_connections',
+  help: 'Active kitchen SSE subscriptions on this application instance.',
+  registers: [metricsRegistry],
+});
+
 export const transactionRetriesTotal = new Counter({
   name: 'coffee_shop_transaction_retries_total',
   help: 'Serializable transaction retries caused by database conflicts.',

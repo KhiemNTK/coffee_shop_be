@@ -9,15 +9,27 @@ import {
   NotFoundException,
   OnApplicationBootstrap,
   OnModuleDestroy,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, Queue, UnrecoverableError, Worker } from 'bullmq';
+import { z } from 'zod';
 import type {
   BusinessInsightJobData,
   BusinessInsightResult,
+  BusinessInsightSuggestions,
 } from '../../common/types';
-import { CreateBusinessInsightDto } from './dto/business-insight.dto';
+import {
+  CreateBusinessInsightDto,
+  GetBusinessInsightsDto,
+} from './dto/business-insight.dto';
+import {
+  BusinessInsightHistoryService,
+  INSIGHT_REQUESTED,
+} from './business-insight-history.service';
+import { DomainEventBusService } from '../durable/domain-event-bus.service';
+import { InsightRedisConnection } from './insight-redis-connection';
 import {
   BUSINESS_INSIGHT_MAX_RANGE_DAYS,
   BUSINESS_INSIGHT_PROMPT_VERSION,
@@ -40,6 +52,10 @@ import {
 const QUEUE_NAME = 'business-insights';
 const RETENTION_SECONDS = BUSINESS_INSIGHT_RETENTION_DAYS * 86_400;
 const REDIS_TIMEOUT_MS = 2_000;
+const DispatchSchema = z.object({
+  id: z.string().regex(/^[a-f0-9]{64}$/),
+  employeeId: z.uuid(),
+});
 const ADMIT_SCRIPT = `
   local previous = redis.call('GET', KEYS[2])
   if previous then
@@ -63,7 +79,7 @@ const CALL_BUDGET_SCRIPT = `
 
 @Injectable()
 export class BusinessInsightsService
-  implements OnApplicationBootstrap, OnModuleDestroy
+  implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy
 {
   private readonly logger = new Logger(BusinessInsightsService.name);
   private queue?: Queue<
@@ -78,12 +94,21 @@ export class BusinessInsightsService
   >;
   private ready?: Promise<void>;
   private stopping = false;
+  private unsubscribe?: () => void;
 
   constructor(
     private readonly config: ConfigService,
     private readonly snapshots: BusinessInsightSnapshotService,
     private readonly gemini: GeminiInsightsService,
+    private readonly history: BusinessInsightHistoryService,
+    private readonly eventBus: DomainEventBusService,
   ) {}
+
+  onModuleInit() {
+    this.unsubscribe = this.eventBus.on(INSIGHT_REQUESTED, (payload) =>
+      this.dispatch(payload),
+    );
+  }
 
   getConfiguration() {
     return {
@@ -102,6 +127,7 @@ export class BusinessInsightsService
 
   async onModuleDestroy() {
     this.stopping = true;
+    this.unsubscribe?.();
     this.gemini.stop();
     await Promise.all([
       this.closeRedisResource(this.worker, true),
@@ -150,13 +176,18 @@ export class BusinessInsightsService
   async create(employeeId: string, dto: CreateBusinessInsightDto) {
     if (Date.parse(dto.to) > Date.now())
       throw new BadRequestException('Insight period cannot end in the future.');
-    const queue = await this.getQueue();
     const id = this.hash(`${employeeId}:${dto.clientRequestId}`);
     const from = new Date(dto.from).toISOString();
     const to = new Date(dto.to).toISOString();
     const requestHash = this.hash(
       JSON.stringify({ from, to, timeZone: dto.timeZone }),
     );
+    const saved = await this.history.find(employeeId, id);
+    if (saved) {
+      this.history.checkRequest(saved, requestHash);
+      return this.history.present(saved);
+    }
+    const queue = await this.getQueue();
     try {
       const existing = await queue.getJob(id);
       if (existing) {
@@ -196,30 +227,21 @@ export class BusinessInsightsService
           },
           HttpStatus.TOO_MANY_REQUESTS,
         );
-      await queue.add(
-        'generate',
-        {
-          employeeId,
-          requestHash,
-          from,
-          to,
-          timeZone: dto.timeZone,
-          requestedAt: new Date().toISOString(),
-          model: this.config.getOrThrow<string>('GEMINI_MODEL'),
-          promptVersion: BUSINESS_INSIGHT_PROMPT_VERSION,
-        },
-        {
-          jobId: id,
-          attempts: 2,
-          backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
-          removeOnComplete: { age: RETENTION_SECONDS, count: 700 },
-          removeOnFail: { age: RETENTION_SECONDS, count: 700 },
-        },
+      const stored = await this.history.record(id, {
+        employeeId,
+        requestHash,
+        from,
+        to,
+        timeZone: dto.timeZone,
+        requestedAt: new Date().toISOString(),
+        model: this.config.getOrThrow<string>('GEMINI_MODEL'),
+        promptVersion: BUSINESS_INSIGHT_PROMPT_VERSION,
+      });
+      // The committed outbox retries delivery if the fast path loses Redis.
+      await this.dispatch({ id, employeeId }).catch(() =>
+        this.logger.warn({ event: 'ai.insights.delivery_pending', jobId: id }),
       );
-      const stored = await queue.getJob(id);
-      if (!stored)
-        throw new ServiceUnavailableException('AI_QUEUE_UNAVAILABLE');
-      return await this.present(stored);
+      return this.history.present(stored);
     } catch (error) {
       if (error instanceof HttpException) throw error;
       throw new ServiceUnavailableException({
@@ -230,6 +252,15 @@ export class BusinessInsightsService
   }
 
   async get(employeeId: string, id: string) {
+    const saved = await this.history.find(employeeId, id);
+    if (saved) {
+      if (saved.expiresAt.getTime() <= Date.now())
+        throw new NotFoundException('Insight not found or expired.');
+      return this.history.present(saved);
+    }
+    if (!this.getConfiguration().enabled)
+      throw new NotFoundException('Insight not found or expired.');
+    // Recover pre-migration references while their Redis jobs are still retained.
     const queue = await this.getQueue();
     try {
       const job = await queue.getJob(id);
@@ -240,7 +271,14 @@ export class BusinessInsightsService
           RETENTION_SECONDS * 1_000
       )
         throw new NotFoundException('Insight not found or expired.');
-      return await this.present(job);
+      const view = await this.present(job);
+      if (view.status === 'COMPLETED') {
+        await this.history.record(id, job.data, false, {
+          snapshot: view.snapshot!,
+          analysis: view.analysis!,
+        });
+      }
+      return view;
     } catch (error) {
       if (error instanceof HttpException) throw error;
       throw new ServiceUnavailableException({
@@ -250,47 +288,111 @@ export class BusinessInsightsService
     }
   }
 
+  list(employeeId: string, query: GetBusinessInsightsDto) {
+    return this.history.list(employeeId, query);
+  }
+
+  async dispatch(payload: unknown) {
+    const { id, employeeId } = DispatchSchema.parse(payload);
+    const row = await this.history.find(employeeId, id);
+    if (
+      !row ||
+      row.expiresAt.getTime() <= Date.now() ||
+      row.status === 'COMPLETED' ||
+      row.status === 'FAILED'
+    )
+      return;
+    const queue = await this.getQueue();
+    await queue.add('generate', this.history.jobData(row), {
+      jobId: id,
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
+      removeOnComplete: { age: RETENTION_SECONDS, count: 700 },
+      removeOnFail: { age: RETENTION_SECONDS, count: 700 },
+    });
+  }
+
   async process(
     job: Job<BusinessInsightJobData, BusinessInsightResult, 'generate'>,
   ): Promise<BusinessInsightResult> {
-    if (job.data.promptVersion !== BUSINESS_INSIGHT_PROMPT_VERSION)
-      throw new UnrecoverableError('AI_VERSION_CHANGED');
-    const requestedAt = Date.parse(job.data.requestedAt);
-    if (
-      !Number.isFinite(requestedAt) ||
-      Date.now() - requestedAt >= RETENTION_SECONDS * 1_000
-    )
-      throw new UnrecoverableError('AI_JOB_EXPIRED');
-    if (!job.data.snapshot) {
-      const snapshot = await this.snapshots.capture(job.data.from, job.data.to);
-      await job.updateData({ ...job.data, snapshot });
+    const row =
+      (await this.history.find(job.data.employeeId, job.id!)) ??
+      (await this.history.record(job.id!, job.data, false));
+    if (row.status === 'COMPLETED') {
+      const view = this.history.present(row);
+      return { snapshot: view.snapshot!, analysis: view.analysis! };
     }
-    const snapshot = job.data.snapshot!;
-    if (
-      snapshot.metrics.find((metric) => metric.key === 'paidInvoiceCount')
-        ?.value === '0'
-    ) {
-      return {
+    if (row.status === 'FAILED')
+      throw new UnrecoverableError(row.errorCode ?? 'AI_JOB_FAILED');
+    try {
+      if (job.data.promptVersion !== BUSINESS_INSIGHT_PROMPT_VERSION)
+        throw new UnrecoverableError('AI_VERSION_CHANGED');
+      const requestedAt = Date.parse(job.data.requestedAt);
+      if (
+        !Number.isFinite(requestedAt) ||
+        Date.now() - requestedAt >= RETENTION_SECONDS * 1_000
+      )
+        throw new UnrecoverableError('AI_JOB_EXPIRED');
+      if (row.providerStartedAt)
+        throw new UnrecoverableError('AI_OUTCOME_UNKNOWN');
+      if (row.snapshot) job.data.snapshot = this.history.present(row).snapshot!;
+      if (!job.data.snapshot) {
+        const snapshot = await this.snapshots.capture(
+          job.data.from,
+          job.data.to,
+        );
+        await job.updateData({ ...job.data, snapshot });
+      }
+      const snapshot = job.data.snapshot!;
+      await this.history.start(job.id!, snapshot);
+      if (
+        snapshot.metrics.find((metric) => metric.key === 'paidInvoiceCount')
+          ?.value === '0'
+      ) {
+        const result = {
+          snapshot,
+          analysis: buildBusinessInsightAnalysis(snapshot),
+        };
+        await this.history.complete(job.id!, result);
+        return result;
+      }
+      const client = await this.queue!.client;
+      client.defineCommand('insightCallBudget', {
+        numberOfKeys: 1,
+        lua: CALL_BUDGET_SCRIPT,
+      });
+      const budget: unknown = await client.runCommand('insightCallBudget', [
+        `ai:insights:calls:${new Date().toISOString().slice(0, 10)}`,
+        this.config.get<number>('GEMINI_DAILY_REQUEST_LIMIT', 20),
+      ]);
+      const granted = Number(budget);
+      if (!granted) throw new UnrecoverableError('AI_DAILY_LIMIT');
+      const claimed = await this.history.beginProvider(job.id!);
+      if (!claimed.count) throw new UnrecoverableError('AI_OUTCOME_UNKNOWN');
+      let suggestions: BusinessInsightSuggestions;
+      try {
+        suggestions = await this.gemini.generate(snapshot, job.data.model);
+      } catch (error) {
+        await this.history.resetProvider(job.id!);
+        throw error;
+      }
+      const result = {
         snapshot,
-        analysis: buildBusinessInsightAnalysis(snapshot),
+        analysis: buildBusinessInsightAnalysis(snapshot, suggestions),
       };
+      await this.history.complete(job.id!, result);
+      return result;
+    } catch (error) {
+      const terminal =
+        error instanceof UnrecoverableError ||
+        job.attemptsMade + 1 >= (job.opts?.attempts ?? 2);
+      await this.history.fail(
+        job.id!,
+        this.errorCode(error instanceof Error ? error.message : ''),
+        terminal,
+      );
+      throw error;
     }
-    const client = await this.queue!.client;
-    client.defineCommand('insightCallBudget', {
-      numberOfKeys: 1,
-      lua: CALL_BUDGET_SCRIPT,
-    });
-    const budget: unknown = await client.runCommand('insightCallBudget', [
-      `ai:insights:calls:${new Date().toISOString().slice(0, 10)}`,
-      this.config.get<number>('GEMINI_DAILY_REQUEST_LIMIT', 20),
-    ]);
-    const granted = Number(budget);
-    if (!granted) throw new UnrecoverableError('AI_DAILY_LIMIT');
-    const suggestions = await this.gemini.generate(snapshot, job.data.model);
-    return {
-      snapshot,
-      analysis: buildBusinessInsightAnalysis(snapshot, suggestions),
-    };
   }
 
   private async getQueue() {
@@ -313,49 +415,73 @@ export class BusinessInsightsService
   private ensureReady(): Promise<void> {
     if (this.stopping) return Promise.reject(new Error('Stopping'));
     if (this.ready) return this.ready;
+    const url = new URL(this.config.getOrThrow<string>('REDIS_URL'));
+    const connection = {
+      host: url.hostname,
+      port: Number(url.port || 6379),
+      username: url.username ? decodeURIComponent(url.username) : undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
+      db: Number(url.pathname.slice(1) || 0),
+      connectTimeout: 1_000,
+      ...(url.protocol === 'rediss:' ? { tls: {} } : {}),
+    };
     if (!this.queue) {
-      const url = new URL(this.config.getOrThrow<string>('REDIS_URL'));
-      const connection = {
-        host: url.hostname,
-        port: Number(url.port || 6379),
-        username: url.username ? decodeURIComponent(url.username) : undefined,
-        password: url.password ? decodeURIComponent(url.password) : undefined,
-        db: Number(url.pathname.slice(1) || 0),
-        connectTimeout: 1_000,
-        ...(url.protocol === 'rediss:' ? { tls: {} } : {}),
-      };
-      this.queue = new Queue(QUEUE_NAME, {
-        connection: {
-          ...connection,
-          enableOfflineQueue: false,
-          maxRetriesPerRequest: 1,
-          commandTimeout: REDIS_TIMEOUT_MS,
+      this.queue = new Queue(
+        QUEUE_NAME,
+        {
+          connection: {
+            ...connection,
+            enableOfflineQueue: false,
+            maxRetriesPerRequest: 1,
+            commandTimeout: REDIS_TIMEOUT_MS,
+          },
         },
-      });
-      this.worker = new Worker(QUEUE_NAME, (job) => this.process(job), {
-        connection: { ...connection, maxRetriesPerRequest: null },
-        concurrency: 1,
-        limiter: { max: 1, duration: 1_000 },
-        autorun: false,
-      });
+        InsightRedisConnection,
+      );
       this.queue.on('error', () =>
         this.logger.warn({ event: 'ai.insights.queue_error' }),
-      );
-      this.worker.on('error', () =>
-        this.logger.warn({ event: 'ai.insights.worker_error' }),
-      );
-      this.worker.on('completed', (job) => this.recordJobOutcome(job));
-      this.worker.on('failed', (job, error) =>
-        this.recordJobOutcome(job, error),
       );
     }
     this.ready = this.queue
       .setGlobalConcurrency(1)
       .then(() => {
-        if (!this.stopping && !this.worker!.isRunning())
-          void this.worker!.run().catch(() =>
-            this.logger.warn({ event: 'ai.insights.worker_stopped' }),
+        if (this.stopping) return;
+        // Do not create blocking worker connections until Redis admission is ready.
+        if (!this.worker) {
+          this.worker = new Worker(
+            QUEUE_NAME,
+            (job) => this.process(job),
+            {
+              connection: { ...connection, maxRetriesPerRequest: null },
+              concurrency: 1,
+              limiter: { max: 1, duration: 1_000 },
+              autorun: false,
+            },
+            InsightRedisConnection,
           );
+          this.worker.on('error', () =>
+            this.logger.warn({ event: 'ai.insights.worker_error' }),
+          );
+          this.worker.on('completed', (job) => this.recordJobOutcome(job));
+          this.worker.on('failed', (job, error) => {
+            this.recordJobOutcome(job, error);
+            if (job?.finishedOn !== undefined)
+              void this.history
+                .fail(job.id!, this.errorCode(error.message), true)
+                .catch(() =>
+                  this.logger.warn({
+                    event: 'ai.insights.status_write_failed',
+                    jobId: job.id,
+                  }),
+                );
+          });
+        }
+        if (!this.worker.isRunning())
+          void this.worker
+            .run()
+            .catch(() =>
+              this.logger.warn({ event: 'ai.insights.worker_stopped' }),
+            );
       })
       .catch((error: unknown) => {
         this.ready = undefined;
@@ -374,7 +500,11 @@ export class BusinessInsightsService
       if (!latest) throw new NotFoundException('Insight not found or expired.');
       job = latest;
     }
-    const obsolete = job.data.promptVersion !== BUSINESS_INSIGHT_PROMPT_VERSION;
+    const legacyCompleted =
+      state === 'completed' && job.data.promptVersion === 'business-finance-v2';
+    const obsolete =
+      job.data.promptVersion !== BUSINESS_INSIGHT_PROMPT_VERSION &&
+      !legacyCompleted;
     const status = obsolete
       ? 'FAILED'
       : state === 'completed' && job.returnvalue
@@ -454,10 +584,16 @@ export class BusinessInsightsService
     resource?: {
       close(force?: boolean): Promise<void>;
       disconnect(): Promise<void>;
+      waitUntilReady?(): Promise<unknown>;
     },
     force = false,
   ) {
     if (!resource) return;
+    // Let initialization settle before BullMQ removes its connection error listeners.
+    if (resource.waitUntilReady)
+      await this.withRedisTimeout(resource.waitUntilReady()).catch(
+        () => undefined,
+      );
     try {
       await this.withRedisTimeout(resource.close(force));
     } catch {

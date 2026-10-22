@@ -21,6 +21,7 @@ Set `APP_DOMAIN` to the real hostname, point DNS to the VPS, and permit only SSH
   credentials and production URLs supplied by the provider, never sandbox URLs.
 - Disable Swagger. Either disable metrics or configure a strong metrics token.
 - Never put secrets in `VITE_*`; those values are embedded in the public bundle.
+- Optional Telegram customer updates and private staff alerts: see [setup and delivery limits](telegram/README.md). Leave bot settings blank when unused.
 
 The Compose file overrides HTTPS cookie, CSRF, public signup, API prefix and
 proxy settings. Only the frontend reverse proxy publishes ports. PostgreSQL and
@@ -37,12 +38,18 @@ docker compose --env-file .env.production -f deploy/compose.production.yml build
 docker compose --env-file .env.production -f deploy/compose.production.yml up -d postgres redis
 docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling
 docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/ts-node/dist/bin.js prisma/seed.ts --permissions-only
+docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/ts-node/dist/bin.js prisma/preflight/permissions.ts
+
 docker compose --env-file .env.production -f deploy/compose.production.yml up -d backend frontend
 ```
 
 The tooling service is opt-in and runs `prisma migrate deploy`; seeding permissions
 is a separate explicit command. Bootstrap OWNER using the controlled seed workflow
 with `OWNER_*` configured privately, never public signup.
+
+The read-only permission catalog check must pass before release. See the
+[catalog and concurrent-edit contract](authorization/README.md) for legacy API
+compatibility and backend-first frontend rollout.
 
 Check `/api/v1/health/live` and `/api/v1/health/ready` through the real HTTPS hostname,
 then verify login/refresh/CSRF, menu, a cash sale, explicit table completion and

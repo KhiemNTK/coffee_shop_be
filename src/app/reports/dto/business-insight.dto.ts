@@ -22,3 +22,13 @@ export class CreateBusinessInsightDto extends createZodDto(
 export class BusinessInsightIdDto extends createZodDto(
   z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/) }),
 ) {}
+
+export class GetBusinessInsightsDto extends createZodDto(
+  z.strictObject({
+    cursor: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(10),
+  }),
+) {}

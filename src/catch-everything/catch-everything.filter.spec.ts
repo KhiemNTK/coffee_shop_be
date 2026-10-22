@@ -7,7 +7,6 @@ import { ExpressAdapter } from '@nestjs/platform-express';
 import express from 'express';
 import request from 'supertest';
 import { httpLocaleMiddleware } from '../common/i18n/http-locale';
-import { ApiUtilService } from '../common/utils/api-util/api-util.service';
 import { ZodExceptionService } from './zod-exception/zod-exception.service';
 
 describe('CatchEverythingFilter', () => {
@@ -33,7 +32,6 @@ describe('CatchEverythingFilter', () => {
       const actualFilter = new CatchEverythingFilter(
         adapter,
         new ZodExceptionService(),
-        new ApiUtilService(),
       );
       const app = express().use(httpLocaleMiddleware);
       app.get('/conflict', (req, res) => {

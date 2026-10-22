@@ -897,6 +897,12 @@ export class ReportsService {
             WHERE pa."status" = 'REQUIRES_REVIEW'
           ), 0)::numeric AS "requiresReviewAttemptAmount"
         FROM "PaymentAttempt" pa
+        WHERE pa."status" IN ('PENDING', 'REQUIRES_REVIEW')
+          OR (
+            pa."status" IN ('SUCCEEDED', 'FAILED')
+            AND pa."completedAt" >= ${period.from}
+            AND pa."completedAt" < ${period.to}
+          )
       ) attempt_metrics
       CROSS JOIN (
         SELECT COUNT(*)::bigint AS "webhookExceptionCount"
@@ -929,6 +935,12 @@ export class ReportsService {
             WHERE pr."status" = 'REQUIRES_REVIEW'
           ), 0)::numeric AS "reviewRefundAmount"
         FROM (${INVOICE_REFUNDS_SQL}) pr
+        WHERE pr."status" = 'REQUIRES_REVIEW'
+          OR (
+            pr."status" = 'SUCCEEDED'
+            AND pr."completedAt" >= ${period.from}
+            AND pr."completedAt" < ${period.to}
+          )
       ) refund_metrics
       CROSS JOIN (
         SELECT COUNT(*)::bigint AS "openReconciliationIncidentCount"

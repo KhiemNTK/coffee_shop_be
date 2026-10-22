@@ -20,6 +20,13 @@ import { AppModule } from '../src/app/app.module';
 import { AuthSessionService } from '../src/app/auth/auth-session.service';
 import { BusinessInsightSnapshotService } from '../src/app/reports/business-insight-snapshot.service';
 import { BusinessInsightsService } from '../src/app/reports/business-insights.service';
+import { BusinessInsightHistoryService } from '../src/app/reports/business-insight-history.service';
+import { INSIGHT_REQUESTED } from '../src/app/reports/business-insight-history.service';
+import { queryInsightBreakdown } from '../src/app/reports/business-insight-breakdown.query';
+import { buildBusinessInsightAnalysis } from '../src/app/reports/business-insight.analysis';
+import type { ExtendedPrismaTransactionClient } from '../src/common/types';
+import { OutboxService } from '../src/app/durable/outbox.service';
+import { DomainEventBusService } from '../src/app/durable/domain-event-bus.service';
 import type { CreateBusinessInsightDto } from '../src/app/reports/dto/business-insight.dto';
 import { GeminiInsightsService } from '../src/app/reports/gemini-insights.service';
 import { PermissionKeys } from '../src/common/consts/permission-keys';
@@ -79,6 +86,8 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
   let redis: Redis;
   let queue: Queue<BusinessInsightJobData, BusinessInsightResult, 'generate'>;
   let snapshots: BusinessInsightSnapshotService;
+  let history: BusinessInsightHistoryService;
+  const eventBus = new DomainEventBusService();
   let gemini: GeminiInsightsService;
   let insights: BusinessInsightsService | undefined;
   let warn: jest.SpyInstance<void, Parameters<Logger['warn']>> | undefined;
@@ -257,6 +266,10 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     snapshots = new BusinessInsightSnapshotService(
       prisma as unknown as ExtendedPrismaClient,
     );
+    history = new BusinessInsightHistoryService(
+      prisma as unknown as ExtendedPrismaClient,
+      new OutboxService(),
+    );
     const connection = {
       host: redisUrl.hostname,
       port: Number(redisUrl.port || 6379),
@@ -305,6 +318,17 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     ).id;
     ids.session = (
       await prisma.orderSession.create({ data: { employeeId: ids.employee } })
+    ).id;
+    ids.otherEmployee = (
+      await prisma.employee.create({
+        data: {
+          email: `insight-other-${suffix}@example.com`,
+          username: `insight-other-${suffix}`,
+          fullName: 'Other insight employee',
+          password: 'test-only',
+          positionId: ids.position,
+        },
+      })
     ).id;
     ids.shift = (
       await prisma.cashierShift.create({
@@ -357,6 +381,17 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     expectedFailureJobs.clear();
     warn?.mockClear();
     await clearRedis();
+    await prisma.businessInsight.deleteMany({
+      where: { employeeId: { in: [ids.employee, ids.otherEmployee] } },
+    });
+    await prisma.outboxEvent.deleteMany({
+      where: {
+        aggregateType: 'BusinessInsight',
+        OR: [ids.employee, ids.otherEmployee].map((employeeId) => ({
+          payload: { path: ['employeeId'], equals: employeeId },
+        })),
+      },
+    });
     const config = new ConfigService({
       AI_INSIGHTS_ENABLED: true,
       REDIS_URL: redisUrl.href,
@@ -366,7 +401,13 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     });
     gemini = new GeminiInsightsService(config);
     generate = jest.spyOn(gemini, 'generate').mockResolvedValue(analysis);
-    insights = new BusinessInsightsService(config, snapshots, gemini);
+    insights = new BusinessInsightsService(
+      config,
+      snapshots,
+      gemini,
+      history,
+      eventBus,
+    );
   });
 
   afterEach(async () => {
@@ -398,6 +439,19 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
             if (prisma && ids.employee) {
               assertSafeTargets();
               await prisma.$transaction([
+                prisma.businessInsight.deleteMany({
+                  where: {
+                    employeeId: { in: [ids.employee, ids.otherEmployee] },
+                  },
+                }),
+                prisma.outboxEvent.deleteMany({
+                  where: {
+                    aggregateType: 'BusinessInsight',
+                    OR: [ids.employee, ids.otherEmployee].map((employeeId) => ({
+                      payload: { path: ['employeeId'], equals: employeeId },
+                    })),
+                  },
+                }),
                 prisma.paymentRefund.deleteMany({
                   where: { requestedById: ids.employee },
                 }),
@@ -413,7 +467,9 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
                 prisma.cashierShift.deleteMany({
                   where: { employeeId: ids.employee },
                 }),
-                prisma.employee.deleteMany({ where: { id: ids.employee } }),
+                prisma.employee.deleteMany({
+                  where: { id: { in: [ids.employee, ids.otherEmployee] } },
+                }),
               ]);
             }
             if (prisma && ids.position) {
@@ -436,7 +492,13 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
     const defaults = new ConfigService(
       validateEnvironment({ NODE_ENV: 'test', DATABASE_URL: databaseUrl.href }),
     );
-    const disabled = new BusinessInsightsService(defaults, snapshots, gemini);
+    const disabled = new BusinessInsightsService(
+      defaults,
+      snapshots,
+      gemini,
+      history,
+      eventBus,
+    );
     try {
       expect(disabled.getConfiguration().enabled).toBe(false);
       await expect(
@@ -448,14 +510,262 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       await expect(
         disabled.get(ids.employee, 'a'.repeat(64)),
       ).rejects.toMatchObject({
-        status: 503,
-        response: { code: 'AI_DISABLED' },
+        status: 404,
       });
       expect(await queue.getJobs()).toHaveLength(0);
       expect(await redis.get(dailyKey('admissions'))).toBeNull();
       expect(generate).not.toHaveBeenCalled();
     } finally {
       await disabled.onModuleDestroy();
+    }
+  });
+
+  it('reads private paginated history after Redis is erased and AI is disabled without spending quota', async () => {
+    const dto = request();
+    const created = await insights!.create(ids.employee, dto);
+    const result = await terminal(created.id);
+    await insights!.onModuleDestroy();
+    await clearRedis();
+    const reader = new BusinessInsightsService(
+      new ConfigService(),
+      snapshots,
+      gemini,
+      history,
+      eventBus,
+    );
+    expect(await reader.get(ids.employee, created.id)).toEqual(result);
+    expect(await reader.create(ids.employee, dto)).toEqual(result);
+    const list = await reader.list(ids.employee, { limit: 1 });
+    expect(list.items.map((item) => item.id)).toEqual([created.id]);
+    expect(list.items[0]).not.toHaveProperty('snapshot');
+    expect(list.items[0]).not.toHaveProperty('analysis');
+    expect(await reader.list(ids.otherEmployee, { limit: 1 })).toEqual({
+      items: [],
+      nextCursor: null,
+    });
+    expect(
+      await reader.list(ids.otherEmployee, { limit: 1, cursor: created.id }),
+    ).toEqual({ items: [], nextCursor: null });
+    await expect(reader.get(ids.otherEmployee, created.id)).rejects.toThrow();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(await redis.get(dailyKey('admissions'))).toBeNull();
+    expect(await redis.get(dailyKey('calls'))).toBeNull();
+    await prisma.businessInsight.update({
+      where: { id: created.id },
+      data: {
+        requestedAt: new Date(Date.now() - 8 * 86_400_000),
+        expiresAt: new Date(Date.now() - 86_400_000),
+      },
+    });
+    await expect(reader.get(ids.employee, created.id)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect((await reader.list(ids.employee, { limit: 1 })).items).toEqual([]);
+  });
+
+  it('imports a completed legacy snapshot atomically and preserves its original version', async () => {
+    const dto = request();
+    const snapshot = await snapshots.capture(dto.from, dto.to);
+    const result = {
+      snapshot,
+      analysis: buildBusinessInsightAnalysis(snapshot, analysis),
+    };
+    const id = 'd'.repeat(64);
+    await history.record(
+      id,
+      {
+        employeeId: ids.employee,
+        requestHash: 'a'.repeat(64),
+        requestedAt: new Date().toISOString(),
+        from: dto.from,
+        to: dto.to,
+        timeZone: dto.timeZone,
+        model: 'gemini-3.5-flash-lite',
+        promptVersion: 'business-finance-v2',
+      },
+      false,
+      result,
+    );
+    expect(await insights!.get(ids.employee, id)).toMatchObject({
+      status: 'COMPLETED',
+      promptVersion: 'business-finance-v2',
+      ...result,
+    });
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: id } })).toBe(
+      0,
+    );
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('commits request and outbox together and recovers a lost enqueue through duplicate deliveries', async () => {
+    const dto = request();
+    const id = createHash('sha256')
+      .update(`${ids.employee}:${dto.clientRequestId}`)
+      .digest('hex');
+    const data: BusinessInsightJobData = {
+      employeeId: ids.employee,
+      requestHash: 'a'.repeat(64),
+      from: dto.from,
+      to: dto.to,
+      timeZone: dto.timeZone,
+      requestedAt: new Date().toISOString(),
+      model: 'gemini-3.5-flash-lite',
+      promptVersion: 'business-finance-v3',
+    };
+    const broken = new BusinessInsightHistoryService(
+      prisma as unknown as ExtendedPrismaClient,
+      {
+        enqueue: () => Promise.reject(new Error('outbox rollback')),
+      } as unknown as OutboxService,
+    );
+    await expect(broken.record(id, data)).rejects.toThrow('outbox rollback');
+    expect(await prisma.businessInsight.count({ where: { id } })).toBe(0);
+    await Promise.all([history.record(id, data), history.record(id, data)]);
+    expect(
+      await prisma.outboxEvent.count({
+        where: { aggregateId: id, eventName: INSIGHT_REQUESTED },
+      }),
+    ).toBe(1);
+    insights!.onModuleInit();
+    await eventBus.publish(INSIGHT_REQUESTED, { id, employeeId: ids.employee });
+    await eventBus.publish(INSIGHT_REQUESTED, { id, employeeId: ids.employee });
+    expect((await terminal(id)).status).toBe('COMPLETED');
+    expect(generate).toHaveBeenCalledTimes(1);
+    await eventBus.publish(INSIGHT_REQUESTED, { id, employeeId: ids.employee });
+    expect(generate).toHaveBeenCalledTimes(1);
+    await history.record('b'.repeat(64), data, false);
+    await history.record('c'.repeat(64), data, false);
+    const first = await history.list(ids.employee, { limit: 1 });
+    const second = await history.list(ids.employee, {
+      limit: 1,
+      cursor: first.nextCursor!,
+    });
+    const third = await history.list(ids.employee, {
+      limit: 1,
+      cursor: second.nextCursor!,
+    });
+    expect([first.items[0].id, second.items[0].id, third.items[0].id]).toEqual(
+      [id, 'b'.repeat(64), 'c'.repeat(64)].sort().reverse(),
+    );
+    expect(third.nextCursor).toBeNull();
+  });
+
+  it('does not repeat a provider call when storing its successful response fails', async () => {
+    const complete = jest
+      .spyOn(history, 'complete')
+      .mockRejectedValueOnce(new Error('database write failed'));
+    try {
+      const created = await insights!.create(ids.employee, request(true));
+      expect(await terminal(created.id)).toMatchObject({
+        status: 'FAILED',
+        errorCode: 'AI_OUTCOME_UNKNOWN',
+      });
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(await redis.get(dailyKey('calls'))).toBe('1');
+    } finally {
+      complete.mockRestore();
+    }
+  });
+
+  it('bounds item/category drill-down, compares the same entities and excludes cancelled/unpaid lines', async () => {
+    const rollback = new Error('rollback breakdown fixtures');
+    try {
+      await prisma.$transaction(async (tx) => {
+        const firstCategory = await tx.menuCategory.create({
+          data: { name: `Insight category 1 ${suffix}` },
+        });
+        const secondCategory = await tx.menuCategory.create({
+          data: { name: `Insight category 2 ${suffix}` },
+        });
+        const categories = [firstCategory, secondCategory];
+        const prior = await tx.invoice.findFirstOrThrow({
+          where: { employeeId: ids.employee, createdAt: previousFrom },
+        });
+        const unpaid = await tx.invoice.findFirstOrThrow({
+          where: { employeeId: ids.employee, paymentStatus: 'UNPAID' },
+        });
+        const items: string[] = [];
+        for (let index = 1; index <= 6; index++) {
+          const item = await tx.menuItem.create({
+            data: {
+              name: `Insight item ${index}`,
+              price: 999,
+              categoryId: categories[index <= 3 ? 0 : 1].id,
+            },
+          });
+          items.push(item.id);
+          await tx.orderItem.createMany({
+            data: [
+              {
+                menuItemId: item.id,
+                orderSessionId: ids.session,
+                invoiceId: ids.partial,
+                quantity: 1,
+                priceAtTime: index * 10,
+                serveStatus: 'SERVED',
+              },
+              {
+                menuItemId: item.id,
+                orderSessionId: ids.session,
+                invoiceId: prior.id,
+                quantity: 2,
+                priceAtTime: 5,
+                serveStatus: 'SERVED',
+              },
+              {
+                menuItemId: item.id,
+                orderSessionId: ids.session,
+                invoiceId: ids.partial,
+                quantity: 100,
+                priceAtTime: 999,
+                serveStatus: 'CANCELLED',
+              },
+              {
+                menuItemId: item.id,
+                orderSessionId: ids.session,
+                invoiceId: unpaid.id,
+                quantity: 100,
+                priceAtTime: 999,
+                serveStatus: 'SERVED',
+              },
+            ],
+          });
+        }
+        const metrics = await queryInsightBreakdown(
+          tx as unknown as ExtendedPrismaTransactionClient,
+          { from, to },
+          { from: previousFrom, to: previousTo },
+        );
+        expect(metrics).toHaveLength(14);
+        expect(
+          metrics.some((metric) => metric.key === `item.${items[0]}.sales`),
+        ).toBe(false);
+        expect(metrics).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              key: `item.${items[5]}.sales`,
+              value: '60.00',
+              previousValue: '10.00',
+            }),
+            expect.objectContaining({
+              key: `item.${items[5]}.quantity`,
+              value: '1',
+              previousValue: '2',
+            }),
+            expect.objectContaining({
+              key: `category.${categories[1].id}.sales`,
+              value: '150.00',
+              previousValue: '30.00',
+            }),
+          ]),
+        );
+        expect(new Set(metrics.map((metric) => metric.key)).size).toBe(
+          metrics.length,
+        );
+        throw rollback;
+      });
+    } catch (error) {
+      if (error !== rollback) throw error;
     }
   });
 
@@ -549,7 +859,7 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
 
   it('returns 404 across employees and scopes the same client request ID to its owner', async () => {
     const dto = request();
-    const otherEmployee = randomUUID();
+    const otherEmployee = ids.otherEmployee;
     const created = await insights!.create(ids.employee, dto);
     await expect(
       insights!.get(otherEmployee, created.id),
@@ -826,6 +1136,8 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
         }),
         snapshots,
         gemini,
+        history,
+        eventBus,
       );
       expectedOutageWarnings = true;
       stalled.onApplicationBootstrap();
@@ -941,6 +1253,7 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       const url = `${prefix}/reports/insights`;
 
       await api.get(`${url}/config`).expect(401);
+      await api.get(url).expect(401);
       const configuration = await api
         .get(`${url}/config`)
         .set('Authorization', bearer)
@@ -969,6 +1282,19 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
       assert(typeof id === 'string');
       const result = await terminal(id);
       expect(result.status).toBe('COMPLETED');
+      const historyPage = await api
+        .get(`${url}?limit=1`)
+        .set('Authorization', bearer)
+        .expect(200)
+        .expect('Cache-Control', 'no-store');
+      expect(
+        historyPage.body.data.items.map((item: { id: string }) => item.id),
+      ).toEqual([id]);
+      await api.get(`${url}?limit=51`).set('Authorization', bearer).expect(400);
+      await api
+        .get(`${url}?employeeId=other`)
+        .set('Authorization', bearer)
+        .expect(400);
       const completed = await api
         .get(`${url}/${id}`)
         .set('Authorization', bearer)
@@ -1031,6 +1357,11 @@ describe('Business insights (PostgreSQL/Redis integration)', () => {
         .get(`${url}/${id}`)
         .set('Authorization', otherBearer)
         .expect(404);
+      const otherHistory = await api
+        .get(url)
+        .set('Authorization', otherBearer)
+        .expect(200);
+      expect(otherHistory.body.data).toEqual({ items: [], nextCursor: null });
       expect(generate).toHaveBeenCalledTimes(1);
       expect(await redis.get(dailyKey('admissions'))).toBe('1');
     } finally {

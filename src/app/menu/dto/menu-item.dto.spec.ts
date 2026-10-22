@@ -1,4 +1,27 @@
-import { CreateMenuItemDto, UpdateMenuItemDto } from './menu-item.dto';
+import {
+  CreateMenuItemDto,
+  GetPublicMenuItemsDto,
+  UpdateMenuItemDto,
+} from './menu-item.dto';
+
+describe('public menu sorting', () => {
+  it('preserves the default alphabetical order for existing clients', () => {
+    expect(GetPublicMenuItemsDto.schema.parse({})).toMatchObject({
+      page: 1,
+      sortBy: 'name',
+      sortOrder: 'asc',
+    });
+  });
+
+  it.each([
+    { sortBy: 'createdAt' },
+    { sortBy: 'popular' },
+    { sortBy: 'price desc; DROP TABLE MenuItem' },
+    { sortOrder: 'random' },
+  ])('rejects unsupported sorting %j', (query) => {
+    expect(GetPublicMenuItemsDto.schema.safeParse(query).success).toBe(false);
+  });
+});
 
 describe('menu display metadata', () => {
   it('allows HTTPS images, plain descriptions and explicit removal', () => {

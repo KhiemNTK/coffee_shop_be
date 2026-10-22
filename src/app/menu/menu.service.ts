@@ -21,6 +21,7 @@ import {
   CreateMenuItemDto,
   GetMenuCategoriesDto,
   GetMenuItemsDto,
+  GetPublicMenuItemsDto,
   ReplaceMenuOptionsDto,
   ReplaceMenuRecipeDto,
   UpdateMenuCategoryDto,
@@ -289,7 +290,7 @@ export class MenuService {
     });
   }
 
-  async getPublicItems(query: GetMenuItemsDto) {
+  async getPublicItems(query: GetPublicMenuItemsDto) {
     const where: Prisma.MenuItemWhereInput = {
       ...PUBLIC_MENU_WHERE,
       ...(query.categoryId ? { categoryId: query.categoryId } : {}),
@@ -309,7 +310,7 @@ export class MenuService {
         where,
         skip: paging.skip,
         take: paging.itemPerPage,
-        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        orderBy: [{ [query.sortBy]: query.sortOrder }, { id: 'asc' }],
         select: PUBLIC_MENU_SELECT,
       }),
     ]);

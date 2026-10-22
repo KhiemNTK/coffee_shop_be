@@ -16,6 +16,7 @@ describe('InventoryConsumptionService', () => {
         deleteMany: jest.fn(),
         createMany: jest.fn(),
       },
+      orderItemRecipeIngredient: { findMany: jest.fn() },
       menuItemIngredient: { findMany: jest.fn() },
       inventoryItem: {
         updateMany: jest.fn(),
@@ -28,6 +29,112 @@ describe('InventoryConsumptionService', () => {
       inventoryTransaction: { createManyAndReturn: jest.fn() },
       inventoryWaste: { createManyAndReturn: jest.fn() },
     };
+  });
+
+  it('reserves each ingredient once in ID order and totals quantities across order items', async () => {
+    tx.orderItemRecipeIngredient.findMany.mockResolvedValue([
+      {
+        orderItemId: 'item-a',
+        inventoryItemId: 'z',
+        quantityPerItem: new Prisma.Decimal('0.1234'),
+        orderItem: { quantity: 3 },
+      },
+      {
+        orderItemId: 'item-a',
+        inventoryItemId: 'a',
+        quantityPerItem: new Prisma.Decimal('0.25'),
+        orderItem: { quantity: 3 },
+      },
+      {
+        orderItemId: 'item-b',
+        inventoryItemId: 'z',
+        quantityPerItem: new Prisma.Decimal('0.0001'),
+        orderItem: { quantity: 2 },
+      },
+    ]);
+
+    await service.reserveSession(tx as never, 'session-id');
+
+    expect(tx.orderItemRecipeIngredient.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          orderItem: { orderSessionId: 'session-id', serveStatus: 'PENDING' },
+        },
+      }),
+    );
+    expect(
+      tx.$executeRaw.mock.calls.map(([, quantity, id]) => [
+        id,
+        quantity.toFixed(4),
+      ]),
+    ).toEqual([
+      ['a', '0.7500'],
+      ['z', '0.3704'],
+    ]);
+    expect(tx.inventoryReservation.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          orderItemId: 'item-a',
+          inventoryItemId: 'z',
+          quantity: new Prisma.Decimal('0.3702'),
+        },
+        {
+          orderItemId: 'item-a',
+          inventoryItemId: 'a',
+          quantity: new Prisma.Decimal('0.75'),
+        },
+        {
+          orderItemId: 'item-b',
+          inventoryItemId: 'z',
+          quantity: new Prisma.Decimal('0.0002'),
+        },
+      ],
+    });
+  });
+
+  it('releases combined quantities in the same ID order before removing reservations', async () => {
+    tx.inventoryReservation.findMany.mockResolvedValue([
+      { inventoryItemId: 'z', quantity: new Prisma.Decimal('0.1234') },
+      { inventoryItemId: 'a', quantity: new Prisma.Decimal('0.25') },
+      { inventoryItemId: 'z', quantity: new Prisma.Decimal('0.0001') },
+    ]);
+
+    await service.releaseReservations(tx as never, ['item-a', 'item-b']);
+
+    expect(tx.inventoryReservation.findMany).toHaveBeenCalledWith({
+      where: { orderItemId: { in: ['item-a', 'item-b'] } },
+      select: { inventoryItemId: true, quantity: true },
+    });
+    expect(
+      tx.$executeRaw.mock.calls.map(([, quantity, id]) => [
+        id,
+        quantity.toFixed(4),
+      ]),
+    ).toEqual([
+      ['a', '0.2500'],
+      ['z', '0.1235'],
+    ]);
+    expect(tx.inventoryReservation.deleteMany).toHaveBeenCalledWith({
+      where: { orderItemId: { in: ['item-a', 'item-b'] } },
+    });
+    expect(
+      tx.inventoryReservation.deleteMany.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      (tx.$executeRaw as jest.Mock).mock.invocationCallOrder[1],
+    );
+  });
+
+  it('does not remove reservation rows if a release update detects a conflict', async () => {
+    tx.inventoryReservation.findMany.mockResolvedValue([
+      { inventoryItemId: 'a', quantity: new Prisma.Decimal('0.1') },
+      { inventoryItemId: 'z', quantity: new Prisma.Decimal('0.2') },
+    ]);
+    tx.$executeRaw.mockResolvedValueOnce(0);
+    await expect(
+      service.releaseReservations(tx as never, ['item-a']),
+    ).rejects.toThrow('Inventory reservation state changed.');
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(tx.inventoryReservation.deleteMany).not.toHaveBeenCalled();
   });
 
   it('deducts stock and snapshots the recipe using the order quantity', async () => {

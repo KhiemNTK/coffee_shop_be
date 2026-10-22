@@ -2,6 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
+import type { BusinessInsight } from '@prisma/client';
+import { BusinessInsightHistoryService } from './business-insight-history.service';
+import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import type {
   BusinessInsightJobData,
@@ -13,7 +16,11 @@ import { BusinessInsightsController } from './business-insights.controller';
 import { BusinessInsightsService } from './business-insights.service';
 import { BusinessInsightSnapshotService } from './business-insight-snapshot.service';
 import { GeminiInsightsService } from './gemini-insights.service';
-import { CreateBusinessInsightSchema } from './dto/business-insight.dto';
+import {
+  CreateBusinessInsightSchema,
+  GetBusinessInsightsDto,
+} from './dto/business-insight.dto';
+import { buildBusinessInsightAnalysis } from './business-insight.analysis';
 import {
   aiInsightJobsTotal,
   aiInsightJobDurationSeconds,
@@ -39,6 +46,44 @@ describe('BusinessInsightsService', () => {
   const snapshots = { capture: jest.fn() };
   const gemini = { generate: jest.fn(), stop: jest.fn() };
   const client = { defineCommand: jest.fn(), runCommand: jest.fn() };
+  const records = new Map<string, BusinessInsight>();
+  const history = {
+    find: jest.fn((actor: string, id: string) =>
+      Promise.resolve(
+        records.get(id)?.employeeId === actor ? records.get(id)! : null,
+      ),
+    ),
+    record: jest.fn((id: string, data: BusinessInsightJobData) => {
+      const row: BusinessInsight = {
+        id,
+        employeeId: data.employeeId,
+        requestHash: data.requestHash,
+        from: new Date(data.from),
+        to: new Date(data.to),
+        timeZone: data.timeZone,
+        requestedAt: new Date(data.requestedAt),
+        expiresAt: new Date(Date.parse(data.requestedAt) + 7 * 86_400_000),
+        model: data.model,
+        promptVersion: data.promptVersion,
+        status: 'QUEUED',
+        snapshot: null,
+        analysis: null,
+        errorCode: null,
+        providerStartedAt: null,
+      };
+      records.set(id, row);
+      return Promise.resolve(row);
+    }),
+    present: BusinessInsightHistoryService.prototype.present,
+    jobData: BusinessInsightHistoryService.prototype.jobData,
+    checkRequest: BusinessInsightHistoryService.prototype.checkRequest,
+    start: jest.fn().mockResolvedValue({ count: 1 }),
+    beginProvider: jest.fn().mockResolvedValue({ count: 1 }),
+    resetProvider: jest.fn().mockResolvedValue({ count: 1 }),
+    complete: jest.fn().mockResolvedValue({ count: 1 }),
+    fail: jest.fn().mockResolvedValue({ count: 1 }),
+  };
+  const eventBus = new DomainEventBusService();
   const queue = {
     client: Promise.resolve(client),
     getJob: jest.fn(),
@@ -64,12 +109,15 @@ describe('BusinessInsightsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    records.clear();
     aiInsightJobsTotal.reset();
     aiInsightJobDurationSeconds.reset();
     service = new BusinessInsightsService(
       config,
       snapshots as unknown as BusinessInsightSnapshotService,
       gemini as unknown as GeminiInsightsService,
+      history as unknown as BusinessInsightHistoryService,
+      eventBus,
     );
     Reflect.set(service, 'queue', queue);
     Reflect.set(service, 'ready', Promise.resolve());
@@ -117,9 +165,25 @@ describe('BusinessInsightsService', () => {
         Reflect.get(BusinessInsightsController.prototype, 'get'),
       ),
     ).toEqual([PermissionKeys.REPORTS_READ]);
+    expect(
+      Reflect.getMetadata(
+        REQUIRED_PERMISSIONS_KEY,
+        Reflect.get(BusinessInsightsController.prototype, 'list'),
+      ),
+    ).toEqual([PermissionKeys.REPORTS_READ]);
   });
 
   it('rejects invalid ranges and unknown client properties at the trust boundary', () => {
+    expect(GetBusinessInsightsDto.schema.parse({}).limit).toBe(10);
+    for (const query of [
+      { limit: 0 },
+      { limit: 51 },
+      { cursor: 'bad' },
+      { employeeId },
+    ])
+      expect(GetBusinessInsightsDto.schema.safeParse(query).success).toBe(
+        false,
+      );
     expect(CreateBusinessInsightSchema.safeParse(dto).success).toBe(true);
     expect(
       CreateBusinessInsightSchema.safeParse({ ...dto, to: dto.from }).success,
@@ -141,6 +205,8 @@ describe('BusinessInsightsService', () => {
       new ConfigService(),
       snapshots as unknown as BusinessInsightSnapshotService,
       gemini as unknown as GeminiInsightsService,
+      history as unknown as BusinessInsightHistoryService,
+      eventBus,
     );
     expect(disabled.getConfiguration().enabled).toBe(false);
     await expect(disabled.create(employeeId, dto)).rejects.toThrow(
@@ -156,6 +222,8 @@ describe('BusinessInsightsService', () => {
         new ConfigService({ AI_INSIGHTS_ENABLED: enabled }),
         snapshots as unknown as BusinessInsightSnapshotService,
         gemini as unknown as GeminiInsightsService,
+        history as unknown as BusinessInsightHistoryService,
+        eventBus,
       );
       expect(disabled.getConfiguration().enabled).toBe(false);
     },
@@ -218,8 +286,63 @@ describe('BusinessInsightsService', () => {
     });
   });
 
+  it('imports completed v2 references atomically without another generation', async () => {
+    const snapshot: BusinessInsightSnapshot = {
+      schemaVersion: 2,
+      asOf: dto.to,
+      currentPeriod: { from: dto.from, to: dto.to },
+      comparisonPeriod: { from: '2025-12-31T00:00:00.000Z', to: dto.from },
+      timeZone: dto.timeZone,
+      comparisonBasis: 'PREVIOUS_EQUAL_DURATION',
+      basis: {
+        sales: 'INVOICE_CREATED_AT',
+        refunds: 'COHORT_REFUNDS_AS_OF_SNAPSHOT',
+        waste: 'WASTE_CREATED_AT',
+      },
+      metrics: [
+        {
+          key: 'paidInvoiceCount',
+          label: 'Invoices',
+          unit: 'COUNT',
+          value: '0',
+          previousValue: '0',
+        },
+      ],
+    };
+    const data = {
+      ...dto,
+      employeeId,
+      requestHash: 'a'.repeat(64),
+      requestedAt: new Date().toISOString(),
+      model: 'gemini-3.5-flash-lite',
+      promptVersion: 'business-finance-v2',
+      snapshot,
+    };
+    const job = jobFor(data, 'a'.repeat(64));
+    job.returnvalue = {
+      snapshot,
+      analysis: buildBusinessInsightAnalysis(snapshot),
+    };
+    jest.spyOn(job, 'getState').mockResolvedValue('completed');
+    queue.getJob.mockResolvedValue(job);
+    await expect(service.get(employeeId, job.id!)).resolves.toMatchObject({
+      status: 'COMPLETED',
+      promptVersion: 'business-finance-v2',
+      snapshot,
+    });
+    expect(history.record).toHaveBeenCalledWith(
+      job.id,
+      data,
+      false,
+      job.returnvalue,
+    );
+    expect(history.complete).not.toHaveBeenCalled();
+    expect(gemini.generate).not.toHaveBeenCalled();
+  });
+
   it('hides obsolete results instead of presenting them under the new contract', async () => {
     await service.create(employeeId, dto);
+    records.clear();
     const created = (await queue.add.mock.results[0].value) as Job<
       BusinessInsightJobData,
       BusinessInsightResult,
@@ -343,6 +466,7 @@ describe('BusinessInsightsService', () => {
 
   it('reloads terminal fields when a worker finishes between the job and state reads', async () => {
     await service.create(employeeId, dto);
+    records.clear();
     const stale = (await queue.add.mock.results[0].value) as Job<
       BusinessInsightJobData,
       BusinessInsightResult,
@@ -360,6 +484,7 @@ describe('BusinessInsightsService', () => {
 
   it('sanitizes unexpected failed-job details', async () => {
     await service.create(employeeId, dto);
+    records.clear();
     const created = (await queue.add.mock.results[0].value) as Job<
       BusinessInsightJobData,
       BusinessInsightResult,
@@ -405,6 +530,8 @@ describe('BusinessInsightsService', () => {
       new ConfigService(),
       snapshots as unknown as BusinessInsightSnapshotService,
       gemini as unknown as GeminiInsightsService,
+      history as unknown as BusinessInsightHistoryService,
+      eventBus,
     );
     await disabled.collectMetrics();
     expect(queue.getJobCounts).not.toHaveBeenCalled();

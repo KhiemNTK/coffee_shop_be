@@ -22,7 +22,6 @@ import { QueryUtilModule } from '../common/utils/query-util/query-util.module';
 import { CatchEverythingFilter } from '../catch-everything/catch-everything.filter';
 import { FormatResponseInterceptor } from '../common/interceptors/format-response/format-response.interceptor';
 import { ZodExceptionService } from '../catch-everything/zod-exception/zod-exception.service';
-import { ApiUtilModule } from '../common/utils/api-util/api-util.module';
 import { RateLimitModule } from '../common/security/rate-limit.module';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
@@ -71,7 +70,6 @@ import { CustomersModule } from './customers/customers.module';
     InvoicesModule,
     PositionsModule,
     QueryUtilModule,
-    ApiUtilModule,
     RateLimitModule,
     MailUtilModule,
     OrdersModule,

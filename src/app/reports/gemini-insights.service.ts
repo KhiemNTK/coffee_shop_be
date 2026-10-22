@@ -99,6 +99,7 @@ export class GeminiInsightsService {
                       'Compare periods of equal duration, not unrelated measures. Gross profit is an estimate, not accounting net profit.',
                       'Flag missing cost snapshots, zero-cost snapshots, small sample and incomplete current period when relevant.',
                       'Refunds have no item-level attribution; do not claim a returned product or refund cause.',
+                      'item.* and category.* metrics cover the top five groups by current gross sales, not the entire catalog. Names and categories are catalog labels at snapshot time, not historical classifications. Their sales exclude discounts, tax and refunds; never claim item-level net revenue, margin or waste from them.',
                       'Sales are the current paid invoice cohort selected by invoice creation time. Refund metrics include successful refunds of that cohort up to asOf, even after the period ends; they are not period cash flows.',
                       'Ingredient costs include later remake consumption for the invoice cohort. Waste is grouped by waste creation time. These bases cannot be treated as identical cash-flow periods.',
                       'For sub-day windows comparisonBasis is PREVIOUS_DAY_SAME_WINDOW; for longer windows it is PREVIOUS_EQUAL_DURATION. Equal duration does not control weekdays, holidays or opening hours.',

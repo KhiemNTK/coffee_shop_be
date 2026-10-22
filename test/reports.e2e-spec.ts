@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   BankStatementEntryDirection,
@@ -77,6 +78,13 @@ describe('Reports queries (e2e)', () => {
   let webhookExceptionBaselineCount = 0;
 
   beforeAll(async () => {
+    const target = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['127.0.0.1', 'localhost'].includes(target.hostname) &&
+        target.pathname.endsWith('_test'),
+      'Use only a dedicated loopback test database.',
+    );
     const [
       pendingHandoverBaseline,
       approvedHandoverBaseline,
@@ -728,5 +736,209 @@ describe('Reports queries (e2e)', () => {
 
     const buffer = await workbook.xlsx.writeBuffer();
     expect(buffer.byteLength).toBeGreaterThan(1_000);
+  });
+
+  it('keeps global payment alerts while bounding completed attempts and both refund sources', async () => {
+    const from = new Date('2026-06-01T00:00:00.000Z');
+    const to = new Date('2026-06-03T00:00:00.000Z');
+    const beforeFrom = new Date(from.getTime() - 1);
+    const rollback = new Error('Rollback report fixtures');
+    await expect(
+      prisma.$transaction(
+        async (tx) => {
+          const scoped = new ReportsService(
+            {
+              $transaction: (
+                callback: (
+                  client: Prisma.TransactionClient,
+                ) => Promise<unknown>,
+              ) => callback(tx),
+            } as unknown as ExtendedPrismaClient,
+            new ExcelUtilService(),
+          );
+          const query = {
+            from,
+            to,
+            timeZone: 'Asia/Ho_Chi_Minh',
+            granularity: 'day' as const,
+            topLimit: 10,
+            lowStockThreshold: 5,
+          };
+          const before = (await scoped.getDashboard(query)).paymentOperations;
+          const attempts = [
+            {
+              status: PaymentAttemptStatus.PENDING,
+              amount: '11',
+              expiresAt: new Date(Date.now() + 86_400_000),
+            },
+            {
+              status: PaymentAttemptStatus.PENDING,
+              amount: '13',
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.REQUIRES_REVIEW,
+              amount: '17',
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.SUCCEEDED,
+              amount: '19',
+              completedAt: from,
+              providerTransactionNo: randomUUID(),
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.FAILED,
+              amount: '23',
+              completedAt: occurredAt,
+              failureCode: '99',
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.SUCCEEDED,
+              amount: '29',
+              completedAt: beforeFrom,
+              providerTransactionNo: randomUUID(),
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.SUCCEEDED,
+              amount: '31',
+              completedAt: to,
+              providerTransactionNo: randomUUID(),
+              expiresAt: beforeFrom,
+            },
+            {
+              status: PaymentAttemptStatus.EXPIRED,
+              amount: '37',
+              completedAt: occurredAt,
+              expiresAt: beforeFrom,
+            },
+          ].map((row) => ({
+            ...row,
+            id: randomUUID(),
+            invoiceId: invoiceId!,
+            createdById: employeeId!,
+            shiftId: shiftId!,
+            merchantReference: randomUUID(),
+            idempotencyKey: randomUUID(),
+            requestHash: 'a'.repeat(64),
+            createdAt: new Date(beforeFrom.getTime() - 86_400_000),
+          }));
+          await tx.paymentAttempt.createMany({ data: attempts });
+          await tx.paymentRefund.createMany({
+            data: [
+              {
+                status: PaymentRefundStatus.REQUIRES_REVIEW,
+                amount: '7',
+                completedAt: null,
+              },
+              {
+                status: PaymentRefundStatus.SUCCEEDED,
+                amount: '3',
+                completedAt: from,
+              },
+              {
+                status: PaymentRefundStatus.SUCCEEDED,
+                amount: '5',
+                completedAt: to,
+              },
+            ].map((row) => ({
+              ...row,
+              type: 'PARTIAL',
+              reason: 'Report fixture',
+              paymentAttemptId: attempts[3].id,
+              requestedById: employeeId!,
+              idempotencyKey: randomUUID(),
+              providerRequestId: randomUUID(),
+              requestHash: 'b'.repeat(64),
+              requestedAt: beforeFrom,
+            })),
+          });
+          for (const [amount, completedAt] of [
+            ['2', from],
+            ['4', to],
+          ] as const) {
+            const cash = await tx.cashTransaction.create({
+              data: {
+                type: 'EXPENSE',
+                amount,
+                description: 'Report refund fixture',
+                transactionDate: completedAt,
+                fundId: fundId!,
+                employeeId: reviewerEmployeeId!,
+                shiftId: shiftIds[2],
+              },
+            });
+            await tx.cashRefund.create({
+              data: {
+                amount,
+                completedAt,
+                invoiceId: invoiceId!,
+                reason: 'Report refund fixture',
+                requestedById: reviewerEmployeeId!,
+                cashTransactionId: cash.id,
+                idempotencyKey: randomUUID(),
+                requestHash: 'c'.repeat(64),
+              },
+            });
+          }
+          const report = (await scoped.getDashboard(query)).paymentOperations;
+          const successCount = before.successfulAttemptCount + 1;
+          const failedCount = before.failedAttemptCount + 1;
+          expect(report).toEqual({
+            ...before,
+            currentPendingAttemptCount: before.currentPendingAttemptCount + 1,
+            currentPendingAttemptAmount: new Prisma.Decimal(
+              before.currentPendingAttemptAmount,
+            )
+              .plus(11)
+              .toFixed(2),
+            stalePendingAttemptCount: before.stalePendingAttemptCount + 1,
+            stalePendingAttemptAmount: new Prisma.Decimal(
+              before.stalePendingAttemptAmount,
+            )
+              .plus(13)
+              .toFixed(2),
+            requiresReviewAttemptCount: before.requiresReviewAttemptCount + 1,
+            requiresReviewAttemptAmount: new Prisma.Decimal(
+              before.requiresReviewAttemptAmount,
+            )
+              .plus(17)
+              .toFixed(2),
+            successfulAttemptCount: successCount,
+            successfulAttemptAmount: new Prisma.Decimal(
+              before.successfulAttemptAmount,
+            )
+              .plus(19)
+              .toFixed(2),
+            failedAttemptCount: failedCount,
+            failedAttemptAmount: new Prisma.Decimal(before.failedAttemptAmount)
+              .plus(23)
+              .toFixed(2),
+            successfulRefundCount: before.successfulRefundCount + 2,
+            successfulRefundAmount: new Prisma.Decimal(
+              before.successfulRefundAmount,
+            )
+              .plus(5)
+              .toFixed(2),
+            reviewRefundCount: before.reviewRefundCount + 1,
+            reviewRefundAmount: new Prisma.Decimal(before.reviewRefundAmount)
+              .plus(7)
+              .toFixed(2),
+            successRatePercent: (
+              (successCount / (successCount + failedCount)) *
+              100
+            ).toFixed(2),
+          });
+          throw rollback;
+        },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+          timeout: 10_000,
+        },
+      ),
+    ).rejects.toBe(rollback);
   });
 });

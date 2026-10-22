@@ -6,6 +6,7 @@ import {
 } from '../../common/prisma/prisma.service';
 import type { BusinessInsightSnapshot } from '../../common/types';
 import { queryProfitability } from './profitability.query';
+import { queryInsightBreakdown } from './business-insight-breakdown.query';
 
 @Injectable()
 export class BusinessInsightSnapshotService {
@@ -27,6 +28,7 @@ export class BusinessInsightSnapshotService {
       async (tx) => {
         const current = await queryProfitability(tx, period, asOf);
         const prior = await queryProfitability(tx, previous, asOf);
+        const breakdown = await queryInsightBreakdown(tx, period, previous);
         const definitions = [
           ['paidInvoiceCount', 'Hoa don da thanh toan', 'COUNT'],
           ['grossSales', 'Doanh so truoc giam gia', 'VND'],
@@ -66,13 +68,16 @@ export class BusinessInsightSnapshotService {
             refunds: 'COHORT_REFUNDS_AS_OF_SNAPSHOT',
             waste: 'WASTE_CREATED_AT',
           },
-          metrics: definitions.map(([key, label, unit]) => ({
-            key,
-            label,
-            unit,
-            value: String(current[key]),
-            previousValue: String(prior[key]),
-          })),
+          metrics: [
+            ...definitions.map(([key, label, unit]) => ({
+              key,
+              label,
+              unit,
+              value: String(current[key]),
+              previousValue: String(prior[key]),
+            })),
+            ...breakdown,
+          ],
         };
       },
       {

@@ -314,6 +314,62 @@ describe('validateEnvironment', () => {
     ).toThrow('Telegram requires bot token, username and webhook secret.');
   });
 
+  it('allows outbound-only staff alerts but never an unconfigured staff bot', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://localhost/test',
+      TELEGRAM_STAFF_CHAT_ID: '-1001234567890',
+    };
+    expect(() => validateEnvironment(base)).toThrow('Telegram requires');
+    expect(
+      validateEnvironment({
+        ...base,
+        TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
+      }),
+    ).toMatchObject({
+      TELEGRAM_STAFF_CHAT_ID: '-1001234567890',
+    });
+  });
+
+  it.each(['123456', '-0', '-4503599627370496', 'https://t.me/group'])(
+    'rejects an invalid staff group ID (%s)',
+    (chatId) => {
+      expect(() =>
+        validateEnvironment({
+          DATABASE_URL: 'postgresql://localhost/test',
+          TELEGRAM_STAFF_CHAT_ID: chatId,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it.each([
+    'http://coffee.test',
+    'https://user:pass@coffee.test',
+    'https://coffee.test/order',
+    'https://coffee.test?token=secret',
+    'https://coffee.test/#fragment',
+  ])('rejects an unsafe Telegram app origin (%s)', (url) => {
+    expect(() =>
+      validateEnvironment({
+        DATABASE_URL: 'postgresql://localhost/test',
+        TELEGRAM_WEB_APP_URL: url,
+      }),
+    ).toThrow('TELEGRAM_WEB_APP_URL');
+  });
+
+  it('keeps an optional HTTPS app origin and accepts blank notification settings', () => {
+    expect(
+      validateEnvironment({
+        DATABASE_URL: 'postgresql://localhost/test',
+        TELEGRAM_WEB_APP_URL: 'https://coffee.test',
+        TELEGRAM_STAFF_CHAT_ID: '',
+      }),
+    ).toMatchObject({
+      TELEGRAM_WEB_APP_URL: 'https://coffee.test',
+      TELEGRAM_STAFF_CHAT_ID: undefined,
+    });
+  });
+
   it('rejects incomplete production configuration', () => {
     expect(() =>
       validateEnvironment({

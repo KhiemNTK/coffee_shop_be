@@ -8,11 +8,10 @@ import {
 import { SSE_METADATA } from '@nestjs/common/constants';
 import { Observable, map } from 'rxjs';
 import { Workbook } from 'exceljs';
-import { ApiUtilService } from '../../utils/api-util/api-util.service';
+import { formatApiResponse } from '../../utils/api-util/api-response';
 
 @Injectable()
 export class FormatResponseInterceptor implements NestInterceptor {
-  constructor(private apiUtilService: ApiUtilService) {}
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     if (Reflect.getMetadata(SSE_METADATA, context.getHandler())) {
       return next.handle();
@@ -22,7 +21,7 @@ export class FormatResponseInterceptor implements NestInterceptor {
         if (data instanceof StreamableFile || data instanceof Workbook) {
           return data;
         }
-        return this.apiUtilService.formatResponse({ data });
+        return formatApiResponse({ data });
       }),
     );
   }

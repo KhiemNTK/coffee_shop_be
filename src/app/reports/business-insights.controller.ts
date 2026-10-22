@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -17,6 +18,7 @@ import { BusinessInsightsService } from './business-insights.service';
 import {
   BusinessInsightIdDto,
   CreateBusinessInsightDto,
+  GetBusinessInsightsDto,
 } from './dto/business-insight.dto';
 
 @ApiTags('Reports')
@@ -44,6 +46,16 @@ export class BusinessInsightsController {
     @Body() dto: CreateBusinessInsightDto,
   ) {
     return this.insights.create(employeeId, dto);
+  }
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(PermissionKeys.REPORTS_READ)
+  list(
+    @Employee('employeeId') employeeId: string,
+    @Query() query: GetBusinessInsightsDto,
+  ) {
+    return this.insights.list(employeeId, query);
   }
 
   @Get(':id')

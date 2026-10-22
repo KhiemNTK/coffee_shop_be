@@ -30,6 +30,7 @@
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:preflight": "ts-node prisma/preflight/production-baseline.ts",
+    "permissions:check": "ts-node prisma/preflight/permissions.ts",
     "prisma:generate:prod": "prisma generate --schema=prisma/schema.prod.prisma",
     "prisma:seed": "prisma db seed -- --environment dev",
     "prisma:seed:prod": "prisma db seed -- --environment prod",

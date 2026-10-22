@@ -9,7 +9,7 @@ import {
 import { HttpAdapterHost } from '@nestjs/core';
 import { ZodExceptionService } from './zod-exception/zod-exception.service';
 import { ZodSerializationException, ZodValidationException } from 'nestjs-zod';
-import { ApiUtilService } from '../common/utils/api-util/api-util.service';
+import { formatApiResponse } from '../common/utils/api-util/api-response';
 import { Prisma } from '@prisma/client';
 import type { Response } from 'express';
 import type { HttpResponseLocals } from '../common/types';
@@ -49,7 +49,6 @@ export class CatchEverythingFilter implements ExceptionFilter {
   constructor(
     private readonly httpAdapterHost: HttpAdapterHost,
     private readonly zodExceptionService: ZodExceptionService,
-    private readonly apiUtilService: ApiUtilService,
   ) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
@@ -67,7 +66,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
       name: exception instanceof Error ? exception.name : 'UnknownError',
       code,
     };
-    const responseBody = this.apiUtilService.formatResponse({
+    const responseBody = formatApiResponse({
       errors: localizeApiErrors(
         errors,
         resolveApiLocale(request),

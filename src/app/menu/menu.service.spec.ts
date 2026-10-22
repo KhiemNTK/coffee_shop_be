@@ -2,6 +2,7 @@ import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { MenuService } from './menu.service';
+import { GetPublicMenuItemsDto } from './dto';
 import type { MenuImagesService } from './menu-images.service';
 
 describe('MenuService', () => {
@@ -144,11 +145,12 @@ describe('MenuService', () => {
       { id: 'menu-item-id', name: 'Espresso', price: '30000' },
     ]);
 
-    await service.getPublicItems({ page: 1, itemPerPage: 20 });
+    await service.getPublicItems(GetPublicMenuItemsDto.schema.parse({}));
 
     expect(prisma.menuItem.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ isAvailable: true, deletedAt: null }),
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
         select: expect.objectContaining({
           id: true,
           name: true,
@@ -159,6 +161,46 @@ describe('MenuService', () => {
       }),
     );
   });
+
+  it.each([
+    ['name', 'asc'],
+    ['name', 'desc'],
+    ['price', 'asc'],
+    ['price', 'desc'],
+  ])(
+    'sorts public items by %s %s before pagination with a unique tie-breaker',
+    async (sortBy, sortOrder) => {
+      prisma.menuItem.count.mockResolvedValue(25);
+      prisma.menuItem.findMany.mockResolvedValue([]);
+      const query = GetPublicMenuItemsDto.schema.parse({
+        page: 2,
+        itemPerPage: 12,
+        keyword: 'coffee',
+        sortBy,
+        sortOrder,
+      });
+
+      const result = await service.getPublicItems(query);
+
+      expect(prisma.menuItem.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ [sortBy]: sortOrder }, { id: 'asc' }],
+          skip: 12,
+          take: 12,
+          where: expect.objectContaining({
+            name: { contains: 'coffee', mode: 'insensitive' },
+            isAvailable: true,
+            deletedAt: null,
+          }),
+        }),
+      );
+      expect(result).toMatchObject({
+        currentPage: 2,
+        totalItems: 25,
+        totalPages: 3,
+      });
+    },
+  );
 
   it('reports recipe stock risk without reserving or changing stock', async () => {
     prisma.menuItem.count.mockResolvedValue(1);

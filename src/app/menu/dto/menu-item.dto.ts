@@ -56,3 +56,10 @@ export class GetMenuItemsDto extends createZodDto(
     isAvailable: OptionalBooleanQuerySchema,
   }),
 ) {}
+
+export class GetPublicMenuItemsDto extends createZodDto(
+  GetMenuItemsDto.schema.extend({
+    sortBy: z.enum(['name', 'price']).default('name'),
+    sortOrder: z.enum(['asc', 'desc']).default('asc'),
+  }),
+) {}

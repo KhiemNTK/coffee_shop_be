@@ -7,6 +7,7 @@ import { BusinessInsightsController } from './business-insights.controller';
 import { BusinessInsightsService } from './business-insights.service';
 import { BusinessInsightSnapshotService } from './business-insight-snapshot.service';
 import { GeminiInsightsService } from './gemini-insights.service';
+import { BusinessInsightHistoryService } from './business-insight-history.service';
 
 @Module({
   imports: [ExcelUtilModule],
@@ -17,6 +18,7 @@ import { GeminiInsightsService } from './gemini-insights.service';
     BusinessInsightsService,
     BusinessInsightSnapshotService,
     GeminiInsightsService,
+    BusinessInsightHistoryService,
   ],
   exports: [BusinessInsightsService],
 })

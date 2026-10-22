@@ -38,6 +38,27 @@ OTEL_TRACES_SAMPLER_ARG=0.1
 HTTP, Express, NestJS and ioredis are instrumented. Application metrics remain
 Prometheus-native and logs remain JSON stdout to avoid duplicate telemetry.
 
+## Kitchen Realtime
+
+`coffee_shop_kitchen_sse_active_connections` counts active SSE subscriptions per
+application instance, not unique devices or employees. It returns to zero when
+clients disconnect or the application shuts down. Sum across instances for a
+deployment total; do not use employee IDs or connection IDs as labels.
+
+KDS keeps a 60-second HTTP reconciliation while connected. After an SSE error or
+45 seconds without a heartbeat/event, it uses the existing ticket polling
+(6 seconds) and workload polling (15 seconds), with reconnect attempts every
+5 seconds. The status badge reports periodic updates until the stream reopens.
+The displayed update time comes from the last successful ticket HTTP response.
+
+Only new-ticket events with a validated station and a release time already due
+may chime. Other events still refresh data. The latest 200 new-ticket event IDs
+are deduplicated per mounted KDS session. Reloads and other tabs have independent
+notification state; this is not an exactly-once delivery guarantee. Scheduled
+release stays visual through reconciliation; add a durable release event only
+if the shop needs a timed audible alert. No new Redis channel, queue, permission
+or database migration is required.
+
 ## Optional AI Queue
 
 When manager AI is enabled, the same scrape collects bounded BullMQ queue heads

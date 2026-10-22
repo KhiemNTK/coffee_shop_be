@@ -1,8 +1,12 @@
 import type { ExtendedPrismaClient } from '../../common/types';
 import { BusinessInsightSnapshotService } from './business-insight-snapshot.service';
 import { queryProfitability } from './profitability.query';
+import { queryInsightBreakdown } from './business-insight-breakdown.query';
 
 jest.mock('./profitability.query', () => ({ queryProfitability: jest.fn() }));
+jest.mock('./business-insight-breakdown.query', () => ({
+  queryInsightBreakdown: jest.fn(),
+}));
 
 describe('BusinessInsightSnapshotService', () => {
   const tx = {};
@@ -16,6 +20,7 @@ describe('BusinessInsightSnapshotService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.mocked(queryInsightBreakdown).mockResolvedValue([]);
     query.mockResolvedValue({
       asOf: '2026-10-10T02:00:00Z',
       paidInvoiceCount: 1,

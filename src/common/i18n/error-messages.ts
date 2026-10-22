@@ -37,6 +37,8 @@ const messages: Readonly<Record<string, string>> = {
 };
 
 const codedMessages: Readonly<Record<string, string>> = {
+  AUTHORIZATION_CHANGED:
+    'Phân quyền đã thay đổi. Tải lại và đối chiếu trước khi lưu.',
   CASHIER_SHIFT_REQUIRED:
     'Bạn chưa có ca thu ngân đang mở. Mở ca hoặc liên hệ quản lý trước khi thu tiền.',
   CASHIER_SHIFT_FUND_INVALID:

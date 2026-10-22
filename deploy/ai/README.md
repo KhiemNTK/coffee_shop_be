@@ -1,8 +1,9 @@
 # AI Activation And Evaluation
 
 Scope: one shop, occasional manager analyses, not autonomous decisions. Checkout
-and public recommendations never depend on Gemini. These changes need no database
-migration, seed or new dependency. Leave `AI_INSIGHTS_ENABLED=false` until the
+and public recommendations never depend on Gemini. Apply the history migration
+`20261022020000_add_business_insight_history` before deploying this version;
+no additional dependency or permission seed is required. Leave `AI_INSIGHTS_ENABLED=false` until the
 activation checks below are complete. Do not put Gemini credentials in frontend
 configuration or commit a filled `.env`.
 
@@ -118,10 +119,13 @@ behavior; and RBAC. Verify the project's billing/data policy with the operator,
 not just `GEMINI_DATA_POLICY_ACKNOWLEDGED=true`. Review the official
 [Gemini data terms](https://ai.google.dev/gemini-api/terms).
 
-Results and call budgets are Redis-derived data, not durable financial records.
-Use persistence, `noeviction` and provider-side budget controls. Redis data loss
-can lose insights/reset counters; this implementation does not promise a hard
-currency spending cap or cross-device insight history.
+Results/snapshots and private seven-day history live in PostgreSQL; BullMQ delivery
+and daily call budgets use Redis. See `docs/business-insights.md` for the list API,
+outbox recovery and `AI_OUTCOME_UNKNOWN`. Keep persistence, `noeviction` and
+provider-side budget controls. Redis data loss can lose pending work/reset counters;
+the implementation does not promise a hard currency spending cap. PostgreSQL
+history is derived data, not an accounting ledger. Expiry cleanup uses the existing
+outbox housekeeping; do not disable its production poll loop.
 
 ## Recommendation Baseline
 

@@ -1,5 +1,4 @@
-import { Injectable } from '@nestjs/common';
-import { FormatResponseParams } from './dto/api-util.dto';
+import type { FormatResponseParams } from '../../types';
 
 export function formatApiResponse({
   errors = null,
@@ -16,11 +15,4 @@ export function formatApiResponse({
     message: messageResponse,
     ...params,
   };
-}
-
-@Injectable()
-export class ApiUtilService {
-  formatResponse(params: FormatResponseParams) {
-    return formatApiResponse(params);
-  }
 }
