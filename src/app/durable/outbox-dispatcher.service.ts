@@ -16,6 +16,10 @@ import {
 import type { ClaimedOutboxEvent } from '../../common/types';
 import { outboxDispatchTotal } from '../../common/observability/metrics';
 import { DomainEventBusService } from './domain-event-bus.service';
+import {
+  OutboxDeferredError,
+  OutboxPermanentError,
+} from './outbox-delivery.error';
 
 const QUEUE_NAME = 'domain-outbox';
 const POLL_INTERVAL_MS = 1_000;
@@ -93,6 +97,12 @@ export class OutboxDispatcherService
 
     await this.recoverAbandonedEvents();
     const now = new Date();
+    await this.prisma.$executeRaw(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id" FROM "BusinessInsight" WHERE "expiresAt" < ${now}
+        ORDER BY "expiresAt", "id" LIMIT ${RETENTION_BATCH_SIZE} FOR UPDATE SKIP LOCKED
+      ) DELETE FROM "BusinessInsight" r USING candidates c WHERE r."id" = c."id"
+    `);
     await this.prisma.$executeRaw(Prisma.sql`
       WITH candidates AS (
         SELECT "id" FROM "IdempotencyRequest"
@@ -261,6 +271,14 @@ export class OutboxDispatcherService
       await this.eventBus.publish(event.eventName, event.payload);
       await this.markPublished(job.data);
     } catch (error) {
+      if (error instanceof OutboxDeferredError) {
+        await this.release(job.data, error, error.retryAfterMs);
+        return;
+      }
+      if (error instanceof OutboxPermanentError) {
+        await this.recordFailure(job.data, error, attempt, true);
+        return;
+      }
       const finalAttempt =
         attempt >= MAX_ATTEMPTS ||
         job.attemptsMade + 1 >= (job.opts.attempts ?? MAX_ATTEMPTS);
@@ -274,8 +292,12 @@ export class OutboxDispatcherService
       await this.eventBus.publish(event.eventName, event.payload);
       await this.markPublished(event);
     } catch (error) {
+      if (error instanceof OutboxDeferredError) {
+        await this.release(event, error, error.retryAfterMs);
+        return;
+      }
       const attempt = event.attempts + 1;
-      if (attempt >= MAX_ATTEMPTS) {
+      if (error instanceof OutboxPermanentError || attempt >= MAX_ATTEMPTS) {
         await this.recordFailure(event, error, attempt, true);
       } else {
         outboxDispatchTotal.inc({ outcome: 'retry' });
@@ -354,7 +376,7 @@ export class OutboxDispatcherService
     return result;
   }
 
-  private release(event: ClaimedOutboxEvent, error: unknown) {
+  private release(event: ClaimedOutboxEvent, error: unknown, delayMs = 1_000) {
     return this.prisma.outboxEvent.updateMany({
       where: {
         id: event.id,
@@ -366,7 +388,7 @@ export class OutboxDispatcherService
         lockedAt: null,
         lockedBy: null,
         lastError: this.errorMessage(error),
-        availableAt: new Date(Date.now() + 1_000),
+        availableAt: new Date(Date.now() + Math.max(1_000, delayMs)),
       },
     });
   }

@@ -17,10 +17,13 @@ import {
 } from '../../common/prisma/prisma.service';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { OutboxService } from '../durable/outbox.service';
+import { OutboxPermanentError } from '../durable/outbox-delivery.error';
+import { TelegramDeliveryService } from './telegram-delivery.service';
 import { ORDER_EVENTS } from '../orders/events/order.events';
 import {
   ONLINE_ORDER_TELEGRAM_EVENT,
   ONLINE_ORDER_TELEGRAM_READY_EVENT,
+  ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
 } from './telegram-events';
 import {
   ONLINE_ORDER_ACCESS_WINDOW_MS,
@@ -33,10 +36,6 @@ const UpdateSchema = z.object({
     from: z.object({ id: z.number().int().safe() }),
     text: z.string().max(256),
   }),
-});
-const SendResponseSchema = z.object({
-  ok: z.boolean(),
-  error_code: z.number().int().optional(),
 });
 const StatusEventSchema = z.object({
   requestId: z.uuid(),
@@ -74,6 +73,7 @@ export class TelegramNotificationsService
     private readonly config: ConfigService,
     private readonly eventBus: DomainEventBusService,
     private readonly outbox: OutboxService,
+    private readonly delivery: TelegramDeliveryService,
   ) {
     this.botToken = config.get<string>('TELEGRAM_BOT_TOKEN');
     this.webhookSecret = config.get<string>('TELEGRAM_WEBHOOK_SECRET');
@@ -81,17 +81,26 @@ export class TelegramNotificationsService
 
   onModuleInit() {
     if (!this.botToken) return;
-    this.unsubscribe.push(
-      this.eventBus.on(ONLINE_ORDER_TELEGRAM_EVENT, (payload) =>
-        this.notifyStatus(payload),
-      ),
-      this.eventBus.on(ORDER_EVENTS.ITEM_STATUS_UPDATED, (payload) =>
-        this.queueReady(payload),
-      ),
-      this.eventBus.on(ONLINE_ORDER_TELEGRAM_READY_EVENT, (payload) =>
-        this.notifyReady(payload),
-      ),
-    );
+    if (this.webhookSecret) {
+      this.unsubscribe.push(
+        this.eventBus.on(ONLINE_ORDER_TELEGRAM_EVENT, (payload) =>
+          this.notifyStatus(payload),
+        ),
+        this.eventBus.on(ORDER_EVENTS.ITEM_STATUS_UPDATED, (payload) =>
+          this.queueReady(payload),
+        ),
+        this.eventBus.on(ONLINE_ORDER_TELEGRAM_READY_EVENT, (payload) =>
+          this.notifyReady(payload),
+        ),
+      );
+    }
+    if (this.config.get<string>('TELEGRAM_STAFF_CHAT_ID')) {
+      this.unsubscribe.push(
+        this.eventBus.on(ONLINE_ORDER_TELEGRAM_STAFF_EVENT, (payload) =>
+          this.notifyStaff(payload),
+        ),
+      );
+    }
   }
 
   onModuleDestroy() {
@@ -118,7 +127,7 @@ export class TelegramNotificationsService
         where: { telegramChatId: chatId },
         data: { telegramChatId: null },
       });
-      await this.acknowledge(chatId, 'Da tat thong bao don hang.');
+      await this.acknowledge(chatId, 'Đã tắt thông báo đơn hàng.');
       return { ok: true };
     }
     const match = /^\/start ([A-Za-z0-9_-]{43})$/.exec(text);
@@ -168,11 +177,13 @@ export class TelegramNotificationsService
           telegramLinkExpiresAt: null,
         },
       }));
-    let confirmation = 'Lien ket khong hop le hoac da het han.';
+    let confirmation = 'Liên kết không hợp lệ hoặc đã hết hạn.';
+    let button: { text: string; url: string } | undefined;
     if (linked?.count === 1) {
       const current = await this.prisma.onlineOrderRequest.findUnique({
         where: { id: request!.id },
         select: {
+          customerId: true,
           status: true,
           orderSession: {
             select: { orderItems: { select: { serveStatus: true } } },
@@ -184,25 +195,36 @@ export class TelegramNotificationsService
       );
       const ready =
         active.length > 0 &&
+        active.some((item) => item.serveStatus === ServeStatus.READY) &&
         active.every(
           (item) =>
             item.serveStatus === ServeStatus.READY ||
             item.serveStatus === ServeStatus.SERVED,
         );
       const reference = request!.id.slice(0, 8).toUpperCase();
-      confirmation = ready
-        ? `Da bat thong bao. Don ${reference} da san sang de nhan va thanh toan.`
-        : current?.status === OnlineOrderStatus.ACCEPTED
-          ? `Da bat thong bao. Quan da xac nhan don ${reference}.`
-          : `Da bat thong bao. Don ${reference} dang cho quan xac nhan.`;
+      if (current?.status === OnlineOrderStatus.ACCEPTED) {
+        confirmation = ready
+          ? `Đã bật thông báo. Đơn #${reference} đã sẵn sàng. Mời bạn đến quầy nhận món và thanh toán.`
+          : `Đã bật thông báo. Quán đã xác nhận đơn #${reference}. Vui lòng theo dõi trạng thái trước khi đến nhận.`;
+      } else if (current?.status === OnlineOrderStatus.PENDING) {
+        confirmation = `Đã bật thông báo. Đơn #${reference} đang chờ quán xác nhận, chưa bắt đầu chế biến.`;
+      } else {
+        confirmation = `Trạng thái đơn #${reference} đã thay đổi. Vui lòng kiểm tra lại trên trang theo dõi đơn.`;
+      }
+      if (current)
+        button = this.customerButton(request!.id, current.customerId);
     }
-    await this.acknowledge(chatId, confirmation);
+    await this.acknowledge(chatId, confirmation, button);
     return { ok: true };
   }
 
-  private async acknowledge(chatId: string, text: string) {
+  private async acknowledge(
+    chatId: string,
+    text: string,
+    button?: { text: string; url: string },
+  ) {
     try {
-      await this.send(chatId, text);
+      await this.delivery.send(chatId, text, button);
     } catch {
       this.logger.warn('Telegram acknowledgement failed.');
     }
@@ -212,8 +234,9 @@ export class TelegramNotificationsService
     const event = StatusEventSchema.safeParse(payload);
     if (!event.success) return;
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: { id: event.data.requestId },
+      where: this.notificationWhere(event.data.requestId),
       select: {
+        customerId: true,
         status: true,
         telegramChatId: true,
         telegramReadyQueuedAt: true,
@@ -228,16 +251,18 @@ export class TelegramNotificationsService
     )
       return;
     const text = {
-      ACCEPTED: 'Don mang di da duoc quan xac nhan.',
+      ACCEPTED:
+        'Quán đã xác nhận đơn mang đi. Bạn thanh toán tại quầy khi nhận món.',
       REJECTED:
-        'Don mang di khong duoc quan xac nhan. Vui long xem trang theo doi don.',
+        'Quán chưa thể nhận đơn này. Vui lòng xem chi tiết trên trang theo dõi đơn.',
       CANCELLED: request.noShowAt
-        ? 'Da qua thoi gian nhan mon. Quan da huy don va ghi nhan khong den nhan.'
-        : 'Don mang di da bi huy. Vui long xem trang theo doi don.',
+        ? 'Đã quá thời gian nhận món. Quán đã hủy đơn và ghi nhận không đến nhận.'
+        : 'Đơn mang đi đã được hủy. Vui lòng xem chi tiết trên trang theo dõi đơn.',
     }[event.data.status];
-    const sent = await this.send(
+    const sent = await this.delivery.send(
       request.telegramChatId,
-      `Don ${event.data.requestId.slice(0, 8).toUpperCase()}: ${text}`,
+      `Đơn #${event.data.requestId.slice(0, 8).toUpperCase()}: ${text}`,
+      this.customerButton(event.data.requestId, request.customerId),
     );
     if (!sent) await this.unsubscribeChat(request.telegramChatId);
   }
@@ -305,8 +330,9 @@ export class TelegramNotificationsService
     const event = ReadyEventSchema.safeParse(payload);
     if (!event.success) return;
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: { id: event.data.requestId },
+      where: this.notificationWhere(event.data.requestId),
       select: {
+        customerId: true,
         status: true,
         telegramChatId: true,
         orderSession: {
@@ -332,9 +358,10 @@ export class TelegramNotificationsService
       )
     )
       return;
-    const sent = await this.send(
+    const sent = await this.delivery.send(
       request.telegramChatId,
-      `Don ${event.data.requestId.slice(0, 8).toUpperCase()} da san sang. Vui long den quan nhan mon va thanh toan.`,
+      `Đơn #${event.data.requestId.slice(0, 8).toUpperCase()} đã sẵn sàng. Mời bạn đến quầy nhận món và thanh toán.`,
+      this.customerButton(event.data.requestId, request.customerId),
     );
     if (!sent) await this.unsubscribeChat(request.telegramChatId);
   }
@@ -346,32 +373,83 @@ export class TelegramNotificationsService
     });
   }
 
-  private async send(chatId: string, text: string) {
-    let response: Response;
-    try {
-      response = await fetch(
-        `https://api.telegram.org/bot${this.botToken}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text }),
-          signal: AbortSignal.timeout(5_000),
-        },
-      );
-    } catch {
-      throw new Error('Telegram transport failed.');
-    }
-    if (response.status === 403) return false;
-    if (!response.ok)
-      throw new Error(`Telegram send failed: HTTP ${response.status}`);
-    const result = SendResponseSchema.safeParse(
-      await response.json().catch(() => null),
+  private customerButton(requestId: string, customerId: string | null) {
+    return this.webButton(
+      customerId ? 'Xem đơn hàng' : 'Tra cứu đơn hàng',
+      customerId ? `/account/orders/${requestId}` : '/order?view=lookup',
     );
-    if (!result.success) throw new Error('Telegram send response invalid.');
-    if (!result.data.ok) {
-      if (result.data.error_code === 403) return false;
-      throw new Error('Telegram send rejected.');
-    }
-    return true;
+  }
+
+  private notificationWhere(requestId: string) {
+    return {
+      id: requestId,
+      OR: [
+        {
+          createdAt: {
+            gt: new Date(Date.now() - ONLINE_ORDER_ACCESS_WINDOW_MS),
+          },
+        },
+        { pickupAt: { gt: new Date(Date.now() - PICKUP_ACCESS_GRACE_MS) } },
+      ],
+    };
+  }
+
+  private webButton(text: string, path: string) {
+    const origin = this.config.get<string>('TELEGRAM_WEB_APP_URL');
+    return origin ? { text, url: new URL(path, origin).href } : undefined;
+  }
+
+  private async notifyStaff(payload: unknown) {
+    const chatId = this.config.get<string>('TELEGRAM_STAFF_CHAT_ID');
+    const event = ReadyEventSchema.safeParse(payload);
+    if (!chatId || !event.success) return;
+    const request = await this.prisma.onlineOrderRequest.findUnique({
+      where: { id: event.data.requestId },
+      select: {
+        status: true,
+        expiresAt: true,
+        pickupAt: true,
+        quotedSubtotal: true,
+        items: {
+          orderBy: { lineNumber: 'asc' },
+          take: 6,
+          select: { quotedName: true, quantity: true },
+        },
+      },
+    });
+    if (
+      request?.status !== OnlineOrderStatus.PENDING ||
+      request.expiresAt <= new Date()
+    )
+      return;
+    const pickup = request.pickupAt
+      ? new Intl.DateTimeFormat('vi-VN', {
+          timeZone: 'Asia/Ho_Chi_Minh',
+          dateStyle: 'short',
+          timeStyle: 'short',
+        }).format(request.pickupAt)
+      : 'Sớm nhất có thể sau khi quán xác nhận';
+    const items = request.items
+      .slice(0, 5)
+      .map(
+        (item) =>
+          `${item.quantity} × ${item.quotedName.replace(/[\r\n\t]/g, ' ').slice(0, 80)}`,
+      );
+    const sent = await this.delivery.send(
+      chatId,
+      [
+        `ĐƠN MANG ĐI MỚI #${event.data.requestId.slice(0, 8).toUpperCase()}`,
+        ...items,
+        ...(request.items.length > 5 ? ['… và các món khác.'] : []),
+        `Hẹn nhận: ${pickup}`,
+        `Giá trị dự kiến: ${request.quotedSubtotal.toFixed(2)} VND`,
+        'Chờ nhân viên xác nhận. Thanh toán tại quầy khi nhận món.',
+      ].join('\n'),
+      this.webButton('Mở hàng đợi đơn', '/staff/online-orders?tab=pending'),
+    );
+    if (!sent)
+      throw new OutboxPermanentError(
+        'Telegram staff chat is unavailable; check bot membership and permissions.',
+      );
   }
 }

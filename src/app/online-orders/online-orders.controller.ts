@@ -201,6 +201,7 @@ export class OnlineOrdersController {
   @Post('requests/:id/collect')
   @RequirePermissions(
     PermissionKeys.INVOICES_CREATE,
+    PermissionKeys.INVOICES_PAY,
     PermissionKeys.ORDERS_ITEMS_HANDOFF,
   )
   @HttpCode(HttpStatus.OK)

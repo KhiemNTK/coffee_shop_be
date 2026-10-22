@@ -6,6 +6,10 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import type { ClaimedOutboxEvent } from '../../common/types';
 import { DomainEventBusService } from './domain-event-bus.service';
 import { OutboxDispatcherService } from './outbox-dispatcher.service';
+import {
+  OutboxDeferredError,
+  OutboxPermanentError,
+} from './outbox-delivery.error';
 
 jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({
@@ -88,20 +92,21 @@ describe('OutboxDispatcherService', () => {
     const statements = prisma.$executeRaw.mock.calls.map(
       ([query]) => query.text as string,
     );
-    expect(statements).toHaveLength(5);
-    expect(statements[0]).toContain(
+    expect(statements).toHaveLength(6);
+    expect(statements[1]).toContain(
       '"operation" NOT LIKE \'inventory.stock.%\'',
     );
-    expect(statements[0]).toContain('"operation" NOT LIKE \'cashier-shift.%\'');
+    expect(statements[1]).toContain('"operation" NOT LIKE \'cashier-shift.%\'');
     expect(
       statements.every((sql) => sql.includes('FOR UPDATE SKIP LOCKED')),
     ).toBe(true);
-    expect(statements[1]).toContain('"status" = \'PUBLISHED\'');
+    expect(statements[2]).toContain('"status" = \'PUBLISHED\'');
     for (const [query] of prisma.$executeRaw.mock.calls)
       expect(query.values).toContain(500);
     await service.drainOnce();
-    expect(statements[4]).toContain('CustomerSession');
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
+    expect(statements[5]).toContain('CustomerSession');
+    expect(statements[0]).toContain('BusinessInsight');
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(6);
   });
 
   it('decodes credentials and preserves TLS and DB when starting BullMQ', async () => {
@@ -286,6 +291,63 @@ describe('OutboxDispatcherService', () => {
       }),
     });
   });
+
+  it.each(['redis', 'direct'])(
+    'defers delivery without burning attempts or holding the worker (%s)',
+    async (mode) => {
+      eventBus.on(event.eventName, () => {
+        throw new OutboxDeferredError(27_000);
+      });
+      const now = Date.now();
+      if (mode === 'redis') await processJob(queuedJob());
+      else await service.drainOnce();
+      const updates = prisma.outboxEvent.updateMany.mock.calls.map(
+        ([args]) => args,
+      );
+      const deferred = updates.find(
+        (args) => args.data.lastError === 'Delivery deferred by rate limit.',
+      );
+      expect(deferred).toEqual({
+        where: {
+          id: event.id,
+          status: OutboxEventStatus.PROCESSING,
+          lockedBy: event.lockedBy,
+        },
+        data: {
+          status: OutboxEventStatus.PENDING,
+          lockedAt: null,
+          lockedBy: null,
+          lastError: 'Delivery deferred by rate limit.',
+          availableAt: expect.any(Date),
+        },
+      });
+      expect(deferred.data.availableAt.getTime()).toBeGreaterThanOrEqual(
+        now + 27_000,
+      );
+      expect(deferred.data).not.toHaveProperty('attempts');
+    },
+  );
+
+  it.each(['redis', 'direct'])(
+    'dead-letters a permanent rejection once (%s)',
+    async (mode) => {
+      const log = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      eventBus.on(event.eventName, () => {
+        throw new OutboxPermanentError('Invalid destination.');
+      });
+      if (mode === 'redis') await processJob(queuedJob());
+      else await service.drainOnce();
+      expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: OutboxEventStatus.DEAD_LETTER,
+            attempts: 1,
+          }),
+        }),
+      );
+      expect(log).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('preserves the database retry budget after a retained job is restarted', async () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation();

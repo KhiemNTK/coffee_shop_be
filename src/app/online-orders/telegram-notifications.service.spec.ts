@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OnlineOrderStatus, ServeStatus } from '@prisma/client';
+import { OnlineOrderStatus, Prisma, ServeStatus } from '@prisma/client';
+import {
+  OutboxDeferredError,
+  OutboxPermanentError,
+} from '../durable/outbox-delivery.error';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import type { OutboxService } from '../durable/outbox.service';
@@ -9,8 +13,10 @@ import { ORDER_EVENTS } from '../orders/events/order.events';
 import {
   ONLINE_ORDER_TELEGRAM_EVENT,
   ONLINE_ORDER_TELEGRAM_READY_EVENT,
+  ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
 } from './telegram-events';
 import { TelegramNotificationsService } from './telegram-notifications.service';
+import { TelegramDeliveryService } from './telegram-delivery.service';
 
 describe('TelegramNotificationsService', () => {
   const requestId = 'd1ebfac7-36dc-442d-9cb0-68be76a5aa9c';
@@ -31,6 +37,8 @@ describe('TelegramNotificationsService', () => {
         ({
           TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
           TELEGRAM_WEBHOOK_SECRET: secret,
+          TELEGRAM_STAFF_CHAT_ID: '-1001234567890',
+          TELEGRAM_WEB_APP_URL: 'https://coffee.example.test',
         })[key],
     ),
   };
@@ -46,6 +54,7 @@ describe('TelegramNotificationsService', () => {
       config as unknown as ConfigService,
       eventBus,
       outbox as unknown as OutboxService,
+      new TelegramDeliveryService(config as unknown as ConfigService),
     );
     prisma.$transaction.mockImplementation(
       async (callback: (client: typeof prisma) => Promise<unknown>) =>
@@ -199,7 +208,7 @@ describe('TelegramNotificationsService', () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 429 }));
     await expect(
       eventBus.publish(ONLINE_ORDER_TELEGRAM_READY_EVENT, { requestId }),
-    ).rejects.toThrow('Telegram send failed: HTTP 429');
+    ).rejects.toBeInstanceOf(OutboxDeferredError);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
@@ -223,7 +232,7 @@ describe('TelegramNotificationsService', () => {
   it.each([
     JSON.stringify({
       ok: false,
-      error_code: 429,
+      error_code: 500,
       description: 'private-chat-detail',
     }),
     JSON.stringify({ unexpected: true }),
@@ -274,6 +283,31 @@ describe('TelegramNotificationsService', () => {
     expect(prisma.onlineOrderRequest.findUnique).not.toHaveBeenCalled();
   });
 
+  it('does not query customer subscriptions when configured for staff-only alerts', async () => {
+    service.onModuleDestroy();
+    const staffOnly = new TelegramNotificationsService(
+      prisma as unknown as ExtendedPrismaClient,
+      new ConfigService({
+        TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
+        TELEGRAM_STAFF_CHAT_ID: '-1001234567890',
+      }),
+      eventBus,
+      outbox as unknown as OutboxService,
+      {} as TelegramDeliveryService,
+    );
+    staffOnly.onModuleInit();
+    try {
+      await eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        orderSessionId: sessionId,
+        tableId: null,
+        currentStatus: ServeStatus.READY,
+      });
+      expect(prisma.onlineOrderRequest.findUnique).not.toHaveBeenCalled();
+    } finally {
+      staffOnly.onModuleDestroy();
+    }
+  });
+
   it('distinguishes a staff-confirmed no-show from a normal cancellation', async () => {
     prisma.onlineOrderRequest.findUnique.mockResolvedValue({
       status: OnlineOrderStatus.CANCELLED,
@@ -285,6 +319,94 @@ describe('TelegramNotificationsService', () => {
       status: OnlineOrderStatus.CANCELLED,
     });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.text).toContain('khong den nhan');
+    expect(body.text).toContain('không đến nhận');
+  });
+
+  it.each([null, '86965021-24b3-41d4-a74c-dd4a74c6633d'])(
+    'links a customer through the normal access check without an order token (%s)',
+    async (customerId) => {
+      prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+        status: OnlineOrderStatus.ACCEPTED,
+        customerId,
+        telegramChatId: '123456',
+        orderSession: { orderItems: [{ serveStatus: ServeStatus.READY }] },
+      });
+      await eventBus.publish(ONLINE_ORDER_TELEGRAM_READY_EVENT, { requestId });
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(body.text).toContain('đã sẵn sàng');
+      expect(body.text).toContain('thanh toán');
+      expect(body.reply_markup.inline_keyboard).toEqual([
+        [
+          {
+            text: customerId ? 'Xem đơn hàng' : 'Tra cứu đơn hàng',
+            url: `https://coffee.example.test${customerId ? `/account/orders/${requestId}` : '/order?view=lookup'}`,
+          },
+        ],
+      ]);
+      expect(JSON.stringify(body)).not.toMatch(
+        /accessToken|pickupAccessToken|reorderToken/,
+      );
+      expect(
+        JSON.stringify(prisma.onlineOrderRequest.findUnique.mock.calls[0]),
+      ).not.toContain('phoneNumber');
+    },
+  );
+
+  it('sends a bounded staff summary without customer PII or instructions to prepare an unconfirmed order', async () => {
+    prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+      status: OnlineOrderStatus.PENDING,
+      expiresAt: new Date(Date.now() + 60_000),
+      pickupAt: new Date('2026-10-22T03:15:00Z'),
+      quotedSubtotal: new Prisma.Decimal('85000'),
+      items: Array.from({ length: 6 }, () => ({
+        quotedName: 'Trà đào\nNEW LINE',
+        quantity: 2,
+      })),
+    });
+    await eventBus.publish(ONLINE_ORDER_TELEGRAM_STAFF_EVENT, { requestId });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.chat_id).toBe('-1001234567890');
+    expect(body.text).toContain('Chờ nhân viên xác nhận');
+    expect(body.text).toContain('85000.00 VND');
+    expect(body.text).toContain('10:15');
+    expect(body.text).toContain('2 × Trà đào NEW LINE');
+    expect(body.text).toContain('và các món khác');
+    expect(body.reply_markup.inline_keyboard[0][0].url).toBe(
+      'https://coffee.example.test/staff/online-orders?tab=pending',
+    );
+    const select = prisma.onlineOrderRequest.findUnique.mock.calls[0][0].select;
+    expect(select).not.toHaveProperty('phoneNumber');
+    expect(select).not.toHaveProperty('pickupName');
+    expect(select).not.toHaveProperty('requestHash');
+  });
+
+  it.each([
+    {
+      status: OnlineOrderStatus.ACCEPTED,
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+    { status: OnlineOrderStatus.PENDING, expiresAt: new Date(0) },
+  ])(
+    'skips a delayed staff alert once it is no longer actionable (%s)',
+    async (request) => {
+      prisma.onlineOrderRequest.findUnique.mockResolvedValue(request);
+      await eventBus.publish(ONLINE_ORDER_TELEGRAM_STAFF_EVENT, { requestId });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('dead-letters a forbidden staff group instead of clearing customer subscriptions', async () => {
+    prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+      status: OnlineOrderStatus.PENDING,
+      expiresAt: new Date(Date.now() + 60_000),
+      pickupAt: null,
+      quotedSubtotal: new Prisma.Decimal('35000'),
+      items: [],
+    });
+    fetchMock.mockResolvedValue(new Response(null, { status: 403 }));
+    await expect(
+      eventBus.publish(ONLINE_ORDER_TELEGRAM_STAFF_EVENT, { requestId }),
+    ).rejects.toBeInstanceOf(OutboxPermanentError);
+    expect(prisma.onlineOrderRequest.updateMany).not.toHaveBeenCalled();
   });
 });

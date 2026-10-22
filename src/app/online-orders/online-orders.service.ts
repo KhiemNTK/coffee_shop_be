@@ -63,7 +63,10 @@ import {
   readPickupSchedule,
   type PickupSchedule,
 } from './pickup-schedule';
-import { ONLINE_ORDER_TELEGRAM_EVENT } from './telegram-events';
+import {
+  ONLINE_ORDER_TELEGRAM_EVENT,
+  ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
+} from './telegram-events';
 import { onlineOrderAccessExpiresAt } from './online-order-access';
 
 const REVIEW_WINDOW_MS = 30 * 60 * 1000;
@@ -104,6 +107,7 @@ export class OnlineOrdersService {
   private readonly reorderKey: Buffer;
   private readonly pickupSchedule: PickupSchedule | null;
   private readonly telegramBotUsername?: string;
+  private readonly telegramStaffChatId?: string;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -120,6 +124,7 @@ export class OnlineOrdersService {
   ) {
     this.pickupSchedule = readPickupSchedule(config);
     this.telegramBotUsername = config.get<string>('TELEGRAM_BOT_USERNAME');
+    this.telegramStaffChatId = config.get<string>('TELEGRAM_STAFF_CHAT_ID');
     this.accessKey = createHmac(
       'sha256',
       config.getOrThrow<string>('JWT_SECRET'),
@@ -263,7 +268,7 @@ export class OnlineOrdersService {
           )
             throw new UnauthorizedException('Customer is inactive.');
           await this.intake.assertAccepting(tx, Boolean(dto.pickupAt));
-          return tx.onlineOrderRequest.create({
+          const request = await tx.onlineOrderRequest.create({
             data: {
               clientRequestId: dto.clientRequestId,
               requestHash,
@@ -278,6 +283,16 @@ export class OnlineOrdersService {
             },
             select: publicRequestSelect,
           });
+          if (this.telegramStaffChatId) {
+            await this.outbox.enqueue(tx, {
+              topic: 'order',
+              eventName: ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
+              aggregateType: 'OnlineOrderRequest',
+              aggregateId: request.id,
+              payload: { requestId: request.id },
+            });
+          }
+          return request;
         },
         { loggerContext: 'Online order submission' },
       );

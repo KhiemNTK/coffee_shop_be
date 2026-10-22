@@ -23,6 +23,10 @@ import { AppModule } from '../src/app/app.module';
 import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { OnlineOrdersService } from '../src/app/online-orders/online-orders.service';
 import { OnlineOrderIntakeService } from '../src/app/online-orders/online-order-intake.service';
+import { ONLINE_ORDER_TELEGRAM_STAFF_EVENT } from '../src/app/online-orders/telegram-events';
+import { OutboxService } from '../src/app/durable/outbox.service';
+import { IdempotencyService } from '../src/app/durable/idempotency.service';
+import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { KitchenService } from '../src/app/kitchen/kitchen.service';
 import { PrintingService } from '../src/app/printing/printing.service';
 import { ONLINE_ORDER_INTAKE_SETTING_KEY } from '../src/common/consts/online-order-settings';
@@ -43,6 +47,7 @@ describe('Remote takeaway orders (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
   let onlineOrders: OnlineOrdersService;
+  let staffAlertOrders: OnlineOrdersService;
   let turnstile: TurnstileService;
   let orders: OrdersService;
   let menu: MenuService;
@@ -100,6 +105,21 @@ describe('Remote takeaway orders (e2e)', () => {
     reports = module.get(ReportsService);
     prefix = module.get(ConfigService).get<string>('APP_PREFIX', '/api/v1');
     await app.init();
+    staffAlertOrders = new OnlineOrdersService(
+      module.get(PRISMA_SERVICE_TOKEN),
+      orders,
+      module.get(InvoicesService),
+      module.get(InventoryConsumptionService),
+      module.get(IdempotencyService),
+      module.get(OutboxService),
+      module.get(PaginationUtilService),
+      new ConfigService({
+        JWT_SECRET: module.get(ConfigService).getOrThrow('JWT_SECRET'),
+        TELEGRAM_STAFF_CHAT_ID: '-1001234567890',
+      }),
+      turnstile,
+      module.get(OnlineOrderIntakeService),
+    );
 
     const position = await prisma.position.create({
       data: { name: `Online position ${suffix}`, salary: 0 },
@@ -169,7 +189,9 @@ describe('Remote takeaway orders (e2e)', () => {
       });
       await prisma.outboxEvent.deleteMany({
         where: {
-          aggregateId: { in: [...sessionIds, ...orderItemIds, ...invoiceIds] },
+          aggregateId: {
+            in: [...requestIds, ...sessionIds, ...orderItemIds, ...invoiceIds],
+          },
         },
       });
       await prisma.printJob.deleteMany({
@@ -645,6 +667,47 @@ describe('Remote takeaway orders (e2e)', () => {
         where: { clientRequestId: dto.clientRequestId },
       }),
     ).toBe(1);
+  });
+
+  it('atomically queues one private staff alert for concurrent submissions and replays', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const [first, second] = await Promise.all([
+      staffAlertOrders.createPublicRequest(dto),
+      staffAlertOrders.createPublicRequest(dto),
+    ]);
+    expect(first).toEqual(second);
+    expect(await staffAlertOrders.createPublicRequest(dto)).toEqual(first);
+    const events = await prisma.outboxEvent.findMany({
+      where: {
+        eventName: ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
+        aggregateId: first.requestId,
+      },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toEqual({ requestId: first.requestId });
+    expect(JSON.stringify(events[0])).not.toContain(dto.phoneNumber);
+    expect(JSON.stringify(events[0])).not.toContain(first.accessToken);
+  });
+
+  it('rolls back the request if its staff alert cannot be persisted', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const enqueue = jest
+      .spyOn(app.get(OutboxService), 'enqueue')
+      .mockRejectedValueOnce(new Error('Outbox write unavailable.'));
+    try {
+      await expect(staffAlertOrders.createPublicRequest(dto)).rejects.toThrow(
+        'Outbox write unavailable.',
+      );
+      expect(
+        await prisma.onlineOrderRequest.count({
+          where: { clientRequestId: dto.clientRequestId },
+        }),
+      ).toBe(0);
+    } finally {
+      enqueue.mockRestore();
+    }
   });
 
   it('rejects an invalid callback number before writing a request', async () => {

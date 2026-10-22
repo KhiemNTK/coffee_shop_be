@@ -8,6 +8,7 @@ import { OnlineOrdersController } from './online-orders.controller';
 import { OnlineOrdersService } from './online-orders.service';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
+import { TelegramDeliveryService } from './telegram-delivery.service';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { TelegramNotificationsService } from './telegram-notifications.service';
   providers: [
     OnlineOrdersService,
     TelegramNotificationsService,
+    TelegramDeliveryService,
     OnlineOrderIntakeService,
   ],
   exports: [OnlineOrdersService],
