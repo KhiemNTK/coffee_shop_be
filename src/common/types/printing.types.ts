@@ -37,3 +37,20 @@ export interface ReceiptPrintPayload extends Prisma.JsonObject {
   changeAmount: string | null;
   items: Prisma.JsonArray;
 }
+
+export interface PrecheckPrintPayload extends Prisma.JsonObject {
+  documentType: 'PRECHECK';
+  title: string;
+  paymentStatus: 'UNPAID';
+  orderSessionId: string;
+  createdAt: string;
+  tableName: string | null;
+  cashierName: string;
+  promotionId: string | null;
+  subTotal: string;
+  discountAmount: string;
+  taxAmount: string;
+  taxRate: string;
+  totalAmount: string;
+  items: Prisma.JsonArray;
+}

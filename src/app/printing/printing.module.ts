@@ -5,9 +5,10 @@ import { PrintDeviceGuard } from './print-device.guard';
 import { PrintEventConsumerService } from './print-event-consumer.service';
 import { PrintingController } from './printing.controller';
 import { PrintingService } from './printing.service';
+import { InvoicesModule } from '../invoices/invoices.module';
 
 @Module({
-  imports: [PaginationUtilModule],
+  imports: [PaginationUtilModule, InvoicesModule],
   controllers: [PrintingController, PrintAgentController],
   providers: [PrintingService, PrintDeviceGuard, PrintEventConsumerService],
   exports: [PrintingService],

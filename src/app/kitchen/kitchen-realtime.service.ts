@@ -9,7 +9,10 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { z } from 'zod';
 import {
+  defer,
+  finalize,
   interval,
   map,
   merge,
@@ -19,11 +22,26 @@ import {
   takeUntil,
 } from 'rxjs';
 import type { KitchenRealtimeEvent } from '../../common/types';
+import { kitchenSseActiveConnections } from '../../common/observability/metrics';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { ORDER_EVENTS } from '../orders/events/order.events';
 
 const CHANNEL = 'coffee-shop:kitchen-events';
 const HEARTBEAT_MS = 15_000;
+const NewTicketsSchema = z
+  .array(
+    z.object({
+      stationId: z.uuid(),
+      availableAt: z.iso.datetime({ offset: true }),
+    }),
+  )
+  .max(100);
+const RealtimeEventSchema = z.object({
+  eventId: z.uuid(),
+  eventName: z.string().min(1).max(100),
+  occurredAt: z.iso.datetime({ offset: true }),
+  newTickets: NewTicketsSchema.optional().catch(undefined),
+});
 const KITCHEN_EVENT_NAMES = [
   ORDER_EVENTS.ITEMS_ADDED,
   ORDER_EVENTS.ITEM_STATUS_UPDATED,
@@ -76,7 +94,7 @@ export class KitchenRealtimeService
 
     this.subscriber.on('message', (_channel, message) => {
       try {
-        this.events.next(JSON.parse(message) as KitchenRealtimeEvent);
+        this.events.next(RealtimeEventSchema.parse(JSON.parse(message)));
       } catch {
         this.logger.warn('Ignored malformed kitchen realtime message.');
       }
@@ -107,22 +125,28 @@ export class KitchenRealtimeService
   }
 
   stream(): Observable<MessageEvent> {
-    return merge(
-      this.events.pipe(
-        map((event) => ({
-          type: 'kitchen.refresh',
-          id: event.eventId,
-          retry: 5_000,
-          data: event,
-        })),
-      ),
-      interval(HEARTBEAT_MS).pipe(
-        map(() => ({
-          type: 'heartbeat',
-          data: { occurredAt: new Date().toISOString() },
-        })),
-      ),
-    ).pipe(takeUntil(this.shutdown));
+    return defer(() => {
+      kitchenSseActiveConnections.inc();
+      return merge(
+        this.events.pipe(
+          map((event) => ({
+            type: 'kitchen.refresh',
+            id: event.eventId,
+            retry: 5_000,
+            data: event,
+          })),
+        ),
+        interval(HEARTBEAT_MS).pipe(
+          map(() => ({
+            type: 'heartbeat',
+            data: { occurredAt: new Date().toISOString() },
+          })),
+        ),
+      ).pipe(
+        takeUntil(this.shutdown),
+        finalize(() => kitchenSseActiveConnections.dec()),
+      );
+    });
   }
 
   private async publishRefresh(eventName: string, payload: unknown) {
@@ -136,6 +160,10 @@ export class KitchenRealtimeService
           ? source.occurredAt
           : new Date().toISOString(),
     };
+    if (eventName === ORDER_EVENTS.ITEMS_ADDED) {
+      const tickets = NewTicketsSchema.safeParse(source.newTickets);
+      if (tickets.success) event.newTickets = tickets.data;
+    }
 
     if (this.publisher?.status === 'ready') {
       try {

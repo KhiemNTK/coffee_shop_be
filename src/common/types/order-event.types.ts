@@ -1,4 +1,5 @@
 import type { ServeStatus } from '@prisma/client';
+import type { KitchenNewTicket } from './kitchen.types';
 
 export type OrderEventName =
   | 'order.session.opened'
@@ -32,6 +33,7 @@ export interface OrderItemsAddedPayload extends OrderEventBase {
   tableId: string | null;
   orderItemIds: string[];
   kitchenTicketIds: string[];
+  newTickets?: KitchenNewTicket[];
 }
 
 export interface OrderItemStatusUpdatedPayload extends OrderEventBase {

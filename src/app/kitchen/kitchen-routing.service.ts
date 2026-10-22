@@ -53,7 +53,8 @@ export class KitchenRoutingService {
       where: { id: input.orderSessionId },
       select: { table: { select: { name: true } } },
     });
-    const tickets: Array<{ id: string }> = [];
+    const tickets: Array<{ id: string; stationId: string; availableAt: Date }> =
+      [];
     for (const { station, items } of groups.values()) {
       const dueAt =
         input.pickupAt ??
@@ -108,7 +109,7 @@ export class KitchenRoutingService {
           },
         });
       }
-      tickets.push(ticket);
+      tickets.push({ id: ticket.id, stationId: ticket.stationId, availableAt });
     }
     return tickets;
   }

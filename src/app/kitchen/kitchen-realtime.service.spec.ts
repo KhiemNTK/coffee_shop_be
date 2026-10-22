@@ -2,6 +2,12 @@ import { Controller, Sse, type INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { get, type ClientRequest } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import {
+  kitchenSseActiveConnections,
+  metricsRegistry,
+} from '../../common/observability/metrics';
+import { ORDER_EVENTS } from '../orders/events/order.events';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { KitchenRealtimeService } from './kitchen-realtime.service';
 
@@ -16,6 +22,7 @@ class StreamController {
 }
 
 describe('KitchenRealtimeService shutdown', () => {
+  beforeEach(() => kitchenSseActiveConnections.set(0));
   const createService = () =>
     new KitchenRealtimeService(
       { get: () => undefined } as unknown as ConfigService,
@@ -68,6 +75,7 @@ describe('KitchenRealtimeService shutdown', () => {
         });
         client.on('error', reject);
       });
+      expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(1);
       await Promise.race([
         app.close(),
         new Promise<never>((_, reject) => {
@@ -77,10 +85,64 @@ describe('KitchenRealtimeService shutdown', () => {
           );
         }),
       ]);
+      expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(0);
     } finally {
       if (deadline) clearTimeout(deadline);
       client?.destroy();
       await app?.close();
     }
   }, 10_000);
+
+  it('counts actual subscriptions, handles duplicate unsubscribe and late shutdown subscriptions', async () => {
+    const service = createService();
+    const stream = service.stream();
+    expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(0);
+    const first = stream.subscribe();
+    const second = stream.subscribe();
+    expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(2);
+    first.unsubscribe();
+    first.unsubscribe();
+    expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(1);
+    service.onModuleDestroy();
+    second.unsubscribe();
+    service.stream().subscribe();
+    expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(0);
+    expect(await metricsRegistry.metrics()).toContain(
+      'coffee_shop_kitchen_sse_active_connections',
+    );
+  });
+
+  it('carries only validated station release snapshots and keeps legacy refreshes usable', async () => {
+    const bus = new DomainEventBusService();
+    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    const receive = jest.fn();
+    service.onModuleInit();
+    const subscription = service.stream().subscribe(receive);
+    const stationId = randomUUID();
+    const availableAt = new Date().toISOString();
+    try {
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {
+        eventId: randomUUID(),
+        newTickets: [
+          { stationId, availableAt, privateNote: 'must not leave the server' },
+        ],
+      });
+      expect(receive.mock.calls[0][0].data.newTickets).toEqual([
+        { stationId, availableAt },
+      ]);
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {
+        newTickets: [{ stationId: 'invalid', availableAt }],
+      });
+      expect(receive.mock.calls[1][0].data).not.toHaveProperty('newTickets');
+      await bus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        newTickets: [{ stationId, availableAt }],
+      });
+      expect(receive.mock.calls[2][0].data).not.toHaveProperty('newTickets');
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
+      expect(receive).toHaveBeenCalledTimes(4);
+    } finally {
+      subscription.unsubscribe();
+      service.onModuleDestroy();
+    }
+  });
 });

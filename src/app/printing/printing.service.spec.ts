@@ -18,6 +18,7 @@ describe('PrintingService leases', () => {
       prisma as never,
       new PaginationUtilService(),
       {} as never,
+      {} as never,
     );
 
   it('searches devices before paging without exposing agent credentials', async () => {
@@ -284,6 +285,7 @@ describe('PrintingService receipt reprints', () => {
       {} as never,
       new PaginationUtilService(),
       idempotency as never,
+      {} as never,
     );
   });
 

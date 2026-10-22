@@ -590,6 +590,10 @@ export class OrdersService {
           tableId: updatedSession.tableId,
           orderItemIds: createdItems.map((item) => item.id),
           kitchenTicketIds: kitchenTickets.map((ticket) => ticket.id),
+          newTickets: kitchenTickets.map(({ stationId, availableAt }) => ({
+            stationId,
+            availableAt: availableAt.toISOString(),
+          })),
         },
       );
     }
@@ -764,6 +768,10 @@ export class OrdersService {
               tableId: original.orderSession.tableId,
               orderItemIds: [replacement.id],
               kitchenTicketIds: tickets.map(({ id }) => id),
+              newTickets: tickets.map(({ stationId, availableAt }) => ({
+                stationId,
+                availableAt: availableAt.toISOString(),
+              })),
             },
           );
           return remake;

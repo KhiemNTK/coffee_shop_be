@@ -25,13 +25,16 @@ import type {
   ClaimedPrintJob,
   ExtendedPrismaTransactionClient,
   ReceiptPrintPayload,
+  PrecheckPrintPayload,
 } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { readSelectedOptions } from '../menu/menu-option-selection';
+import { InvoicesService } from '../invoices/invoices.service';
 import {
   ClaimPrintJobsDto,
   CreatePrintDeviceDto,
+  CreatePrecheckDto,
   GetPrintDevicesDto,
   GetPrintJobsDto,
   PrintAgentHeartbeatDto,
@@ -69,6 +72,7 @@ export class PrintingService {
     private readonly prisma: ExtendedPrismaClient,
     private readonly pagination: PaginationUtilService,
     private readonly idempotency: IdempotencyService,
+    private readonly invoices: InvoicesService,
   ) {}
 
   async createDevice(employeeId: string, dto: CreatePrintDeviceDto) {
@@ -306,6 +310,7 @@ export class PrintingService {
       ...(query.status ? { status: query.status } : {}),
       ...(query.deviceId ? { deviceId: query.deviceId } : {}),
       ...(query.invoiceId ? { invoiceId: query.invoiceId } : {}),
+      ...(query.orderSessionId ? { orderSessionId: query.orderSessionId } : {}),
     };
     const totalItems = await this.prisma.printJob.count({ where });
     const paging = this.pagination.paging({ ...query, totalItems });
@@ -385,6 +390,88 @@ export class PrintingService {
         select: this.jobSelect,
       });
     });
+  }
+
+  createPrecheck(employeeId: string, dto: CreatePrecheckDto) {
+    return this.idempotency.execute(
+      {
+        employeeId,
+        operation: 'printing.precheck',
+        key: dto.idempotencyKey,
+        request: dto,
+      },
+      async (tx) => {
+        const quote = await this.invoices.quoteInvoiceInTransaction(
+          tx,
+          employeeId,
+          dto,
+        );
+        const session = await tx.orderSession.findUniqueOrThrow({
+          where: { id: dto.orderSessionId },
+          select: { table: { select: { name: true } } },
+        });
+        const employee = await tx.employee.findUniqueOrThrow({
+          where: { id: employeeId },
+          select: { fullName: true },
+        });
+        const items = await tx.orderItem.findMany({
+          where: {
+            orderSessionId: dto.orderSessionId,
+            id: { in: quote.orderItemIds },
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            quantity: true,
+            priceAtTime: true,
+            selectedOptions: true,
+            menuItem: { select: { name: true } },
+          },
+        });
+        const payload: PrecheckPrintPayload = {
+          documentType: 'PRECHECK',
+          title: 'PHIEU TAM TINH - CHUA THANH TOAN',
+          paymentStatus: 'UNPAID',
+          orderSessionId: dto.orderSessionId,
+          createdAt: new Date().toISOString(),
+          tableName: session.table?.name ?? null,
+          cashierName: employee.fullName,
+          promotionId: dto.promotionId ?? null,
+          subTotal: quote.subTotal.toString(),
+          discountAmount: quote.discountAmount.toString(),
+          taxAmount: quote.taxAmount.toString(),
+          taxRate: quote.taxRate.toString(),
+          totalAmount: quote.totalAmount.toString(),
+          items: items.map((item) => ({
+            orderItemId: item.id,
+            name: item.menuItem.name,
+            quantity: item.quantity,
+            unitPrice: item.priceAtTime.toString(),
+            lineTotal: item.priceAtTime.mul(item.quantity).toString(),
+            selectedOptions: readSelectedOptions(item.selectedOptions),
+          })),
+        };
+        const job = await tx.printJob.create({
+          data: {
+            type: PrintJobType.PRECHECK,
+            orderSessionId: dto.orderSessionId,
+            payload,
+            copies: dto.copies,
+            deviceId: await this.resolveReceiptDevice(tx, dto.deviceId),
+            requestedById: employeeId,
+            deduplicationKey: `PRECHECK:${employeeId}:${dto.idempotencyKey}`,
+          },
+          select: this.jobSelect,
+        });
+        await this.audit(tx, employeeId, 'PRECHECK_PRINT_REQUESTED', {
+          printJobId: job.id,
+          orderSessionId: dto.orderSessionId,
+          orderItemIds: quote.orderItemIds,
+          totalAmount: quote.totalAmount.toString(),
+        });
+        return job;
+      },
+    );
   }
 
   reprintReceipt(
@@ -714,6 +801,7 @@ export class PrintingService {
     deviceId: true,
     requestedById: true,
     invoiceId: true,
+    orderSessionId: true,
     kitchenTicketId: true,
     reprintOfId: true,
   } as const;
@@ -810,9 +898,9 @@ export class PrintingService {
     jobType: PrintJobType,
   ) {
     const expectedType =
-      jobType === PrintJobType.RECEIPT
-        ? PrintDeviceType.RECEIPT
-        : PrintDeviceType.KITCHEN;
+      jobType === PrintJobType.KITCHEN_TICKET
+        ? PrintDeviceType.KITCHEN
+        : PrintDeviceType.RECEIPT;
     const device = await tx.printDevice.findFirst({
       where: {
         id: deviceId,
@@ -851,7 +939,7 @@ export class PrintingService {
   ) {
     return tx.printJob.updateMany({
       where: {
-        type: PrintJobType.RECEIPT,
+        type: { in: [PrintJobType.RECEIPT, PrintJobType.PRECHECK] },
         status: PrintJobStatus.PENDING,
         deviceId: null,
       },

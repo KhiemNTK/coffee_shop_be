@@ -31,10 +31,16 @@ export interface KitchenRoutableOrderItem {
   selectedOptions: unknown;
 }
 
+export interface KitchenNewTicket {
+  stationId: string;
+  availableAt: string;
+}
+
 export interface KitchenRealtimeEvent {
   eventId: string;
   eventName: string;
   occurredAt: string;
+  newTickets?: KitchenNewTicket[];
 }
 
 export interface KitchenWorkloadRow {

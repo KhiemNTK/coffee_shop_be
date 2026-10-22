@@ -20,6 +20,7 @@ describe('KDS printing claims (e2e)', () => {
     prisma as never,
     new PaginationUtilService(),
     {} as never,
+    {} as never,
   );
   const suffix = randomUUID();
   const ids: Record<string, string> = {};
@@ -205,6 +206,7 @@ describe('KDS printing claims (e2e)', () => {
             scopedPrisma as never,
             new PaginationUtilService(),
             new IdempotencyService(scopedPrisma as never),
+            {} as never,
           );
           const original = await service.createAutomaticReceipt(invoice.id);
           if (!original) throw new Error('Automatic receipt was not created.');

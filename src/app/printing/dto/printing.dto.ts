@@ -6,6 +6,7 @@ import {
 } from '@prisma/client';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
+import { CreateInvoiceInputSchema } from '../../invoices/dto/create-invoice.dto';
 
 const PaginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -56,6 +57,7 @@ export class GetPrintJobsDto extends createZodDto(
     status: z.enum(PrintJobStatus).optional(),
     deviceId: z.uuid().optional(),
     invoiceId: z.uuid().optional(),
+    orderSessionId: z.uuid().optional(),
   }),
 ) {}
 
@@ -72,6 +74,14 @@ export class ReprintReceiptDto extends createZodDto(
     deviceId: z.uuid().optional(),
     idempotencyKey: z.string().trim().min(8).max(120),
   }),
+) {}
+
+export class CreatePrecheckDto extends createZodDto(
+  CreateInvoiceInputSchema.extend({
+    copies: z.number().int().min(1).max(5).default(1),
+    deviceId: z.uuid().optional(),
+    idempotencyKey: z.string().trim().min(8).max(120),
+  }).strict(),
 ) {}
 
 export class PrintAgentHeartbeatDto extends createZodDto(

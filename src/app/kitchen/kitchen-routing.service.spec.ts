@@ -63,7 +63,19 @@ describe('KitchenRoutingService', () => {
       ],
     };
     const service = new KitchenRoutingService(printing as never);
-    await service.createTickets(tx as never, input);
+    const snapshots = await service.createTickets(tx as never, input);
+    expect(
+      snapshots.map(({ stationId, availableAt }) => ({
+        stationId,
+        availableAt,
+      })),
+    ).toEqual([
+      { stationId: 'bar', availableAt: new Date(pickupAt.getTime() - 300_000) },
+      {
+        stationId: 'bakery',
+        availableAt: new Date(pickupAt.getTime() - 600_000),
+      },
+    ]);
     expect(
       tx.kitchenTicket.create.mock.calls.map(([call]) => call.data.availableAt),
     ).toEqual([
@@ -110,6 +122,8 @@ describe('KitchenRoutingService', () => {
       kitchenTicket: {
         create: jest.fn().mockImplementation(({ data }) => ({
           id: `ticket-${++sequence}`,
+          stationId: data.stationId,
+          availableAt: data.availableAt,
           sequence,
           dueAt: data.dueAt,
           items: data.items.create.map((item: object, index: number) => ({

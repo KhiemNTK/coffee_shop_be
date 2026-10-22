@@ -15,6 +15,7 @@ import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import {
   CreatePrintDeviceDto,
+  CreatePrecheckDto,
   GetPrintDevicesDto,
   GetPrintJobsDto,
   ReprintReceiptDto,
@@ -27,6 +28,15 @@ import { PrintingService } from './printing.service';
 @Controller('printing')
 export class PrintingController {
   constructor(private readonly printing: PrintingService) {}
+
+  @Post('prechecks')
+  @RequirePermissions(PermissionKeys.INVOICES_CREATE)
+  createPrecheck(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CreatePrecheckDto,
+  ) {
+    return this.printing.createPrecheck(employeeId, dto);
+  }
 
   @Post('devices')
   @RequirePermissions(PermissionKeys.PRINT_DEVICES_MANAGE)

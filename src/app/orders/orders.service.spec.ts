@@ -1289,6 +1289,50 @@ describe('OrdersService', () => {
     expect(tx.orderItem.createManyAndReturn).not.toHaveBeenCalled();
   });
 
+  it('stores new-ticket station and release snapshots in the same order outbox transaction', async () => {
+    const availableAt = new Date(Date.now() + 60_000);
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      tableId: 'table-id',
+      sessionStatus: SessionStatus.ACTIVE,
+    });
+    tx.menuItem.findMany.mockResolvedValue([
+      {
+        id: 'menu-item-id',
+        name: 'Coffee',
+        price: new Prisma.Decimal(25000),
+        ingredients: [],
+        optionGroups: [],
+      },
+    ]);
+    tx.orderItem.createManyAndReturn.mockResolvedValue([
+      {
+        id: 'item-id',
+        menuItemId: 'menu-item-id',
+        quantity: 1,
+        selectedOptions: [],
+      },
+    ]);
+    kitchenRouting.createTickets.mockResolvedValue([
+      { id: 'ticket-id', stationId: 'station-id', availableAt },
+    ]);
+    await service.addOrderItems('session-id', {
+      items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
+    });
+    expect(outbox.enqueue).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        eventName: 'order.items.added',
+        payload: expect.objectContaining({
+          kitchenTicketIds: ['ticket-id'],
+          newTickets: [
+            { stationId: 'station-id', availableAt: availableAt.toISOString() },
+          ],
+        }),
+      }),
+    );
+  });
+
   it('does not open a session when the table cannot be claimed', async () => {
     tx.employee.findUnique.mockResolvedValue({ id: 'employee-id' });
     tx.diningTable.findFirst.mockResolvedValue({
