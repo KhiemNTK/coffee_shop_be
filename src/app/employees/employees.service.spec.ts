@@ -364,6 +364,47 @@ describe('Employee access changes', () => {
     });
   });
 
+  it('rejects a stale role baseline without revoking existing roles', async () => {
+    tx.role.findMany.mockResolvedValue([]);
+    await expect(
+      service.replaceEmployeeRoles(
+        'cashier',
+        {
+          roleIds: [],
+          expectedRoleIds: [],
+        },
+        'manager',
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'AUTHORIZATION_CHANGED' },
+    });
+    expect(tx.employeeRole.deleteMany).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts a matching role baseline and an already-applied replay', async () => {
+    await service.replaceEmployeeRoles(
+      'cashier',
+      {
+        roleIds: [cashierRole.id],
+        expectedRoleIds: [],
+      },
+      'manager',
+    );
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+    tx.role.findMany.mockResolvedValue([]);
+    await service.replaceEmployeeRoles(
+      'cashier',
+      {
+        roleIds: [],
+        expectedRoleIds: [cashierRole.id],
+      },
+      'manager',
+    );
+    expect(tx.employeeRole.deleteMany).toHaveBeenCalledTimes(1);
+    expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
   it('revokes sessions and reset tokens after credential changes without auditing secrets', async () => {
     await service.updateEmployee(
       'cashier',

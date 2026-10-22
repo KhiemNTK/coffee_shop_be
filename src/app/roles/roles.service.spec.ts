@@ -360,6 +360,47 @@ describe('Role permission delegation', () => {
     });
   });
 
+  it('rejects a stale permission baseline before changing junctions or auditing', async () => {
+    tx.permission.findMany.mockResolvedValue([]);
+    await expect(
+      service.replaceRolePermissions(
+        'role',
+        {
+          permissionIds: [],
+          expectedPermissionIds: [],
+        },
+        'actor',
+      ),
+    ).rejects.toMatchObject({
+      response: { code: 'AUTHORIZATION_CHANGED' },
+    });
+    expect(tx.rolePermission.deleteMany).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('accepts a matching baseline and a replay of an already-applied replacement', async () => {
+    await service.replaceRolePermissions(
+      'role',
+      {
+        permissionIds: ['read'],
+        expectedPermissionIds: [],
+      },
+      'actor',
+    );
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+    tx.permission.findMany.mockResolvedValue([]);
+    await service.replaceRolePermissions(
+      'role',
+      {
+        permissionIds: [],
+        expectedPermissionIds: ['read'],
+      },
+      'actor',
+    );
+    expect(tx.rolePermission.deleteMany).toHaveBeenCalledTimes(1);
+    expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
   it('soft deletes the role through its transaction delegate', async () => {
     await service.deleteRole('role', 'actor');
     expect(tx.role.update).toHaveBeenCalledWith({

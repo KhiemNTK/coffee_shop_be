@@ -10,6 +10,7 @@ import {
   SYSTEM_ROLE_NAMES,
 } from '../src/common/consts/permission-keys';
 import type { PermissionKey } from '../src/common/types';
+import { PermissionLabels } from '../src/common/consts/permission-labels';
 
 const prisma = new PrismaClient();
 
@@ -25,17 +26,11 @@ type RoleSeed = {
   permissions: PermissionKey[];
 };
 
-const toTitle = (keyName: string) =>
-  keyName
-    .split('_')
-    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
-    .join(' ');
-
 const permissionSeeds: PermissionSeed[] = Object.entries(PermissionKeys).map(
   ([name, key]) => ({
     key,
-    name: toTitle(name),
-    description: `Allows ${key}`,
+    name: PermissionLabels[name as keyof typeof PermissionKeys][0],
+    description: PermissionLabels[name as keyof typeof PermissionKeys][1],
   }),
 );
 
@@ -97,6 +92,8 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.INVOICES_READ,
       PermissionKeys.INVOICES_CREATE,
       PermissionKeys.INVOICES_UPDATE,
+      PermissionKeys.INVOICES_PAY,
+      PermissionKeys.INVOICES_VOID,
       PermissionKeys.PAYMENT_ATTEMPTS_CREATE,
       PermissionKeys.PAYMENT_ATTEMPTS_READ,
       PermissionKeys.PAYMENT_REFUNDS_CREATE,
@@ -169,6 +166,8 @@ const roleSeeds: RoleSeed[] = [
       PermissionKeys.INVOICES_READ,
       PermissionKeys.INVOICES_CREATE,
       PermissionKeys.INVOICES_UPDATE,
+      PermissionKeys.INVOICES_PAY,
+      PermissionKeys.INVOICES_VOID,
       PermissionKeys.PAYMENT_ATTEMPTS_CREATE,
       PermissionKeys.PAYMENT_ATTEMPTS_READ,
       PermissionKeys.PAYMENT_REFUNDS_READ,

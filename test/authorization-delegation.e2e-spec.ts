@@ -11,6 +11,7 @@ import {
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { PermissionKeys } from '../src/common/consts/permission-keys';
 import { AUTHORIZATION_ERRORS } from '../src/common/consts/message';
+import { RolesService } from '../src/app/roles/roles.service';
 
 describe('Authorization delegation (PostgreSQL)', () => {
   let base: PrismaService;
@@ -69,6 +70,7 @@ describe('Authorization delegation (PostgreSQL)', () => {
         name: key,
         isSystemPermission: true,
       })),
+      skipDuplicates: true,
     });
     const permissions = await base.permission.findMany({
       select: { id: true, key: true },
@@ -188,6 +190,24 @@ describe('Authorization delegation (PostgreSQL)', () => {
     ).toBe(false);
   });
 
+  it('checks the deployed permission catalog without changing database rows', async () => {
+    const before = await base.permission.findMany({ orderBy: { key: 'asc' } });
+    const output = execFileSync(
+      process.execPath,
+      [
+        require.resolve('ts-node/dist/bin.js'),
+        'prisma/preflight/permissions.ts',
+      ],
+      { env: process.env, encoding: 'utf8' },
+    );
+    expect(output).toContain(
+      `Permission catalog matches code (${Object.keys(PermissionKeys).length} permissions). No data changed.`,
+    );
+    expect(await base.permission.findMany({ orderBy: { key: 'asc' } })).toEqual(
+      before,
+    );
+  });
+
   it('does not grant permissions outside the committed PostgreSQL scope', async () => {
     await expect(
       employees.replaceEmployeeRoles(ids.ownerA, { roleIds: [] }, ids.cashier),
@@ -292,6 +312,117 @@ describe('Authorization delegation (PostgreSQL)', () => {
           isActive: true,
           deletedAt: null,
           employeeRoles: { some: { roleId: ids.ownerRole } },
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('commits only one concurrent employee-role edit from the same baseline', async () => {
+    const { positionId } = await base.employee.findUniqueOrThrow({
+      where: { id: ids.manager },
+      select: { positionId: true },
+    });
+    const employeeId = randomUUID();
+    await base.employee.create({
+      data: {
+        id: employeeId,
+        email: employeeId + '@authz-test.example',
+        username: employeeId,
+        fullName: 'Concurrent assignment test',
+        password: 'test-only',
+        positionId,
+        employeeRoles: { create: { roleId: ids.cashierRole } },
+      },
+    });
+    const requested = [[ids.waiterRole], []];
+    const results = await Promise.allSettled(
+      requested.map((roleIds) =>
+        employees.replaceEmployeeRoles(
+          employeeId,
+          {
+            roleIds,
+            expectedRoleIds: [ids.cashierRole],
+          },
+          ids.manager,
+        ),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    expect(
+      rejected?.status === 'rejected' && rejected.reason.getResponse(),
+    ).toMatchObject({ code: 'AUTHORIZATION_CHANGED' });
+    const winningIds =
+      requested[results.findIndex((result) => result.status === 'fulfilled')];
+    const assignments = await base.employeeRole.findMany({
+      where: { employeeId },
+      select: { roleId: true },
+    });
+    expect(assignments.map((entry) => entry.roleId)).toEqual(winningIds);
+    expect(
+      await base.actionLog.count({
+        where: {
+          actionType: 'EMPLOYEE_ROLES_REPLACED',
+          details: { path: ['employeeId'], equals: employeeId },
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('commits only one concurrent role-permission edit and keeps its audit atomic', async () => {
+    const read = await base.permission.findFirstOrThrow({
+      where: { key: PermissionKeys.MENU_READ },
+    });
+    const inventory = await base.permission.findFirstOrThrow({
+      where: { key: PermissionKeys.INVENTORY_READ },
+    });
+    const role = await base.role.create({
+      data: {
+        name: 'Concurrent custom role',
+        rolePermissions: { create: { permissionId: read.id } },
+      },
+    });
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      {} as never,
+      authorization,
+    );
+    const requested = [[inventory.id], []];
+    const results = await Promise.allSettled(
+      requested.map((permissionIds) =>
+        roles.replaceRolePermissions(
+          role.id,
+          {
+            permissionIds,
+            expectedPermissionIds: [read.id],
+          },
+          ids.delegate,
+        ),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    expect(
+      rejected?.status === 'rejected' && rejected.reason.getResponse(),
+    ).toMatchObject({ code: 'AUTHORIZATION_CHANGED' });
+    const winningIds =
+      requested[results.findIndex((result) => result.status === 'fulfilled')];
+    const assignments = await base.rolePermission.findMany({
+      where: { roleId: role.id },
+      select: { permissionId: true },
+    });
+    expect(assignments.map((entry) => entry.permissionId)).toEqual(winningIds);
+    expect(
+      await base.actionLog.count({
+        where: {
+          actionType: 'ROLE_PERMISSIONS_REPLACED',
+          details: { path: ['roleId'], equals: role.id },
         },
       }),
     ).toBe(1);

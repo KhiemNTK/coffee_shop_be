@@ -13,6 +13,7 @@ import {
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import { AUTHORIZATION_ERRORS } from '../../common/consts/message';
+import { isSystemPermissionKey } from '../../common/consts/permission-catalog';
 import {
   CreatePermissionDto,
   GetPermissionsPaginationDto,
@@ -29,6 +30,11 @@ export class PermissionsService {
   ) {}
 
   async createPermission(createPermissionDto: CreatePermissionDto) {
+    if (isSystemPermissionKey(createPermissionDto.key)) {
+      throw new BadRequestException(
+        AUTHORIZATION_ERRORS.SYSTEM_PERMISSION_CANNOT_BE_MODIFIED,
+      );
+    }
     await this.ensurePermissionKeyAvailable(createPermissionDto.key);
 
     const permission = await this.prisma.permission.create({
@@ -87,7 +93,8 @@ export class PermissionsService {
     const permission = await this.getPermissionById(id);
 
     if (
-      permission.isSystemPermission &&
+      (permission.isSystemPermission ||
+        isSystemPermissionKey(permission.key)) &&
       (updatePermissionDto.name !== undefined ||
         updatePermissionDto.key !== undefined)
     ) {
@@ -97,6 +104,11 @@ export class PermissionsService {
     }
 
     if (updatePermissionDto.key) {
+      if (isSystemPermissionKey(updatePermissionDto.key)) {
+        throw new BadRequestException(
+          AUTHORIZATION_ERRORS.SYSTEM_PERMISSION_CANNOT_BE_MODIFIED,
+        );
+      }
       await this.ensurePermissionKeyAvailable(updatePermissionDto.key, id);
     }
 
@@ -109,7 +121,10 @@ export class PermissionsService {
 
   async deletePermission(id: string) {
     const permission = await this.getPermissionById(id);
-    if (permission.isSystemPermission) {
+    if (
+      permission.isSystemPermission ||
+      isSystemPermissionKey(permission.key)
+    ) {
       throw new BadRequestException(
         AUTHORIZATION_ERRORS.SYSTEM_PERMISSION_CANNOT_BE_DELETED,
       );

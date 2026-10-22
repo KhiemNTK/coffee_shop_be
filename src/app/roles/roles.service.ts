@@ -202,10 +202,11 @@ export class RolesService {
 
   async replaceRolePermissions(
     id: string,
-    { permissionIds }: ReplaceRolePermissionsDto,
+    { permissionIds, expectedPermissionIds }: ReplaceRolePermissionsDto,
     actorId: string,
   ) {
-    const uniquePermissionIds = [...new Set(permissionIds)];
+    const requestedIds = new Set(permissionIds);
+    const uniquePermissionIds = [...requestedIds];
     if (uniquePermissionIds.length !== permissionIds.length) {
       throw new BadRequestException(
         AUTHORIZATION_ERRORS.DUPLICATE_PERMISSION_IDS,
@@ -241,11 +242,23 @@ export class RolesService {
         .sort();
       if (
         beforeIds.length === uniquePermissionIds.length &&
-        beforeIds.every((permissionId) =>
-          uniquePermissionIds.includes(permissionId),
-        )
+        beforeIds.every((permissionId) => requestedIds.has(permissionId))
       )
         return;
+      if (expectedPermissionIds !== undefined) {
+        const expectedIds = new Set(expectedPermissionIds);
+        if (
+          expectedIds.size !== expectedPermissionIds.length ||
+          beforeIds.length !== expectedIds.size ||
+          beforeIds.some((permissionId) => !expectedIds.has(permissionId))
+        ) {
+          throw new ConflictException({
+            code: 'AUTHORIZATION_CHANGED',
+            message:
+              'Access assignments changed. Reload and review before saving.',
+          });
+        }
+      }
       await tx.rolePermission.deleteMany({ where: { roleId: id } });
       if (uniquePermissionIds.length > 0) {
         await tx.rolePermission.createMany({

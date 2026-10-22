@@ -8,7 +8,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
@@ -25,6 +25,11 @@ export class PermissionsController {
   constructor(private readonly permissionsService: PermissionsService) {}
 
   @Post()
+  @ApiOperation({
+    deprecated: true,
+    summary:
+      'Legacy custom permission creation; system keys are deployment-managed',
+  })
   @RequirePermissions(PermissionKeys.PERMISSIONS_CREATE)
   createPermission(@Body() createPermissionDto: CreatePermissionDto) {
     return this.permissionsService.createPermission(createPermissionDto);
@@ -43,6 +48,11 @@ export class PermissionsController {
   }
 
   @Patch(':id')
+  @ApiOperation({
+    deprecated: true,
+    summary:
+      'Legacy custom permission update; system keys are deployment-managed',
+  })
   @RequirePermissions(PermissionKeys.PERMISSIONS_UPDATE)
   updatePermission(
     @Param() { id }: IDDto,
@@ -52,6 +62,11 @@ export class PermissionsController {
   }
 
   @Delete(':id')
+  @ApiOperation({
+    deprecated: true,
+    summary:
+      'Legacy custom permission deletion; system keys are deployment-managed',
+  })
   @RequirePermissions(PermissionKeys.PERMISSIONS_DELETE)
   deletePermission(@Param() { id }: IDDto) {
     return this.permissionsService.deletePermission(id);

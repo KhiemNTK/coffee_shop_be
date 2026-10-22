@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Inject,
@@ -340,10 +341,11 @@ export class EmployeesService {
 
   async replaceEmployeeRoles(
     id: string,
-    { roleIds }: ReplaceEmployeeRolesDto,
+    { roleIds, expectedRoleIds }: ReplaceEmployeeRolesDto,
     actorId: string,
   ) {
-    const uniqueRoleIds = [...new Set(roleIds)];
+    const requestedIds = new Set(roleIds);
+    const uniqueRoleIds = [...requestedIds];
     if (uniqueRoleIds.length !== roleIds.length) {
       throw new BadRequestException(AUTHORIZATION_ERRORS.DUPLICATE_ROLE_IDS);
     }
@@ -388,9 +390,23 @@ export class EmployeesService {
         .sort();
       if (
         beforeIds.length === uniqueRoleIds.length &&
-        beforeIds.every((roleId) => uniqueRoleIds.includes(roleId))
+        beforeIds.every((roleId) => requestedIds.has(roleId))
       )
         return;
+      if (expectedRoleIds !== undefined) {
+        const expectedIds = new Set(expectedRoleIds);
+        if (
+          expectedIds.size !== expectedRoleIds.length ||
+          beforeIds.length !== expectedIds.size ||
+          beforeIds.some((roleId) => !expectedIds.has(roleId))
+        ) {
+          throw new ConflictException({
+            code: 'AUTHORIZATION_CHANGED',
+            message:
+              'Access assignments changed. Reload and review before saving.',
+          });
+        }
+      }
       if (
         !roles.some(
           (role) => role.isSystemRole && role.name === SYSTEM_ROLE_NAMES.OWNER,

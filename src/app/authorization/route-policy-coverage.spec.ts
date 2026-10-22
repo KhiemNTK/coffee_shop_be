@@ -42,6 +42,8 @@ import { ReservationsController } from '../reservations/reservations.controller'
 import { RolesController } from '../roles/roles.controller';
 import { SystemSettingsController } from '../system-settings/system-settings.controller';
 import { REQUIRED_PERMISSIONS_KEY } from './authorization.decorator';
+import { PermissionKeys } from '../../common/consts/permission-keys';
+import { isSystemPermissionKey } from '../../common/consts/permission-catalog';
 
 const controllers = [
   AppController,
@@ -93,6 +95,57 @@ const getControllerFileName = (controller: (typeof controllers)[number]) =>
     .toLowerCase()}.controller.ts`;
 
 describe('Route authorization policy coverage', () => {
+  it('only declares distinct permission keys present in the code catalog', () => {
+    for (const controller of controllers) {
+      const targets: object[] = [controller];
+      for (const name of Object.getOwnPropertyNames(controller.prototype)) {
+        const handler: unknown = Object.getOwnPropertyDescriptor(
+          controller.prototype,
+          name,
+        )?.value;
+        if (typeof handler === 'function') targets.push(handler);
+      }
+      for (const target of targets) {
+        const required = Reflect.getMetadata(
+          REQUIRED_PERMISSIONS_KEY,
+          target,
+        ) as string[] | undefined;
+        if (required === undefined) continue;
+        expect(Array.isArray(required)).toBe(true);
+        expect(new Set(required).size).toBe(required.length);
+        for (const key of required)
+          expect(isSystemPermissionKey(key)).toBe(true);
+      }
+    }
+  });
+  it('separates invoice creation, cash settlement, voiding and COD collection', () => {
+    const policy = (prototype: object, method: string) =>
+      Reflect.getMetadata(
+        REQUIRED_PERMISSIONS_KEY,
+        Object.getOwnPropertyDescriptor(prototype, method)!.value as object,
+      );
+    expect(policy(InvoicesController.prototype, 'createInvoice')).toEqual([
+      PermissionKeys.INVOICES_CREATE,
+    ]);
+    expect(policy(InvoicesController.prototype, 'checkoutInvoice')).toEqual([
+      PermissionKeys.INVOICES_CREATE,
+      PermissionKeys.INVOICES_PAY,
+    ]);
+    expect(policy(InvoicesController.prototype, 'updatePayment')).toEqual([
+      PermissionKeys.INVOICES_PAY,
+    ]);
+    expect(policy(InvoicesController.prototype, 'voidInvoice')).toEqual([
+      PermissionKeys.INVOICES_VOID,
+    ]);
+    expect(policy(OnlineOrdersController.prototype, 'collect')).toEqual([
+      PermissionKeys.INVOICES_CREATE,
+      PermissionKeys.INVOICES_PAY,
+      PermissionKeys.ORDERS_ITEMS_HANDOFF,
+    ]);
+    expect(policy(PrintingController.prototype, 'createPrecheck')).toEqual([
+      PermissionKeys.INVOICES_CREATE,
+    ]);
+  });
   it('requires customer authentication on every private customer route', () => {
     expect(
       Reflect.getMetadata(GUARDS_METADATA, CustomerOrdersController),
