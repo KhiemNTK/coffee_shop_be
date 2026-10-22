@@ -11,9 +11,16 @@ describe('TelegramDeliveryService', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
-    service = new TelegramDeliveryService(
-      new ConfigService({ TELEGRAM_BOT_TOKEN: '123456789:fake-test-token' }),
-    );
+    jest.replaceProperty(process, 'env', {
+      ...process.env,
+      REDIS_URL: 'redis://127.0.0.1:1/14',
+    });
+    const config = new ConfigService({
+      TELEGRAM_BOT_TOKEN: '123456789:fake-test-token',
+      // An omitted key falls back to CI's real Redis despite the fake clock.
+      REDIS_URL: '',
+    });
+    service = new TelegramDeliveryService(config);
     fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation(() =>
