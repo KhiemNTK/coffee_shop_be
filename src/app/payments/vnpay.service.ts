@@ -29,6 +29,30 @@ export class VnpayService {
     this.getApiConfig();
   }
 
+  isFinalPaymentFailure(
+    this: void,
+    responseCode: string | undefined,
+    transactionStatus: string | undefined,
+  ) {
+    // Suspected fraud/reversals may already have debited the customer.
+    return (
+      ['02', '08', '11'].includes(transactionStatus ?? '') &&
+      [
+        '00',
+        '09',
+        '10',
+        '11',
+        '12',
+        '13',
+        '24',
+        '51',
+        '65',
+        '75',
+        '79',
+      ].includes(responseCode ?? '')
+    );
+  }
+
   createPaymentUrl(input: VnpayPaymentUrlInput) {
     const { paymentUrl, returnUrl, tmnCode, hashSecret } = this.getConfig();
     const params: Record<string, string> = {

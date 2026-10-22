@@ -30,6 +30,20 @@ describe('VnpayService', () => {
     jest.useRealTimers();
   });
 
+  it.each([
+    ['24', '02', true],
+    ['00', '02', true],
+    ['00', '08', true],
+    ['00', '11', true],
+    ['00', '00', false],
+    ['07', '07', false],
+    ['00', '04', false],
+    ['99', '02', false],
+    ['24', undefined, false],
+  ])('classifies VNPay %s/%s conservatively', (code, status, expected) => {
+    expect(service.isFinalPaymentFailure(code, status)).toBe(expected);
+  });
+
   it('builds the VNPay 2.1.0 HMAC-SHA512 contract deterministically', () => {
     const paymentUrl = service.createPaymentUrl({
       amount: new Prisma.Decimal('125500'),

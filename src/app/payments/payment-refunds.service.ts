@@ -339,10 +339,7 @@ export class PaymentRefundsService {
       result.response.vnp_TransactionNo !== '0'
         ? result.response.vnp_TransactionNo
         : null;
-    const mismatch =
-      responseCode === '00'
-        ? this.refundResponseMismatch(refund, result.response)
-        : null;
+    const mismatch = this.refundResponseMismatch(refund, result.response);
     const outcome = mismatch
       ? PaymentRefundStatus.REQUIRES_REVIEW
       : this.refundOutcome(responseCode, transactionStatus);
@@ -542,11 +539,17 @@ export class PaymentRefundsService {
     if (responseCode === '00' && transactionStatus === '00') {
       return PaymentRefundStatus.SUCCEEDED;
     }
-    if (transactionStatus === '09') return PaymentRefundStatus.REJECTED;
+    if (responseCode === '00' && transactionStatus === '09') {
+      return PaymentRefundStatus.REJECTED;
+    }
     if (responseCode === '00' && transactionStatus === '02') {
       return PaymentRefundStatus.FAILED;
     }
-    if (responseCode && responseCode !== '00' && responseCode !== '94') {
+    if (
+      ['02', '03', '04', '13', '91', '93', '95', '97'].includes(
+        responseCode ?? '',
+      )
+    ) {
       return PaymentRefundStatus.FAILED;
     }
     return PaymentRefundStatus.REQUIRES_REVIEW;

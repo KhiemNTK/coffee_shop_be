@@ -57,7 +57,10 @@ export class InvoicesController {
   }
 
   @Post('checkout')
-  @RequirePermissions(PermissionKeys.INVOICES_CREATE)
+  @RequirePermissions(
+    PermissionKeys.INVOICES_CREATE,
+    PermissionKeys.INVOICES_PAY,
+  )
   checkoutInvoice(
     @Employee('employeeId') employeeId: string,
     @Body() checkoutInvoiceDto: CheckoutInvoiceDto,
@@ -87,7 +90,7 @@ export class InvoicesController {
   }
 
   @Patch(':id/payment')
-  @RequirePermissions(PermissionKeys.INVOICES_UPDATE)
+  @RequirePermissions(PermissionKeys.INVOICES_PAY)
   updatePayment(
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,
@@ -97,7 +100,7 @@ export class InvoicesController {
   }
 
   @Post(':id/void')
-  @RequirePermissions(PermissionKeys.INVOICES_UPDATE)
+  @RequirePermissions(PermissionKeys.INVOICES_VOID)
   voidInvoice(
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,

@@ -519,6 +519,13 @@ export class PaymentReconciliationService
             employeeId,
           );
         }
+        if (this.momo.isFinalPaymentFailure(response.resultCode)) {
+          return this.confirmProviderFailure(
+            tx,
+            current,
+            String(response.resultCode),
+          );
+        }
         return this.rescheduleOrReview(
           tx,
           current,
@@ -579,8 +586,20 @@ export class PaymentReconciliationService
           employeeId,
         );
       }
-      if (['02', '04', '07', '09'].includes(transactionStatus ?? '')) {
+      if (
+        transactionStatus &&
+        this.vnpay.isFinalPaymentFailure(responseCode, transactionStatus)
+      ) {
         return this.confirmProviderFailure(tx, current, transactionStatus);
+      }
+      if (['04', '07'].includes(transactionStatus ?? '')) {
+        return this.markForReview(
+          tx,
+          current,
+          PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+          'VNPay reported a reversal or suspected fraud requiring review',
+          { responseCode, transactionStatus },
+        );
       }
       return this.rescheduleOrReview(
         tx,
@@ -987,6 +1006,12 @@ export class PaymentReconciliationService
         paymentAttemptId,
         paymentRefundId: null,
         status: PaymentReconciliationIncidentStatus.OPEN,
+        type: {
+          in: [
+            PaymentReconciliationIncidentType.STALE_ATTEMPT,
+            PaymentReconciliationIncidentType.PROVIDER_UNAVAILABLE,
+          ],
+        },
       },
       data: {
         status: PaymentReconciliationIncidentStatus.RESOLVED,

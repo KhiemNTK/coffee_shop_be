@@ -57,6 +57,13 @@ export class MomoService {
     this.credentials();
   }
 
+  isFinalPaymentFailure(this: void, resultCode: number) {
+    return [
+      98, 99, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1017, 1026, 4001, 4002,
+      4100,
+    ].includes(resultCode);
+  }
+
   async createPaymentUrl(input: {
     merchantReference: string;
     invoiceNumber: string;
@@ -182,7 +189,6 @@ export class MomoService {
           accessKey,
           orderId: input.merchantReference,
           partnerCode,
-          requestId: input.requestId,
         },
         secretKey,
       ),

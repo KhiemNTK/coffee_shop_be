@@ -52,6 +52,7 @@ export class PaymentsController {
 
   @Post('invoices/:id/payment-attempts')
   @RequirePermissions(PermissionKeys.PAYMENT_ATTEMPTS_CREATE)
+  @Header('Cache-Control', 'no-store')
   createAttempt(
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,
@@ -149,6 +150,7 @@ export class PaymentsController {
 
   @Get('payments/vnpay/return')
   @SkipAuth()
+  @Header('Cache-Control', 'no-store')
   inspectVnpayReturn(@Query() query: PaymentCallbackQuery) {
     return this.paymentsService.inspectVnpayReturn(query);
   }
@@ -165,6 +167,7 @@ export class PaymentsController {
 
   @Get('payments/momo/return')
   @SkipAuth()
+  @Header('Cache-Control', 'no-store')
   inspectMomoReturn(@Query() query: unknown) {
     return this.paymentsService.inspectMomoReturn(query);
   }

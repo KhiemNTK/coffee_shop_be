@@ -28,6 +28,23 @@ describe('MomoService', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  it.each([
+    [0, false],
+    [10, false],
+    [40, false],
+    [41, false],
+    [1000, false],
+    [7000, false],
+    [7002, false],
+    [9000, false],
+    [12345, false],
+    [99, true],
+    [1005, true],
+    [1006, true],
+  ])('classifies MoMo result %s conservatively', (code, expected) => {
+    expect(service.isFinalPaymentFailure(code)).toBe(expected);
+  });
+
   it('signs create request, checks signed gateway response and returns payUrl', async () => {
     const payUrl = 'https://test-payment.momo.vn/v2/gateway/pay?test=1';
     const response = {
@@ -116,6 +133,40 @@ describe('MomoService', () => {
     expect(
       service.verifyCallback({ ...notification, requestId: 'other' }),
     ).toBeNull();
+  });
+
+  it('signs the query contract without requestId in the HMAC input', async () => {
+    const response = {
+      partnerCode: 'TESTSHOP',
+      orderId: 'PA123',
+      requestId: 'QUERY1',
+      resultCode: 0,
+      amount: 100000,
+      transId: 987654321,
+      message: 'Successful.',
+    };
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify(response), { status: 200 }),
+      );
+
+    await expect(
+      service.queryTransaction({
+        requestId: 'QUERY1',
+        merchantReference: 'PA123',
+      }),
+    ).resolves.toMatchObject({ response });
+
+    const body = JSON.parse(
+      fetchMock.mock.calls[0][1]?.body as string,
+    ) as Record<string, string>;
+    expect(body.requestId).toBe('QUERY1');
+    expect(body.signature).toBe(
+      createHmac('sha256', secret)
+        .update('accessKey=access-key&orderId=PA123&partnerCode=TESTSHOP')
+        .digest('hex'),
+    );
   });
 
   it('rejects cross-order query responses', async () => {

@@ -14,8 +14,8 @@ import type { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-
 import type { InvoicesService } from '../invoices/invoices.service';
 import type { OutboxService } from '../durable/outbox.service';
 import { PaymentsService } from './payments.service';
-import type { VnpayService } from './vnpay.service';
-import type { MomoService } from './momo.service';
+import { VnpayService } from './vnpay.service';
+import { MomoService } from './momo.service';
 import type { PaymentProviderFactory } from './payment-provider.factory';
 import type { PayosService } from './payos.service';
 
@@ -54,6 +54,11 @@ describe('PaymentsService', () => {
     assertConfigured: jest.fn(),
     createPaymentUrl: jest.fn(),
     verifyCallback: jest.fn(),
+    isFinalPaymentFailure: VnpayService.prototype.isFinalPaymentFailure,
+  };
+  const momo = {
+    verifyCallback: jest.fn(),
+    isFinalPaymentFailure: MomoService.prototype.isFinalPaymentFailure,
   };
   const payos = {
     verifyCallback: jest.fn(),
@@ -73,7 +78,7 @@ describe('PaymentsService', () => {
       get: jest.fn(() => vnpay),
       createPaymentUrl: jest.fn(() => 'https://sandbox/payment'),
     } as unknown as PaymentProviderFactory,
-    {} as MomoService,
+    momo as unknown as MomoService,
     payos as unknown as PayosService,
   );
   const attempt = {
@@ -526,6 +531,83 @@ describe('PaymentsService', () => {
       closeSessionAfterPayment: true,
     });
   });
+
+  it.each([
+    ['07', '07', PaymentAttemptStatus.REQUIRES_REVIEW],
+    ['00', '04', PaymentAttemptStatus.REQUIRES_REVIEW],
+    ['99', '02', PaymentAttemptStatus.REQUIRES_REVIEW],
+    ['24', '02', PaymentAttemptStatus.FAILED],
+  ])(
+    'holds or finalizes VNPay %s/%s without booking money',
+    async (code, status, expected) => {
+      vnpay.verifyCallback.mockReturnValue({
+        isValid: true,
+        payloadHash: `outcome-${code}-${status}`,
+        params: {
+          vnp_TxnRef: attempt.merchantReference,
+          vnp_Amount: '10000000',
+          vnp_ResponseCode: code,
+          vnp_TransactionStatus: status,
+          vnp_TransactionNo: 'VNP-001',
+        },
+      });
+      tx.paymentAttempt.findUnique.mockResolvedValue(attempt);
+      tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'event-id' });
+
+      await expect(service.handleVnpayIpn({})).resolves.toMatchObject({
+        RspCode: '00',
+      });
+      expect(tx.paymentAttempt.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: expected }),
+        }),
+      );
+      expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(
+        expected === PaymentAttemptStatus.REQUIRES_REVIEW ? 1 : 0,
+      );
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([10, 40, 41, 1000, 7000, 7002, 9000, 12345, 1006])(
+    'does not release a MoMo payment on a non-final notification %s',
+    async (resultCode) => {
+      momo.verifyCallback.mockReturnValue({
+        payloadHash: `momo-${resultCode}`,
+        data: {
+          orderId: attempt.merchantReference,
+          resultCode,
+          amount: 100000,
+          transId: 0,
+          extraData: '',
+          orderInfo: 'Thanh toan hoa don INV-001',
+        },
+      });
+      tx.paymentAttempt.findUnique.mockResolvedValue({
+        ...attempt,
+        provider: PaymentProvider.MOMO,
+      });
+      tx.paymentWebhookEvent.create.mockResolvedValue({ id: 'event-id' });
+
+      await service.handleMomoIpn({});
+      if (resultCode === 1006) {
+        expect(tx.paymentAttempt.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              status: PaymentAttemptStatus.FAILED,
+            }),
+          }),
+        );
+      } else {
+        expect(tx.paymentAttempt.update).not.toHaveBeenCalled();
+        expect(tx.paymentWebhookEvent.update).toHaveBeenCalledWith({
+          where: { id: 'event-id' },
+          data: { processingCode: 'PENDING', processedAt: expect.any(Date) },
+        });
+      }
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects a valid VNPay callback targeting a MoMo attempt', async () => {
     vnpay.verifyCallback.mockReturnValue({

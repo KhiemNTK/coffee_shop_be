@@ -227,4 +227,65 @@ describe('PaymentRefundsService', () => {
     expect(tx.invoice.updateMany).not.toHaveBeenCalled();
     expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ['94', '09', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['98', '02', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['99', '02', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['UNKNOWN', '02', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['00', '05', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['00', '06', PaymentRefundStatus.REQUIRES_REVIEW],
+    ['00', '09', PaymentRefundStatus.REJECTED],
+    ['00', '02', PaymentRefundStatus.FAILED],
+    ['93', '02', PaymentRefundStatus.FAILED],
+  ])(
+    'holds or releases refund balance safely for %s/%s',
+    async (code, status, expected) => {
+      vnpay.refundTransaction.mockResolvedValueOnce({
+        request: { vnp_RequestId: refund.providerRequestId },
+        response: {
+          vnp_ResponseCode: code,
+          vnp_TransactionStatus: status,
+          vnp_TxnRef: refund.paymentAttempt.merchantReference,
+          vnp_Amount: '10000000',
+          vnp_TransactionType: '02',
+        },
+      });
+
+      const result = await service.createRefund('attempt-id', 'employee-id', {
+        amount: '100000.00',
+        reason: 'Customer request',
+        idempotencyKey: 'refund-key',
+      });
+
+      expect(result.status).toBe(expected);
+      expect(result.completedAt).toEqual(
+        expected === PaymentRefundStatus.REQUIRES_REVIEW
+          ? null
+          : expect.any(Date),
+      );
+      expect(tx.invoice.updateMany).not.toHaveBeenCalled();
+      expect(vnpay.refundTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not release a refund on a rejection for another payment', async () => {
+    vnpay.refundTransaction.mockResolvedValueOnce({
+      request: {},
+      response: {
+        vnp_ResponseCode: '93',
+        vnp_TransactionStatus: '02',
+        vnp_TxnRef: 'ANOTHER-PAYMENT',
+        vnp_Amount: '10000000',
+        vnp_TransactionType: '02',
+      },
+    });
+    const result = await service.createRefund('attempt-id', 'employee-id', {
+      amount: '100000.00',
+      reason: 'Customer request',
+      idempotencyKey: 'refund-key',
+    });
+    expect(result.status).toBe(PaymentRefundStatus.REQUIRES_REVIEW);
+    expect(tx.invoice.updateMany).not.toHaveBeenCalled();
+  });
 });

@@ -394,6 +394,7 @@ describe('VNPay payment lifecycle (e2e)', () => {
       const gateway = {
         assertApiConfigured: jest.fn(),
         queryTransaction: jest.fn(),
+        isFinalPaymentFailure: VnpayService.prototype.isFinalPaymentFailure,
       };
       if (outcome === 'timeout') {
         gateway.queryTransaction.mockRejectedValue(
@@ -1130,6 +1131,100 @@ describe('VNPay payment lifecycle (e2e)', () => {
         where: { paymentAttemptId: created.id, status: 'OPEN' },
       }),
     ).toBe(2);
+
+    await prisma.paymentReconciliationIncident.create({
+      data: {
+        type: 'PROVIDER_UNAVAILABLE',
+        deduplicationKey: `provider-unavailable:${created.id}`,
+        title: 'Previous provider outage',
+        details: {},
+        paymentAttemptId: created.id,
+      },
+    });
+    const queryTransaction = jest.fn().mockResolvedValue({
+      request: {},
+      response: {
+        vnp_ResponseCode: '00',
+        vnp_TransactionStatus: '00',
+        vnp_TxnRef: created.merchantReference,
+        vnp_Amount: invoice.totalAmount.mul(100).toFixed(0),
+        vnp_TransactionType: '01',
+        vnp_TransactionNo: transactionNo,
+      },
+    });
+    const reconciliation = new PaymentReconciliationService(
+      extendedPrisma,
+      pagination,
+      invoices,
+      outbox,
+      {
+        assertApiConfigured: jest.fn(),
+        queryTransaction,
+      } as unknown as VnpayService,
+      new MomoService(config),
+      new PayosService(config),
+      new DomainEventBusService(),
+    );
+    await reconciliation.reconcileAttempt(created.id, employeeId);
+    const incidents = await prisma.paymentReconciliationIncident.findMany({
+      where: { paymentAttemptId: created.id },
+      select: { type: true, status: true },
+    });
+    expect(incidents).toEqual(
+      expect.arrayContaining([
+        { type: 'PAYMENT_STATE_CONFLICT', status: 'OPEN' },
+        { type: 'PROVIDER_PAYMENT_MISMATCH', status: 'OPEN' },
+        { type: 'PROVIDER_UNAVAILABLE', status: 'RESOLVED' },
+      ]),
+    );
+    expect(queryTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks another payment and cash settlement after a signed suspected-fraud IPN', async () => {
+    const { invoice } = await createUnpaidInvoice('85000');
+    const created = await payments.createAttempt(
+      invoice.id,
+      employeeId,
+      '127.0.0.1',
+      {
+        idempotencyKey: randomUUID(),
+        locale: 'vn',
+        closeSessionAfterPayment: false,
+      },
+    );
+    await payments.handleVnpayIpn(
+      signIpn({
+        merchantReference: created.merchantReference,
+        amount: invoice.totalAmount,
+        transactionNo: `REVIEW-${randomUUID()}`,
+        responseCode: '07',
+        transactionStatus: '07',
+      }),
+    );
+    const stored = await prisma.paymentAttempt.findUniqueOrThrow({
+      where: { id: created.id },
+    });
+    expect(stored.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
+    expect(stored.completedAt).toBeNull();
+    await expect(
+      payments.createAttempt(invoice.id, employeeId, '127.0.0.1', {
+        idempotencyKey: randomUUID(),
+        locale: 'vn',
+        closeSessionAfterPayment: false,
+      }),
+    ).rejects.toThrow('unresolved payment attempt');
+    await expect(
+      invoices.updatePayment(invoice.id, employeeId, {
+        paymentStatus: PaymentStatus.PAID,
+        paymentMethod: PaymentMethod.CASH,
+        amountTendered: '85000',
+        closeSessionAfterPayment: false,
+      }),
+    ).rejects.toThrow('unresolved');
+    expect(
+      (await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } }))
+        .paymentStatus,
+    ).toBe(PaymentStatus.UNPAID);
   });
 
   it('applies partial refunds idempotently and never exceeds the captured amount', async () => {
@@ -1198,6 +1293,63 @@ describe('VNPay payment lifecycle (e2e)', () => {
     expect(second.status).toBe(PaymentRefundStatus.SUCCEEDED);
     expect(refundedInvoice.paymentStatus).toBe(PaymentStatus.REFUNDED);
     expect(refundGateway.refundTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves an uncertain refund balance and prevents another provider refund', async () => {
+    const { invoice } = await createUnpaidInvoice('100000');
+    const attempt = await payments.createAttempt(
+      invoice.id,
+      employeeId,
+      '127.0.0.1',
+      {
+        idempotencyKey: randomUUID(),
+        locale: 'vn',
+        closeSessionAfterPayment: false,
+      },
+    );
+    await payments.handleVnpayIpn(
+      signIpn({
+        merchantReference: attempt.merchantReference,
+        amount: invoice.totalAmount,
+        transactionNo: `REFUND-${randomUUID()}`,
+      }),
+    );
+    refundGateway.refundTransaction.mockReset().mockResolvedValue({
+      request: {},
+      response: {
+        vnp_ResponseCode: '98',
+        vnp_TransactionStatus: '02',
+        vnp_TxnRef: attempt.merchantReference,
+        vnp_Amount: '10000000',
+        vnp_TransactionType: '02',
+      },
+    });
+    const dto = {
+      amount: '100000.00',
+      reason: 'Customer request',
+      idempotencyKey: randomUUID(),
+    };
+    const result = await paymentRefunds.createRefund(
+      attempt.id,
+      employeeId,
+      dto,
+    );
+    expect(result.status).toBe(PaymentRefundStatus.REQUIRES_REVIEW);
+    expect(result.completedAt).toBeNull();
+    await expect(
+      paymentRefunds.createRefund(attempt.id, employeeId, dto),
+    ).resolves.toMatchObject({ id: result.id });
+    await expect(
+      paymentRefunds.createRefund(attempt.id, employeeId, {
+        ...dto,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toThrow('remaining refundable amount');
+    expect(refundGateway.refundTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      (await prisma.invoice.findUniqueOrThrow({ where: { id: invoice.id } }))
+        .paymentStatus,
+    ).toBe(PaymentStatus.PAID);
   });
 
   it('returns the same attempt for concurrent idempotent requests', async () => {

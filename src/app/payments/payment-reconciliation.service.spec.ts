@@ -2,6 +2,7 @@ import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
   PaymentProvider,
+  PaymentReconciliationIncidentType,
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
@@ -10,8 +11,8 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import type { OutboxService } from '../durable/outbox.service';
 import type { InvoicesService } from '../invoices/invoices.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
-import type { VnpayService } from './vnpay.service';
-import type { MomoService } from './momo.service';
+import { VnpayService } from './vnpay.service';
+import { MomoService } from './momo.service';
 import type { PayosService } from './payos.service';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 
@@ -74,10 +75,12 @@ describe('PaymentReconciliationService', () => {
   const vnpay = {
     assertApiConfigured: jest.fn(),
     queryTransaction: jest.fn(),
+    isFinalPaymentFailure: VnpayService.prototype.isFinalPaymentFailure,
   };
   const momo = {
     assertConfigured: jest.fn(),
     queryTransaction: jest.fn(),
+    isFinalPaymentFailure: MomoService.prototype.isFinalPaymentFailure,
   };
   const payos = { assertConfigured: jest.fn(), queryTransaction: jest.fn() };
   const service = new PaymentReconciliationService(
@@ -212,6 +215,73 @@ describe('PaymentReconciliationService', () => {
     expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
     expect(result?.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
   });
+
+  it.each(['04', '07'])(
+    'quarantines VNPay status %s instead of releasing the payment',
+    async (transactionStatus) => {
+      vnpay.queryTransaction.mockResolvedValueOnce({
+        request: {},
+        response: {
+          vnp_ResponseCode: '00',
+          vnp_TransactionStatus: transactionStatus,
+          vnp_TxnRef: attempt.merchantReference,
+          vnp_Amount: '10000000',
+          vnp_TransactionType: '01',
+        },
+      });
+      const result = await service.reconcileAttempt(attempt.id, 'manager-id');
+      expect(result?.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+      expect(tx.paymentReconciliationIncident.upsert).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('auto-resolves only transient incidents after a successful query', async () => {
+    await service.reconcileAttempt(attempt.id, 'manager-id');
+    expect(tx.paymentReconciliationIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          paymentAttemptId: attempt.id,
+          paymentRefundId: null,
+          status: 'OPEN',
+          type: {
+            in: [
+              PaymentReconciliationIncidentType.STALE_ATTEMPT,
+              PaymentReconciliationIncidentType.PROVIDER_UNAVAILABLE,
+            ],
+          },
+        },
+      }),
+    );
+  });
+
+  it.each([
+    [1006, PaymentAttemptStatus.FAILED],
+    [10, PaymentAttemptStatus.EXPIRED],
+    [7000, PaymentAttemptStatus.EXPIRED],
+    [9000, PaymentAttemptStatus.EXPIRED],
+    [12345, PaymentAttemptStatus.EXPIRED],
+  ])(
+    'reconciles MoMo code %s without guessing a final outcome',
+    async (code, expected) => {
+      const current = { ...attempt, provider: PaymentProvider.MOMO };
+      prisma.paymentAttempt.findUnique
+        .mockReset()
+        .mockResolvedValueOnce({
+          id: attempt.id,
+          provider: PaymentProvider.MOMO,
+        })
+        .mockResolvedValueOnce(current);
+      tx.paymentAttempt.findUnique.mockResolvedValue(current);
+      momo.queryTransaction.mockResolvedValueOnce({
+        request: {},
+        response: { resultCode: code },
+      });
+      const result = await service.reconcileAttempt(attempt.id, 'manager-id');
+      expect(result?.status).toBe(expected);
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+    },
+  );
 
   it('records a provider conflict without demoting a confirmed payment', async () => {
     const confirmed = {

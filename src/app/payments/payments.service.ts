@@ -448,6 +448,25 @@ export class PaymentsService {
           }
 
           if (!succeeded) {
+            if (
+              !this.vnpay.isFinalPaymentFailure(
+                verification.params.vnp_ResponseCode,
+                verification.params.vnp_TransactionStatus,
+              )
+            ) {
+              await this.markPaymentReview(tx, attempt, {
+                type: PaymentReconciliationIncidentType.PROVIDER_PAYMENT_MISMATCH,
+                title: 'VNPay notification has no definitive payment outcome',
+                providerTransactionNo,
+                details: {
+                  responseCode: verification.params.vnp_ResponseCode ?? null,
+                  transactionStatus:
+                    verification.params.vnp_TransactionStatus ?? null,
+                },
+              });
+              await this.completeWebhook(tx, event.id, 'REQUIRES_REVIEW');
+              return { response: VNPAY_RESPONSE.SUCCESS, invoice: null };
+            }
             const completedAt = new Date();
             await tx.paymentAttempt.update({
               where: { id: attempt.id },
@@ -689,7 +708,7 @@ export class PaymentsService {
           await this.completeWebhook(tx, event.id, 'MISMATCH');
           return;
         }
-        if ([1000, 7000, 7002, 9000].includes(data.resultCode)) {
+        if (!succeeded && !this.momo.isFinalPaymentFailure(data.resultCode)) {
           await this.completeWebhook(tx, event.id, 'PENDING');
           return;
         }

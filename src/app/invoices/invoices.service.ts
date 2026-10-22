@@ -117,41 +117,47 @@ export class InvoicesService {
 
   async quoteInvoice(employeeId: string, input: CreateInvoiceDto) {
     return this.prisma.$transaction(
-      async (tx) => {
-        const employee = await tx.employee.findUnique({
-          where: { id: employeeId },
-          select: { isActive: true },
-        });
-        this.invoicePolicy.assertActiveEmployee(employee);
-        const session = await tx.orderSession.findUnique({
-          where: { id: input.orderSessionId },
-          select: { sessionStatus: true },
-        });
-        if (!session) throw new NotFoundException('Order session not found.');
-        this.invoicePolicy.assertActiveSession(session.sessionStatus);
-        const items = await this.getInvoiceItems(tx, input);
-        this.invoicePolicy.assertInvoiceItemsAreBillable(items);
-        const subTotal = this.calculateSubTotal(items);
-        const promotionCalculation = input.promotionId
-          ? await this.promotionCalculatorService.calculateDiscountTx(tx, {
-              promotionId: input.promotionId,
-              subTotal,
-              at: new Date(),
-            })
-          : null;
-        return {
-          orderItemIds: items.map((item) => item.id),
-          ...this.calculateInvoice({
-            subTotal,
-            promotionCalculation,
-            taxRate: input.taxRate,
-            paymentStatus: PaymentStatus.UNPAID,
-            paymentMethod: PaymentMethod.CASH,
-          }),
-        };
-      },
+      (tx) => this.quoteInvoiceInTransaction(tx, employeeId, input),
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
     );
+  }
+
+  async quoteInvoiceInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    employeeId: string,
+    input: CreateInvoiceDto,
+  ) {
+    const employee = await tx.employee.findUnique({
+      where: { id: employeeId },
+      select: { isActive: true },
+    });
+    this.invoicePolicy.assertActiveEmployee(employee);
+    const session = await tx.orderSession.findUnique({
+      where: { id: input.orderSessionId },
+      select: { sessionStatus: true },
+    });
+    if (!session) throw new NotFoundException('Order session not found.');
+    this.invoicePolicy.assertActiveSession(session.sessionStatus);
+    const items = await this.getInvoiceItems(tx, input);
+    this.invoicePolicy.assertInvoiceItemsAreBillable(items);
+    const subTotal = this.calculateSubTotal(items);
+    const promotionCalculation = input.promotionId
+      ? await this.promotionCalculatorService.calculateDiscountTx(tx, {
+          promotionId: input.promotionId,
+          subTotal,
+          at: new Date(),
+        })
+      : null;
+    return {
+      orderItemIds: items.map((item) => item.id),
+      ...this.calculateInvoice({
+        subTotal,
+        promotionCalculation,
+        taxRate: input.taxRate,
+        paymentStatus: PaymentStatus.UNPAID,
+        paymentMethod: PaymentMethod.CASH,
+      }),
+    };
   }
 
   async checkoutInvoice(
