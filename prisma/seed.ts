@@ -11,6 +11,10 @@ import {
 } from '../src/common/consts/permission-keys';
 import type { PermissionKey } from '../src/common/types';
 import { PermissionLabels } from '../src/common/consts/permission-labels';
+import {
+  assertSystemRoleOwnership,
+  upsertSystemRole,
+} from './system-role-seed';
 
 const prisma = new PrismaClient();
 
@@ -270,31 +274,6 @@ async function upsertPermission(seed: PermissionSeed) {
   });
 }
 
-async function upsertRole(seed: RoleSeed) {
-  const existing = await prisma.role.findFirst({
-    where: { name: seed.name, deletedAt: null },
-    select: { id: true },
-  });
-
-  if (existing) {
-    return prisma.role.update({
-      where: { id: existing.id },
-      data: {
-        description: seed.description,
-        isSystemRole: true,
-      },
-    });
-  }
-
-  return prisma.role.create({
-    data: {
-      name: seed.name,
-      description: seed.description,
-      isSystemRole: true,
-    },
-  });
-}
-
 async function seedCashControlSettings() {
   const seeds = [
     {
@@ -351,6 +330,15 @@ async function seedCashControlSettings() {
 }
 
 async function main(permissionsOnly: boolean) {
+  assertSystemRoleOwnership(
+    await prisma.role.findMany({
+      where: {
+        name: { in: roleSeeds.map((role) => role.name) },
+        deletedAt: null,
+      },
+      select: { name: true, isSystemRole: true },
+    }),
+  );
   if (!permissionsOnly) await seedCashControlSettings();
   const permissions = await Promise.all(permissionSeeds.map(upsertPermission));
   const permissionByKey = new Map(
@@ -358,7 +346,7 @@ async function main(permissionsOnly: boolean) {
   );
 
   for (const roleSeed of roleSeeds) {
-    const role = await upsertRole(roleSeed);
+    const role = await upsertSystemRole(prisma, roleSeed);
     const data = roleSeed.permissions.map((permissionKey) => ({
       roleId: role.id,
       permissionId: permissionByKey.get(permissionKey)!,

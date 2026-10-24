@@ -608,6 +608,12 @@ export function buildCatalogData(seed: number) {
     menuItems,
     recipes,
     tables,
+    referenceUnitCosts: new Map(
+      specifications.map(([name, , cost]) => [
+        catalogId(`ingredient:${name}`),
+        new Prisma.Decimal(cost),
+      ]),
+    ),
   };
 }
 

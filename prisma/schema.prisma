@@ -146,6 +146,7 @@ enum IdempotencyRequestStatus {
 
 enum OutboxEventStatus {
   PENDING
+  ENQUEUED
   PROCESSING
   PUBLISHED
   DEAD_LETTER
@@ -1321,6 +1322,7 @@ model Invoice {
   pickupCodeIssuedAt DateTime?
   taxAmount      Decimal       @default(0) @db.Decimal(18, 2) // Số tiền thuế
   taxRate        Decimal       @default(0) @db.Decimal(5, 2) // % Thuế (VD: 8, 10)
+  documentSnapshot Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1732,6 +1734,7 @@ model OutboxEvent {
   aggregateType String
   aggregateId   String
   payload       Json
+  context       Json?
   status        OutboxEventStatus @default(PENDING)
   attempts      Int               @default(0)
   availableAt   DateTime          @default(now())
