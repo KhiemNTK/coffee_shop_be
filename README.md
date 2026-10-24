@@ -290,6 +290,12 @@ output for the actual release lockfile; previous results are not a current
 security clearance. `.npmrc` disables automatic peer
 installation; declare a peer explicitly only when the application uses it.
 
+The security baseline requires Zod 4.6.6 or newer. Targeted pnpm overrides keep
+Express 5 on body-parser 2.4.0 and Nest's Express 11 adapter on multer 2.5.0;
+older resolved versions are affected by the October 2026 DoS advisories. Remove
+an override only after the upstream dependency resolves a patched version and
+the frozen-lockfile install, production audit and HTTP upload tests pass.
+
 CI also builds runtime/tooling images and runs `node test/runtime-smoke.cjs`.
 The smoke test owns an isolated Compose project with disposable PostgreSQL/Redis,
 loopback-only HTTP and fixture credentials. It verifies production startup under
