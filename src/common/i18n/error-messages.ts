@@ -18,6 +18,16 @@ const messages: Readonly<Record<string, string>> = {
   'Operation violates data constraints.':
     'Thao tác không đáp ứng ràng buộc dữ liệu.',
   'Validation error.': 'Thông tin không hợp lệ.',
+  'Quantity must have at most 14 integer digits and 4 decimal places.':
+    'Số lượng có tối đa 14 chữ số phần nguyên và 4 chữ số thập phân.',
+  'Money must have at most 16 integer digits and 2 decimal places.':
+    'Số tiền có tối đa 16 chữ số phần nguyên và 2 chữ số thập phân.',
+  'Use a decimal string for large amounts; money supports at most 2 decimal places.':
+    'Số tiền có tối đa 2 chữ số thập phân. Với số tiền lớn, hãy gửi dưới dạng chuỗi.',
+  'Tax rate must be between 0 and 100 with at most 2 decimal places.':
+    'Thuế suất từ 0 đến 100%, có tối đa 2 chữ số thập phân.',
+  'Invoice amount exceeds supported precision.':
+    'Tổng tiền hóa đơn vượt giới hạn hỗ trợ.',
   Unauthorized: 'Thông tin đăng nhập không đúng hoặc phiên đã hết hạn.',
   Forbidden: 'Bạn không có quyền thực hiện thao tác này.',
   'Not Found': 'Không tìm thấy dữ liệu yêu cầu.',
@@ -37,6 +47,21 @@ const messages: Readonly<Record<string, string>> = {
 };
 
 const codedMessages: Readonly<Record<string, string>> = {
+  DAILY_CLOSE_BLOCKED:
+    'Cần xử lý các nghiệp vụ chưa hoàn tất trước khi chốt sổ ngày.',
+  INVOICE_QUOTE_CHANGED:
+    'Món hoặc số tiền đã thay đổi. Kiểm tra lại báo giá trước khi xác nhận thanh toán.',
+  ONLINE_ORDER_PICKUP_REQUIRED:
+    'Đơn online phải được xử lý tại màn hình đơn online. Không thanh toán hoặc hủy lẻ món qua POS.',
+  TURNSTILE_REQUIRED: 'Vui lòng hoàn tất xác minh bảo mật trước khi tiếp tục.',
+  TURNSTILE_INVALID: 'Xác minh bảo mật không hợp lệ. Vui lòng xác minh lại.',
+  TURNSTILE_EXPIRED: 'Xác minh bảo mật đã hết hạn. Vui lòng xác minh lại.',
+  TURNSTILE_UNAVAILABLE:
+    'Dịch vụ xác minh bảo mật tạm thời không khả dụng. Vui lòng thử lại sau.',
+  ONLINE_ORDER_RECOVERY_NOT_FOUND:
+    'Chưa tìm thấy đơn đã gửi. Hoàn tất xác minh bảo mật rồi gửi lại đúng yêu cầu này.',
+  ROLE_IN_USE:
+    'Vai trò đang được gán cho nhân viên. Gán lại vai trò trước khi xóa.',
   AUTHORIZATION_CHANGED:
     'Phân quyền đã thay đổi. Tải lại và đối chiếu trước khi lưu.',
   CASHIER_SHIFT_REQUIRED:
@@ -56,9 +81,13 @@ const codedMessages: Readonly<Record<string, string>> = {
   INVENTORY_UNIT_IN_USE:
     'Không thể đổi tên đơn vị đã được dùng cho nguyên liệu.',
   INVENTORY_INSUFFICIENT_STOCK:
-    'Không đủ nguyên liệu để bắt đầu chế biến. Kiểm tra và bổ sung tồn kho.',
+    'Không đủ nguyên liệu khả dụng. Kiểm tra tồn kho và các đơn đang giữ chỗ trước khi thử lại.',
   INVENTORY_STOCKTAKE_COUNTS_CHANGED:
     'Số đếm đã thay đổi. Tải lại phiếu và xác nhận số đếm mới.',
+  INVENTORY_PURCHASE_RECEIPT_CHANGED:
+    'Phiếu nhập đã thay đổi. Tải lại và kiểm tra số lượng, đơn giá mới trước khi ghi sổ.',
+  INVENTORY_STOCKTAKE_RESERVED_STOCK:
+    'Số đếm thực tế thấp hơn lượng đang giữ chỗ. Kiểm tra và xử lý các đơn liên quan trước khi ghi sổ; tạo phiếu mới không giải phóng giữ chỗ.',
   INVENTORY_STOCKTAKE_SNAPSHOT_STALE:
     'Tồn kho đã thay đổi. Hủy phiếu nháp, tạo phiếu mới rồi đếm lại.',
   ORDER_SESSION_NOT_COMPLETE:

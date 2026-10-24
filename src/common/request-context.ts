@@ -1,9 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-
-interface RequestContext {
-  requestId: string;
-  employeeId?: string;
-}
+import type { RequestContext } from './types';
 
 const requestContext = new AsyncLocalStorage<RequestContext>();
 

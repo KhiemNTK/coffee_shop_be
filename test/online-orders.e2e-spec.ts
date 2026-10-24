@@ -359,6 +359,34 @@ describe('Remote takeaway orders (e2e)', () => {
         .send(dto)
         .expect(201);
       expect(replay.body.data).toEqual(created.body.data);
+      const recovered = await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests/recover`)
+        .send(dto)
+        .expect(200);
+      expect(recovered.body.data).toEqual(created.body.data);
+      expect(recovered.headers['cache-control']).toBe('no-store');
+      const saved = await prisma.onlineOrderRequest.findUniqueOrThrow({
+        where: { clientRequestId: dto.clientRequestId },
+        select: { requestHash: true },
+      });
+      const proof = {
+        clientRequestId: dto.clientRequestId,
+        requestHash: saved.requestHash,
+      };
+      const recoveredByKey = await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests/recover-by-key`)
+        .send(proof)
+        .expect(200);
+      expect(recoveredByKey.body.data).toEqual(created.body.data);
+      expect(recoveredByKey.headers['cache-control']).toBe('no-store');
+      await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests/recover-by-key`)
+        .send({ ...proof, requestHash: '0'.repeat(64) })
+        .expect(409);
+      await request(app.getHttpServer())
+        .post(`${prefix}/online-orders/requests/recover`)
+        .send({ ...dto, clientRequestId: randomUUID() })
+        .expect(404);
       expect(verify).toHaveBeenCalledTimes(2);
       expect(verify).toHaveBeenCalledWith(
         'challenge',
@@ -1042,7 +1070,7 @@ describe('Remote takeaway orders (e2e)', () => {
       (await prisma.diningTable.findUniqueOrThrow({ where: { id: table.id } }))
         .status,
     ).toBe(TableStatus.OCCUPIED);
-    await orders.cancelSession(newer.id);
+    await orders.cancelSession(newer.id, ids.employee, 'Customer cancelled');
   });
 
   it('lets an accepted scheduled order be tracked and collected after the original 72-hour window', async () => {
@@ -1717,6 +1745,93 @@ describe('Remote takeaway orders (e2e)', () => {
         where: { key: ONLINE_ORDER_INTAKE_SETTING_KEY },
       });
     }
+  });
+
+  it('rejects POS invoice and per-item cancellation paths for an accepted online order', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const created = await onlineOrders.createPublicRequest(dto);
+    const accepted = await onlineOrders.accept(created.requestId, ids.employee);
+    const invoices = app.get(InvoicesService);
+    const orderSessionId = accepted.orderSessionId;
+    await expect(
+      invoices.createInvoice(ids.employee, { orderSessionId }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    await expect(
+      invoices.quoteInvoice(ids.employee, { orderSessionId }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    await expect(
+      invoices.checkoutInvoice(ids.employee, {
+        orderSessionId,
+        paymentMethod: PaymentMethod.CASH,
+        amountTendered: '1000000',
+        closeSessionAfterPayment: true,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    const item = await prisma.orderItem.findFirstOrThrow({
+      where: { orderSessionId },
+    });
+    await expect(
+      orders.cancelItem(item.id, ids.employee, {
+        reason: 'Do not partially cancel',
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    expect(await prisma.invoice.count({ where: { orderSessionId } })).toBe(0);
+    expect(
+      (await prisma.orderItem.findUniqueOrThrow({ where: { id: item.id } }))
+        .serveStatus,
+    ).toBe(ServeStatus.PENDING);
+  });
+
+  it('tracks ASAP no-shows from the last ready time and records the cancellation once', async () => {
+    const dto = createDto();
+    clientRequestIds.push(dto.clientRequestId);
+    const created = await onlineOrders.createPublicRequest(dto);
+    const accepted = await onlineOrders.accept(created.requestId, ids.employee);
+    const item = await prisma.orderItem.findFirstOrThrow({
+      where: { orderSessionId: accepted.orderSessionId },
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.COOKING,
+    });
+    await orders.updateItemStatus(item.id, ids.employee, {
+      serveStatus: ServeStatus.READY,
+    });
+    await expect(
+      onlineOrders.markNoShow(created.requestId, ids.employee),
+    ).rejects.toThrow('No-show requires a prepared order');
+    await prisma.orderItem.update({
+      where: { id: item.id },
+      data: { readyAt: new Date(Date.now() - 60 * 60_000) },
+    });
+    const overdue = await onlineOrders.findFulfillment({
+      page: 1,
+      itemPerPage: 50,
+      overdueOnly: true,
+    });
+    expect(overdue.list).toContainEqual(
+      expect.objectContaining({
+        id: created.requestId,
+        isOverdue: true,
+        isNoShowEligible: true,
+      }),
+    );
+    const cancelled = await onlineOrders.markNoShow(
+      created.requestId,
+      ids.employee,
+    );
+    expect(cancelled.noShowAt).toBeInstanceOf(Date);
+    await expect(
+      onlineOrders.markNoShow(created.requestId, ids.employee),
+    ).resolves.toEqual(cancelled);
   });
 
   it('records no-show only after the scheduled and kitchen-ready grace periods', async () => {

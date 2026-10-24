@@ -4,6 +4,7 @@ export type * from './authorization.types';
 export type * from './auth.types';
 export type * from './cookie.types';
 export type * from './durable.types';
+export type * from './request-context.types';
 export type * from './cashier-shift.types';
 export type * from './employee.types';
 export type * from './excel.types';

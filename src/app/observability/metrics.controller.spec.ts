@@ -1,8 +1,13 @@
 import { UnauthorizedException } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import request from 'supertest';
+import type { App } from 'supertest/types';
 import type { Response } from 'express';
 import { MetricsController } from './metrics.controller';
-import type { MetricsService } from './metrics.service';
+import { MetricsService } from './metrics.service';
 
 describe('MetricsController', () => {
   const token = 'strong-metrics-token-with-more-than-32-characters';
@@ -56,5 +61,46 @@ describe('MetricsController', () => {
     );
     expect(responseMock.send).toHaveBeenCalledWith('metric 1\n');
     expect(metricsService.render.mock.calls).toHaveLength(1);
+  });
+
+  it('keeps token protection but bypasses the global Redis limiter even during an outage', async () => {
+    const storage = {
+      increment: jest.fn().mockRejectedValue(new Error('Redis unavailable')),
+    };
+    const { metricsService } = createController();
+    const module = await Test.createTestingModule({
+      imports: [
+        ThrottlerModule.forRoot({
+          storage,
+          throttlers: [{ ttl: 60_000, limit: 1 }],
+        }),
+      ],
+      controllers: [MetricsController],
+      providers: [
+        {
+          provide: ConfigService,
+          useValue: new ConfigService({
+            NODE_ENV: 'production',
+            METRICS_TOKEN: token,
+          }),
+        },
+        { provide: MetricsService, useValue: metricsService },
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
+      ],
+    }).compile();
+    const app = module.createNestApplication();
+    try {
+      await app.init();
+      await request(app.getHttpServer() as App)
+        .get('/metrics')
+        .expect(401);
+      await request(app.getHttpServer() as App)
+        .get('/metrics')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200, 'metric 1\n');
+      expect(storage.increment).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
   });
 });

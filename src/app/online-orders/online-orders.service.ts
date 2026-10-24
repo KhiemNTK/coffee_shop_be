@@ -56,6 +56,7 @@ import {
   QuoteOnlineOrderDto,
   ReorderTemplateDto,
   RevokeReorderKeyDto,
+  RecoverOnlineOrderByKeyDto,
 } from './dto';
 import {
   assertPickupAt,
@@ -187,18 +188,7 @@ export class OnlineOrdersService {
     const maxSubtotal = dto.maxSubtotal
       ? new Prisma.Decimal(dto.maxSubtotal).toFixed(2)
       : undefined;
-    const requestHash = createHash('sha256')
-      .update(
-        JSON.stringify({
-          pickupName: dto.pickupName,
-          phoneNumber: dto.phoneNumber,
-          pickupAt: dto.pickupAt?.toISOString(),
-          maxSubtotal,
-          items: dto.items,
-          ...(customerId ? { customerId } : {}),
-        }),
-      )
-      .digest('hex');
+    const requestHash = this.hashPublicRequest(dto, customerId);
     const existing = await this.prisma.onlineOrderRequest.findUnique({
       where: { clientRequestId: dto.clientRequestId },
       select: publicRequestSelect,
@@ -311,6 +301,30 @@ export class OnlineOrdersService {
       if (!duplicate) throw error;
       return this.replay(duplicate, requestHash, customerId);
     }
+  }
+
+  async recoverPublicRequest(dto: CreateOnlineOrderDto, customerId?: string) {
+    return this.recoverByKey(
+      {
+        clientRequestId: dto.clientRequestId,
+        requestHash: this.hashPublicRequest(dto, customerId),
+      },
+      customerId,
+    );
+  }
+
+  async recoverByKey(dto: RecoverOnlineOrderByKeyDto, customerId?: string) {
+    const existing = await this.prisma.onlineOrderRequest.findUnique({
+      where: { clientRequestId: dto.clientRequestId },
+      select: publicRequestSelect,
+    });
+    if (!existing)
+      throw new NotFoundException({
+        code: 'ONLINE_ORDER_RECOVERY_NOT_FOUND',
+        message:
+          'No saved order was found. Complete verification before resending the same request.',
+      });
+    return this.replay(existing, dto.requestHash, customerId);
   }
 
   async getPickupSlots(date: string) {
@@ -955,7 +969,37 @@ export class OnlineOrdersService {
     );
     const where: Prisma.OnlineOrderRequestWhereInput = {
       status: OnlineOrderStatus.ACCEPTED,
-      ...(query.overdueOnly ? { pickupAt: { lt: overdueBefore } } : {}),
+      ...(query.overdueOnly
+        ? {
+            OR: [
+              { pickupAt: { lt: overdueBefore } },
+              {
+                pickupAt: null,
+                orderSession: {
+                  is: {
+                    orderItems: {
+                      some: {
+                        replacementRemake: { is: null },
+                        serveStatus: ServeStatus.READY,
+                      },
+                      none: {
+                        replacementRemake: { is: null },
+                        serveStatus: { not: ServeStatus.CANCELLED },
+                        OR: [
+                          { serveStatus: { not: ServeStatus.READY } },
+                          { readyAt: null },
+                          { readyAt: { gt: overdueBefore } },
+                          { isPaid: true },
+                          { invoiceId: { not: null } },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
       orderSession: {
         is: {
           orderItems: {
@@ -1016,7 +1060,9 @@ export class OnlineOrdersService {
       list.map(({ orderSession, ...request }) => ({
         ...request,
         isOverdue:
-          request.pickupAt !== null && request.pickupAt < overdueBefore,
+          request.pickupAt !== null
+            ? request.pickupAt < overdueBefore
+            : this.isNoShowEligible(null, orderSession?.orderItems ?? [], now),
         isNoShowEligible: this.isNoShowEligible(
           request.pickupAt,
           orderSession?.orderItems ?? [],
@@ -1490,7 +1536,6 @@ export class OnlineOrdersService {
     }>,
     now: Date,
   ) {
-    if (!pickupAt) return false;
     const active = items.filter(
       (item) => item.serveStatus !== ServeStatus.CANCELLED,
     );
@@ -1510,7 +1555,8 @@ export class OnlineOrdersService {
     );
     return (
       now.getTime() >=
-      Math.max(pickupAt.getTime(), lastReadyAt) + ONLINE_ORDER_NO_SHOW_GRACE_MS
+      Math.max(pickupAt?.getTime() ?? 0, lastReadyAt) +
+        ONLINE_ORDER_NO_SHOW_GRACE_MS
     );
   }
 
@@ -1649,6 +1695,23 @@ export class OnlineOrdersService {
       },
       { loggerContext: 'Online order rejection' },
     );
+  }
+
+  private hashPublicRequest(dto: CreateOnlineOrderDto, customerId?: string) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          pickupName: dto.pickupName,
+          phoneNumber: dto.phoneNumber,
+          pickupAt: dto.pickupAt?.toISOString(),
+          maxSubtotal: dto.maxSubtotal
+            ? new Prisma.Decimal(dto.maxSubtotal).toFixed(2)
+            : undefined,
+          items: dto.items,
+          ...(customerId ? { customerId } : {}),
+        }),
+      )
+      .digest('hex');
   }
 
   private replay(

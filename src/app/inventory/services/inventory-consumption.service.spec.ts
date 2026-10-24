@@ -16,7 +16,11 @@ describe('InventoryConsumptionService', () => {
         deleteMany: jest.fn(),
         createMany: jest.fn(),
       },
-      orderItemRecipeIngredient: { findMany: jest.fn() },
+      orderItem: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn(),
+      },
+      orderItemRecipeIngredient: { findMany: jest.fn(), createMany: jest.fn() },
       menuItemIngredient: { findMany: jest.fn() },
       inventoryItem: {
         updateMany: jest.fn(),
@@ -32,33 +36,40 @@ describe('InventoryConsumptionService', () => {
   });
 
   it('reserves each ingredient once in ID order and totals quantities across order items', async () => {
-    tx.orderItemRecipeIngredient.findMany.mockResolvedValue([
+    tx.orderItem.findMany.mockResolvedValue([
       {
-        orderItemId: 'item-a',
-        inventoryItemId: 'z',
-        quantityPerItem: new Prisma.Decimal('0.1234'),
-        orderItem: { quantity: 3 },
+        id: 'item-a',
+        quantity: 3,
+        recipeSnapshottedAt: new Date(),
+        inventoryReservations: [],
+        recipeIngredients: [
+          {
+            inventoryItemId: 'z',
+            quantityPerItem: new Prisma.Decimal('0.1234'),
+          },
+          { inventoryItemId: 'a', quantityPerItem: new Prisma.Decimal('0.25') },
+        ],
       },
       {
-        orderItemId: 'item-a',
-        inventoryItemId: 'a',
-        quantityPerItem: new Prisma.Decimal('0.25'),
-        orderItem: { quantity: 3 },
-      },
-      {
-        orderItemId: 'item-b',
-        inventoryItemId: 'z',
-        quantityPerItem: new Prisma.Decimal('0.0001'),
-        orderItem: { quantity: 2 },
+        id: 'item-b',
+        quantity: 2,
+        recipeSnapshottedAt: new Date(),
+        inventoryReservations: [],
+        recipeIngredients: [
+          {
+            inventoryItemId: 'z',
+            quantityPerItem: new Prisma.Decimal('0.0001'),
+          },
+        ],
       },
     ]);
 
     await service.reserveSession(tx as never, 'session-id');
 
-    expect(tx.orderItemRecipeIngredient.findMany).toHaveBeenCalledWith(
+    expect(tx.orderItem.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
-          orderItem: { orderSessionId: 'session-id', serveStatus: 'PENDING' },
+          AND: [{ orderSessionId: 'session-id' }, { serveStatus: 'PENDING' }],
         },
       }),
     );
@@ -90,6 +101,118 @@ describe('InventoryConsumptionService', () => {
         },
       ],
     });
+  });
+
+  it('does not hold stock twice for an already reserved invoice line', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'line',
+        quantity: 2,
+        recipeSnapshottedAt: new Date(),
+        recipeIngredients: [
+          {
+            inventoryItemId: 'milk',
+            quantityPerItem: new Prisma.Decimal('0.25'),
+          },
+        ],
+        inventoryReservations: [
+          { inventoryItemId: 'milk', quantity: new Prisma.Decimal('0.5') },
+        ],
+      },
+    ]);
+    await service.reservePendingItems(tx as never, { invoiceId: 'invoice-id' });
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(tx.inventoryReservation.createMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects a partial or changed reservation instead of holding the remainder silently', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'line',
+        quantity: 2,
+        recipeSnapshottedAt: new Date(),
+        recipeIngredients: [
+          {
+            inventoryItemId: 'milk',
+            quantityPerItem: new Prisma.Decimal('0.25'),
+          },
+        ],
+        inventoryReservations: [
+          { inventoryItemId: 'milk', quantity: new Prisma.Decimal('0.25') },
+        ],
+      },
+    ]);
+    await expect(
+      service.reservePendingItems(tx as never, { invoiceId: 'invoice-id' }),
+    ).rejects.toThrow('Reserved ingredients no longer match');
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('snapshots legacy recipes before taking a payment commitment', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'legacy-line',
+        menuItemId: 'menu',
+        quantity: 2,
+        recipeSnapshottedAt: null,
+        recipeIngredients: [],
+        inventoryReservations: [],
+      },
+    ]);
+    tx.menuItemIngredient.findMany.mockResolvedValue([
+      {
+        menuItemId: 'menu',
+        inventoryItemId: 'milk',
+        quantity: new Prisma.Decimal('0.25'),
+      },
+    ]);
+    await service.reservePendingItems(tx as never, { invoiceId: 'invoice-id' });
+    expect(tx.orderItemRecipeIngredient.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          orderItemId: 'legacy-line',
+          inventoryItemId: 'milk',
+          quantityPerItem: new Prisma.Decimal('0.25'),
+        },
+      ],
+    });
+    expect(tx.orderItem.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['legacy-line'] }, recipeSnapshottedAt: null },
+      data: { recipeSnapshottedAt: expect.any(Date) },
+    });
+    expect(tx.inventoryReservation.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          orderItemId: 'legacy-line',
+          inventoryItemId: 'milk',
+          quantity: new Prisma.Decimal('0.5'),
+        },
+      ],
+    });
+  });
+
+  it('rejects an insufficient reservation before creating reservation rows', async () => {
+    tx.orderItem.findMany.mockResolvedValue([
+      {
+        id: 'line',
+        quantity: 1,
+        recipeSnapshottedAt: new Date(),
+        inventoryReservations: [],
+        recipeIngredients: [
+          {
+            inventoryItemId: 'milk',
+            quantityPerItem: new Prisma.Decimal('0.6'),
+          },
+        ],
+      },
+    ]);
+    tx.$executeRaw.mockResolvedValue(0);
+    await expect(
+      service.reservePendingItems(tx as never, { invoiceId: 'invoice-id' }),
+    ).rejects.toMatchObject({
+      response: { code: 'INVENTORY_INSUFFICIENT_STOCK' },
+    });
+    expect(tx.inventoryReservation.createMany).not.toHaveBeenCalled();
   });
 
   it('releases combined quantities in the same ID order before removing reservations', async () => {

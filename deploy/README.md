@@ -4,6 +4,17 @@ Run from the backend repository on a Linux VPS. Keep `coffee_shop_be` and
 `coffee_shop_fe` as sibling repositories and record both Git SHAs for each release.
 This setup is one server, not high availability. It does not migrate or seed on startup.
 
+Redis memory is configurable through `REDIS_MAXMEMORY` (dataset limit, default
+`128mb`) and `REDIS_CONTAINER_MEMORY_LIMIT` (container limit, default `384m`).
+These are starting values, not a VPS sizing guarantee. Keep room outside
+`maxmemory` for AOF rewrite, client buffers and the allocator, plus RAM for
+PostgreSQL, the API and the OS. Measure actual queue size before increasing load.
+The stack explicitly keeps AOF `everysec` and `noeviction`; never enable LRU/LFU
+eviction on Redis used by BullMQ. AOF can still lose the latest second on a crash.
+Changing these env values takes effect when the Redis container is recreated,
+not by editing the app's running environment. Do not apply a limit below current
+usage without first reviewing memory and durable queue recovery.
+
 ## Runtime Configuration
 
 Use the existing `.env.example` as the field reference for `.env.production`.
@@ -55,6 +66,45 @@ Check `/api/v1/health/live` and `/api/v1/health/ready` through the real HTTPS ho
 then verify login/refresh/CSRF, menu, a cash sale, explicit table completion and
 scheduled pickup. Check kitchen SSE remains live through the proxy and that the
 browser never calls an internal hostname. Google/Turnstile domains must match.
+
+## Optional Cloudflare Proxy
+
+Turnstile does not require Cloudflare DNS/proxy. Keep the default loopback-only
+`CADDY_TRUSTED_PROXY_CIDRS` when clients connect directly to this VPS.
+
+When enabling the Cloudflare proxy:
+
+- Set `CADDY_TRUSTED_PROXY_CIDRS` to the current space-separated IPv4 and IPv6
+  ranges from https://www.cloudflare.com/ips/; review changes during releases.
+  Do not trust all IPs or all private networks. Caddy accepts `CF-Connecting-IP`
+  only from a trusted peer and sends one normalized client IP to Nest.
+  Keep Nest's Compose `TRUST_PROXY=uniquelocal`; never change it to `true`.
+- Use TLS **Full (strict)** and restrict origin ingress to Cloudflare ranges
+  (including IPv6), or use authenticated origin access. Coordinate certificate
+  renewal and health checks before applying firewall restrictions.
+- Disable Pseudo IPv4 header overwriting and removal of visitor IP headers;
+  confirm distinct clients produce distinct rate-limit identities at the origin.
+- Bypass cache for `/api/v1/*` and do not override `no-store`. Only hashed
+  `/assets/*` should use the existing immutable cache policy.
+- Do not apply browser/JavaScript challenges to fetch APIs, kitchen SSE, or
+  VNPay/MoMo/payOS/Telegram webhooks. Keep their signature, session, CSRF and
+  application rate-limit checks. Test these rules through the public hostname.
+- Allow `challenges.cloudflare.com` scripts and frames if a frontend CSP is
+  added. API Helmet headers do not configure CSP for Caddy's HTML responses.
+  Test Google Sign-In, payment QR, storage images and the theme bootstrap before
+  enforcing a new CSP; do not deploy an untested blanket policy.
+
+Frontend network challenges show a recovery message, not a permission failure.
+There is no automatic replay of a blocked write. If an order response was lost,
+the `/online-orders/requests/recover` (or authenticated `/customers/orders/recover`)
+endpoint only reads a saved request with the identical key, payload and customer.
+A missing order is never created by recovery; a new submission still needs a
+fresh Turnstile token. Deploy backend recovery routes before this frontend.
+
+Monitor `coffee_shop_turnstile_verifications_total{action,outcome}` and
+`coffee_shop_turnstile_verification_duration_seconds`. Labels contain no visitor
+IP, request ID or token. Check `turnstile.unavailable` logs for safe provider
+error codes when secret configuration or Siteverify fails.
 
 ## Recovery
 

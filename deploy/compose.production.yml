@@ -35,10 +35,11 @@ services:
       [
         'sh',
         '-c',
-        'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"',
+        'exec redis-server --appendonly yes --appendfsync everysec --maxmemory "${REDIS_MAXMEMORY:-128mb}" --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"',
       ]
     volumes:
       - redis_data:/data
+    mem_limit: ${REDIS_CONTAINER_MEMORY_LIMIT:-384m}
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -97,6 +98,7 @@ services:
         VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?Set public domain}
+      CADDY_TRUSTED_PROXY_CIDRS: ${CADDY_TRUSTED_PROXY_CIDRS:-127.0.0.1/32 ::1/128}
     ports: ['80:8080', '443:8443']
     read_only: true
     tmpfs: /tmp

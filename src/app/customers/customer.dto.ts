@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   CreateOnlineOrderDto,
   GetPendingOnlineOrdersDto,
+  RecoverOnlineOrderByKeyDto,
 } from '../online-orders/dto';
 
 export class ExpectedCustomerDto extends createZodDto(
@@ -12,6 +13,12 @@ export class ExpectedCustomerDto extends createZodDto(
 export class CreateCustomerOrderDto extends createZodDto(
   CreateOnlineOrderDto.schema
     .safeExtend({ expectedCustomerId: z.uuid() })
+    .strict(),
+) {}
+
+export class RecoverCustomerOrderByKeyDto extends createZodDto(
+  RecoverOnlineOrderByKeyDto.schema
+    .extend({ expectedCustomerId: z.uuid() })
     .strict(),
 ) {}
 

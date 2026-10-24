@@ -137,7 +137,7 @@ export class PurchaseReceiptService {
   update(id: string, employeeId: string, dto: UpdatePurchaseReceiptDto) {
     return this.inventoryTransaction.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
-      await this.assertDraft(tx, id);
+      const draft = await this.assertDraft(tx, id);
       const { items, supplierId, ...changes } = dto;
       if (supplierId) await this.assertActiveSupplier(tx, supplierId);
       const lines = items ? await this.prepareLines(tx, items) : undefined;
@@ -150,6 +150,10 @@ export class PurchaseReceiptService {
         where: { id },
         data: {
           ...changes,
+          // Keep review tokens distinct even when two edits share the same millisecond.
+          updatedAt: new Date(
+            Math.max(Date.now(), draft.updatedAt.getTime() + 1),
+          ),
           ...(supplierId ? { supplierId } : {}),
           ...(lines
             ? {
@@ -172,14 +176,14 @@ export class PurchaseReceiptService {
   post(
     id: string,
     employeeId: string,
-    { idempotencyKey }: PostPurchaseReceiptDto,
+    { idempotencyKey, expectedUpdatedAt }: PostPurchaseReceiptDto,
   ) {
     return this.idempotency.execute(
       {
         employeeId,
         operation: 'inventory.purchase-receipt.post',
         key: idempotencyKey,
-        request: { id },
+        request: { id, expectedUpdatedAt },
       },
       async (tx) => {
         await this.assertActiveEmployee(tx, employeeId);
@@ -210,6 +214,13 @@ export class PurchaseReceiptService {
         if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
           throw new ConflictException('Purchase receipt is no longer a draft.');
         }
+        if (receipt.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+          throw new ConflictException({
+            code: 'INVENTORY_PURCHASE_RECEIPT_CHANGED',
+            message:
+              'Purchase receipt changed after review. Reload and review the latest quantities and prices before posting.',
+          });
+        }
         if (receipt.supplier.deletedAt) {
           throw new ConflictException('The supplier is inactive.');
         }
@@ -220,7 +231,11 @@ export class PurchaseReceiptService {
         }
 
         const claimed = await tx.purchaseReceipt.updateMany({
-          where: { id, status: PurchaseReceiptStatus.DRAFT },
+          where: {
+            id,
+            status: PurchaseReceiptStatus.DRAFT,
+            updatedAt: expectedUpdatedAt,
+          },
           data: {
             status: PurchaseReceiptStatus.POSTED,
             postedAt: new Date(),
@@ -437,7 +452,7 @@ export class PurchaseReceiptService {
   private async assertDraft(tx: ExtendedPrismaTransactionClient, id: string) {
     const receipt = await tx.purchaseReceipt.findUnique({
       where: { id },
-      select: { status: true },
+      select: { status: true, updatedAt: true },
     });
     if (!receipt) {
       throw new NotFoundException(`Purchase receipt with ID ${id} not found.`);
@@ -445,6 +460,7 @@ export class PurchaseReceiptService {
     if (receipt.status !== PurchaseReceiptStatus.DRAFT) {
       throw new ConflictException('Only draft purchase receipts can change.');
     }
+    return receipt;
   }
 
   private async assertActiveSupplier(

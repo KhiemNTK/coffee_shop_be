@@ -37,24 +37,86 @@ export class InventoryConsumptionService {
     );
   }
 
-  async reserveSession(
+  reserveSession(tx: ExtendedPrismaTransactionClient, orderSessionId: string) {
+    return this.reservePendingItems(tx, { orderSessionId });
+  }
+
+  async reservePendingItems(
     tx: ExtendedPrismaTransactionClient,
-    orderSessionId: string,
+    where: Prisma.OrderItemWhereInput,
   ) {
-    const recipes = await tx.orderItemRecipeIngredient.findMany({
-      where: { orderItem: { orderSessionId, serveStatus: 'PENDING' } },
+    const items = await tx.orderItem.findMany({
+      where: { AND: [where, { serveStatus: 'PENDING' }] },
       select: {
-        orderItemId: true,
-        inventoryItemId: true,
-        quantityPerItem: true,
-        orderItem: { select: { quantity: true } },
+        id: true,
+        menuItemId: true,
+        quantity: true,
+        recipeSnapshottedAt: true,
+        recipeIngredients: {
+          select: { inventoryItemId: true, quantityPerItem: true },
+        },
+        inventoryReservations: {
+          select: { inventoryItemId: true, quantity: true },
+        },
       },
     });
-    const reservations = recipes.map((row) => ({
-      orderItemId: row.orderItemId,
-      inventoryItemId: row.inventoryItemId,
-      quantity: row.quantityPerItem.mul(row.orderItem.quantity),
-    }));
+    const legacyItems = items.filter((item) => !item.recipeSnapshottedAt);
+    if (legacyItems.length) {
+      const recipes = await tx.menuItemIngredient.findMany({
+        where: {
+          menuItemId: {
+            in: [...new Set(legacyItems.map((item) => item.menuItemId))],
+          },
+        },
+        select: { menuItemId: true, inventoryItemId: true, quantity: true },
+      });
+      for (const item of legacyItems) {
+        item.recipeIngredients = recipes
+          .filter((row) => row.menuItemId === item.menuItemId)
+          .map((row) => ({
+            inventoryItemId: row.inventoryItemId,
+            quantityPerItem: row.quantity,
+          }));
+      }
+      const snapshots = legacyItems.flatMap((item) =>
+        item.recipeIngredients.map((row) => ({
+          orderItemId: item.id,
+          ...row,
+        })),
+      );
+      if (snapshots.length)
+        await tx.orderItemRecipeIngredient.createMany({ data: snapshots });
+      await tx.orderItem.updateMany({
+        where: {
+          id: { in: legacyItems.map((item) => item.id) },
+          recipeSnapshottedAt: null,
+        },
+        data: { recipeSnapshottedAt: new Date() },
+      });
+    }
+    const reservations = items.flatMap((item) => {
+      const required = item.recipeIngredients.map((row) => ({
+        orderItemId: item.id,
+        inventoryItemId: row.inventoryItemId,
+        quantity: row.quantityPerItem.mul(item.quantity),
+      }));
+      if (!item.inventoryReservations.length) return required;
+      const held = new Map(
+        item.inventoryReservations.map((row) => [
+          row.inventoryItemId,
+          row.quantity,
+        ]),
+      );
+      if (
+        held.size !== required.length ||
+        required.some((row) => !held.get(row.inventoryItemId)?.eq(row.quantity))
+      ) {
+        throw new ConflictException(
+          'Reserved ingredients no longer match the order snapshot.',
+        );
+      }
+      return [];
+    });
     for (const [id, quantity] of this.totalRequirements(reservations)) {
       const changed = await tx.$executeRaw`
         UPDATE "InventoryItem" i SET "reservedStock" = i."reservedStock" + ${quantity}::numeric,

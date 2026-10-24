@@ -24,6 +24,50 @@ describe('CatchEverythingFilter', () => {
     expect(filter).toBeDefined();
   });
 
+  it.each(['valid', 'malformed', 'unrelated'])(
+    'only exposes validated daily-close counts: %s',
+    async (scenario) => {
+      const adapter = new HttpAdapterHost();
+      adapter.httpAdapter = new ExpressAdapter();
+      const actualFilter = new CatchEverythingFilter(
+        adapter,
+        new ZodExceptionService(),
+      );
+      const blockers = {
+        openShifts: 1,
+        unpaidInvoices: 0,
+        unfinishedItems: 0,
+        uncertainPayments: 0,
+        uncertainRefunds: 2,
+        openIncidents: 0,
+      };
+      const app = express().use(httpLocaleMiddleware);
+      app.get('/close', (req, res) => {
+        actualFilter.catch(
+          new ConflictException({
+            code: scenario === 'unrelated' ? 'HTTP_409' : 'DAILY_CLOSE_BLOCKED',
+            message: 'Unfinished operations.',
+            blockers: {
+              ...blockers,
+              openShifts: scenario === 'malformed' ? -1 : blockers.openShifts,
+              secret: 'must-not-leak',
+            },
+            internalData: 'must-not-leak',
+          }),
+          new ExecutionContextHost([req, res]),
+        );
+      });
+      const result = await request(app)
+        .get('/close')
+        .set('Accept-Language', 'en')
+        .expect(409);
+      expect(result.body.details).toEqual(
+        scenario === 'valid' ? { blockers } : undefined,
+      );
+      expect(JSON.stringify(result.body)).not.toContain('must-not-leak');
+    },
+  );
+
   it.each(['vi', 'en'])(
     'keeps the response contract while translating %s errors',
     async (locale) => {

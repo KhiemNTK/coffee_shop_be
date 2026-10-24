@@ -13,6 +13,7 @@ import type { App } from 'supertest/types';
 import {
   httpRequestsInFlight,
   httpRequestsTotal,
+  httpRequestDurationSeconds,
 } from '../observability/metrics';
 import { httpLoggingMiddleware } from './http-logging.middleware';
 import {
@@ -44,6 +45,7 @@ describe('HTTP logging middleware', () => {
       statusCode: 200,
       writableEnded: true,
       locals: {},
+      getHeader: jest.fn().mockReturnValue('application/json'),
     }) as unknown as Response<unknown, HttpResponseLocals>;
     const req = {
       method: 'GET',
@@ -89,6 +91,39 @@ describe('HTTP logging middleware', () => {
     expect(inFlight).not.toHaveBeenCalled();
     expect(increment).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
+  });
+
+  it('counts SSE completion without treating its lifetime as REST latency', () => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation();
+    const duration = jest.spyOn(httpRequestDurationSeconds, 'observe');
+    const increment = jest.spyOn(httpRequestsTotal, 'inc');
+    const { req, res } = fixture(
+      '/api/v1/kitchen/events',
+      '/api/v1/kitchen/events',
+    );
+    jest
+      .spyOn(res, 'getHeader')
+      .mockReturnValue('text/event-stream; charset=utf-8');
+    httpLoggingMiddleware(req, res, jest.fn());
+    res.emit('finish');
+    expect(increment).toHaveBeenCalledTimes(1);
+    expect(duration).not.toHaveBeenCalled();
+  });
+
+  it('still measures a rejected SSE handshake as normal HTTP latency', () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const duration = jest.spyOn(httpRequestDurationSeconds, 'observe');
+    const { req, res } = fixture(
+      '/api/v1/kitchen/events',
+      '/api/v1/kitchen/events',
+    );
+    res.statusCode = 403;
+    httpLoggingMiddleware(req, res, jest.fn());
+    res.emit('finish');
+    expect(duration).toHaveBeenCalledWith(
+      expect.objectContaining({ status_code: '403' }),
+      expect.any(Number),
+    );
   });
 
   it.each([401, 403, 429])(

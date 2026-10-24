@@ -32,6 +32,7 @@ import {
   RejectOnlineOrderDto,
   RevokeReorderKeyDto,
   UpdateOnlineOrderIntakeDto,
+  RecoverOnlineOrderByKeyDto,
 } from './dto';
 import { OnlineOrdersService } from './online-orders.service';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
@@ -105,6 +106,24 @@ export class OnlineOrdersController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   quote(@Body() dto: QuoteOnlineOrderDto) {
     return this.onlineOrders.quoteBasket(dto);
+  }
+
+  @Post('requests/recover')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  recoverRequest(@Body() dto: CreateOnlineOrderDto) {
+    return this.onlineOrders.recoverPublicRequest(dto);
+  }
+
+  @Post('requests/recover-by-key')
+  @SkipAuth()
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  recoverByKey(@Body() dto: RecoverOnlineOrderByKeyDto) {
+    return this.onlineOrders.recoverByKey(dto);
   }
 
   @Post('requests/status')

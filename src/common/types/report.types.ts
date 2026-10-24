@@ -3,6 +3,15 @@ import type { Decimal } from '@prisma/client/runtime/library';
 
 export type ReportGranularity = 'hour' | 'day';
 
+export interface ReportLowStockRow {
+  id: string;
+  name: string;
+  stock: Decimal;
+  reservedStock: Decimal;
+  availableStock: Decimal;
+  unitName: string;
+}
+
 export interface ReportQueryPeriod {
   from: Date;
   to: Date;

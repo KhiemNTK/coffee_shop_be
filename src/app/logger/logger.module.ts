@@ -5,6 +5,19 @@ import {
 } from 'nest-winston';
 import winston from 'winston';
 import { redactLogValue } from './log-redaction';
+import { getRequestContext } from '../../common/request-context';
+import { trace, isSpanContextValid } from '@opentelemetry/api';
+
+const enrichRequestContext = winston.format((info) => {
+  const request = getRequestContext();
+  const span = trace.getActiveSpan()?.spanContext();
+  if (request) {
+    for (const [key, value] of Object.entries(request))
+      if (value !== undefined) info[key] ??= value;
+  }
+  if (span && isSpanContextValid(span)) info.traceId ??= span.traceId;
+  return info;
+});
 
 const redactSensitiveData = winston.format((info) => {
   for (const [key, value] of Object.entries(info)) {
@@ -20,12 +33,14 @@ export class LoggerModule {
     const format = production
       ? winston.format.combine(
           winston.format.errors({ stack: true }),
+          enrichRequestContext(),
           redactSensitiveData(),
           winston.format.timestamp(),
           winston.format.json(),
         )
       : winston.format.combine(
           winston.format.errors({ stack: true }),
+          enrichRequestContext(),
           redactSensitiveData(),
           winston.format.timestamp(),
           winston.format.ms(),

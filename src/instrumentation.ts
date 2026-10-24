@@ -27,7 +27,9 @@ export function startTelemetry() {
       }),
       new ExpressInstrumentation(),
       new NestInstrumentation(),
-      new IORedisInstrumentation(),
+      new IORedisInstrumentation({
+        dbStatementSerializer: (command) => command,
+      }),
     ],
   });
   telemetrySdk.start();

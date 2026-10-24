@@ -1,0 +1,79 @@
+rule_files:
+  - prometheus-rules.yml
+evaluation_interval: 1m
+tests:
+  - name: Redis memory pressure warns before noeviction refuses writes
+    interval: 1m
+    input_series:
+      - series: 'coffee_shop_redis_memory_used_bytes{instance="api:3000"}'
+        values: '90+0x6'
+      - series: 'coffee_shop_redis_maxmemory_bytes{instance="api:3000"}'
+        values: '100+0x6'
+      - series: 'coffee_shop_dependency_up{dependency="redis",instance="api:3000"}'
+        values: '1+0x6'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CoffeeShopRedisMemoryPressure
+        exp_alerts:
+          - exp_labels:
+              instance: api:3000
+              severity: warning
+            exp_annotations:
+              summary: Redis memory exceeds 80 percent of maxmemory
+              description: Inspect queue retention and memory before writes are refused; do not enable key eviction for BullMQ.
+  - name: Redis command failures alert even when PING still works
+    interval: 1m
+    input_series:
+      - series: 'coffee_shop_rate_limit_unavailable_total{instance="api:3000"}'
+        values: '0+1x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CoffeeShopRateLimiterUnavailable
+        exp_alerts:
+          - exp_labels:
+              instance: api:3000
+              severity: critical
+            exp_annotations:
+              summary: Redis-backed rate limiting is refusing requests
+              description: Inspect Redis command failures, ACLs, memory and persistence; PING success alone does not prove writes work.
+  - name: PostgreSQL outage alerts without any HTTP traffic
+    interval: 1m
+    input_series:
+      - series: 'coffee_shop_dependency_up{dependency="postgres",instance="api:3000"}'
+        values: '0+0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: CoffeeShopPostgresUnavailable
+        exp_alerts:
+          - exp_labels:
+              dependency: postgres
+              instance: api:3000
+              severity: critical
+            exp_annotations:
+              summary: PostgreSQL is unavailable or cannot be inspected
+              description: Check database connectivity and collector logs, even when API traffic is low.
+  - name: Healthy dependency does not alert
+    interval: 1m
+    input_series:
+      - series: 'coffee_shop_dependency_up{dependency="postgres",instance="api:3000"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: CoffeeShopPostgresUnavailable
+        exp_alerts: []
+  - name: Repeated collector failures report stale gauges
+    interval: 1m
+    input_series:
+      - series: 'coffee_shop_metrics_collection_failures_total{collector="postgres",instance="api:3000"}'
+        values: '0+1x6'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CoffeeShopMetricsCollectionFailing
+        exp_alerts:
+          - exp_labels:
+              collector: postgres
+              instance: api:3000
+              severity: warning
+            exp_annotations:
+              summary: Operational metric collection is failing
+              description: Published gauges may be stale; inspect collector errors before trusting backlog or payment counts.

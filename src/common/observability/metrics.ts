@@ -8,6 +8,21 @@ import {
 
 export const metricsRegistry = new Registry();
 
+export const turnstileVerificationsTotal = new Counter({
+  name: 'coffee_shop_turnstile_verifications_total',
+  help: 'Human verification results by bounded action and outcome.',
+  labelNames: ['action', 'outcome'] as const,
+  registers: [metricsRegistry],
+});
+
+export const turnstileVerificationDurationSeconds = new Histogram({
+  name: 'coffee_shop_turnstile_verification_duration_seconds',
+  help: 'Human verification duration, including provider failures.',
+  labelNames: ['action'] as const,
+  buckets: [0.1, 0.25, 0.5, 1, 2, 3.5, 5],
+  registers: [metricsRegistry],
+});
+
 export const aiInsightRequestsTotal = new Counter({
   name: 'coffee_shop_ai_insight_requests_total',
   help: 'Gemini insight requests by bounded outcome.',
@@ -115,6 +130,22 @@ export const dependencyUp = new Gauge({
   name: 'coffee_shop_dependency_up',
   help: 'Whether a required dependency is reachable (1) or unavailable (0).',
   labelNames: ['dependency'] as const,
+  registers: [metricsRegistry],
+});
+
+export const redisMemoryUsedBytes = new Gauge({
+  name: 'coffee_shop_redis_memory_used_bytes',
+  help: 'Redis dataset and allocator memory reported by INFO memory.',
+  registers: [metricsRegistry],
+});
+export const redisMaxMemoryBytes = new Gauge({
+  name: 'coffee_shop_redis_maxmemory_bytes',
+  help: 'Configured Redis maxmemory; zero means unlimited.',
+  registers: [metricsRegistry],
+});
+export const rateLimitUnavailableTotal = new Counter({
+  name: 'coffee_shop_rate_limit_unavailable_total',
+  help: 'Rate limiter command failures, including OOM and ACL errors.',
   registers: [metricsRegistry],
 });
 

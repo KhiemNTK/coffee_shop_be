@@ -15,6 +15,8 @@ import {
 export class HealthService implements OnModuleDestroy {
   private readonly redis?: Redis;
   private readonly redisRequired: boolean;
+  private redisCheck?: Promise<'up' | 'down'>;
+  private stopping = false;
 
   constructor(
     @Inject(PRISMA_SERVICE_TOKEN)
@@ -30,7 +32,11 @@ export class HealthService implements OnModuleDestroy {
         enableOfflineQueue: false,
         maxRetriesPerRequest: 1,
         connectTimeout: 1000,
+        commandTimeout: 1000,
+        disconnectTimeout: 100,
       });
+      // Readiness and metrics report dependency failures without reconnect log spam.
+      this.redis.on('error', () => undefined);
     }
   }
 
@@ -69,6 +75,7 @@ export class HealthService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    this.stopping = true;
     this.redis?.disconnect();
   }
 
@@ -76,13 +83,36 @@ export class HealthService implements OnModuleDestroy {
     if (!this.redis) {
       return this.redisRequired ? 'down' : 'disabled';
     }
-    try {
-      if (this.redis.status === 'wait') await this.redis.connect();
-      await this.withTimeout(this.redis.ping(), 1500);
-      return 'up';
-    } catch {
-      return 'down';
-    }
+    if (this.stopping) return 'down';
+    this.redisCheck ??= this.withTimeout(this.checkRedis(), 1500)
+      .then(() => 'up' as const)
+      .catch(() => {
+        if (!this.stopping) this.redis?.disconnect(true);
+        return 'down' as const;
+      })
+      .finally(() => {
+        this.redisCheck = undefined;
+      });
+    return this.redisCheck;
+  }
+
+  private async checkRedis() {
+    if (this.redis!.status === 'wait') await this.redis!.connect();
+    await this.redis!.ping();
+  }
+
+  async redisMemory() {
+    const info = await this.withTimeout(this.redis!.info('memory'), 1500);
+    const fields = new Map(
+      info.split('\r\n').map((line) => line.split(':', 2) as [string, string]),
+    );
+    const used = Number(fields.get('used_memory'));
+    const limit = Number(fields.get('maxmemory'));
+    if (
+      ![used, limit].every((value) => Number.isSafeInteger(value) && value >= 0)
+    )
+      throw new Error('Invalid Redis memory metrics');
+    return { used, limit };
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number) {

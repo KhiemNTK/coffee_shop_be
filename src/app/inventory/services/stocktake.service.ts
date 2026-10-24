@@ -217,6 +217,7 @@ export class StocktakeService {
                     id: true,
                     deletedAt: true,
                     stock: true,
+                    reservedStock: true,
                     averageUnitCost: true,
                   },
                 },
@@ -301,6 +302,12 @@ export class StocktakeService {
           }
 
           const countedQuantity = line.countedQuantity!;
+          if (countedQuantity.lt(item.reservedStock)) {
+            throw new ConflictException({
+              code: 'INVENTORY_STOCKTAKE_RESERVED_STOCK',
+              message: `Inventory item ${item.id} has more reserved stock than the physical count. Resolve the affected orders before posting; recounting alone will not release their holds.`,
+            });
+          }
           const difference = countedQuantity.sub(line.expectedQuantity);
           const updated = await tx.inventoryItem.updateMany({
             where: {

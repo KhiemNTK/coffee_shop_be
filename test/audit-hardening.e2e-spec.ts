@@ -117,11 +117,14 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
     });
     const results = await Promise.allSettled(
       tables.slice(1, 3).map((table) =>
-        orders.transferTable({
-          sourceOrderSessionId: old.id,
-          fromTableId: tables[0].id,
-          toTableId: table.id,
-        }),
+        orders.transferTable(
+          {
+            sourceOrderSessionId: old.id,
+            fromTableId: tables[0].id,
+            toTableId: table.id,
+          },
+          employeeId,
+        ),
       ),
     );
     expect(
@@ -138,14 +141,17 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
       data: { status: TableStatus.OCCUPIED },
     });
     await expect(
-      orders.transferTable({
-        sourceOrderSessionId: old.id,
-        fromTableId: tables[0].id,
-        toTableId: tables[3].id,
-      }),
+      orders.transferTable(
+        {
+          sourceOrderSessionId: old.id,
+          fromTableId: tables[0].id,
+          toTableId: tables[3].id,
+        },
+        employeeId,
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
     await expect(
-      orders.clearTable(tables[0].id, old.id),
+      orders.clearTable(tables[0].id, old.id, employeeId, 'Customer cancelled'),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(
       await prisma.orderSession.findUnique({ where: { id: current.id } }),
@@ -179,12 +185,15 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
       data: { tableId: target.id, employeeId },
     });
     await expect(
-      orders.mergeTables({
-        sourceTableIds: [source.id],
-        sourceOrderSessionIds: [sourceSession.id],
-        destinationTableId: target.id,
-        destinationOrderSessionId: oldTarget.id,
-      }),
+      orders.mergeTables(
+        {
+          sourceTableIds: [source.id],
+          sourceOrderSessionIds: [sourceSession.id],
+          destinationTableId: target.id,
+          destinationOrderSessionId: oldTarget.id,
+        },
+        employeeId,
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(
       await prisma.orderSession.findUnique({ where: { id: sourceSession.id } }),
@@ -248,7 +257,7 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
       config,
       pagination,
       { requireOpenShift: () => Promise.resolve({ id: shift.id }) } as never,
-      {} as never,
+      { reserveInvoiceStock: jest.fn().mockResolvedValue(undefined) } as never,
       outbox,
       provider as never,
       {

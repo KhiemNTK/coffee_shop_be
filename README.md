@@ -4,6 +4,27 @@ Customer-owned order history and ingredient reservations are documented in
 [Customer Orders And Ingredient Commitments](docs/customer-orders-stock.md).
 Deploy the migration before the new API, with old inventory writers stopped.
 
+## Online Order Rollout
+
+Apply `20261024000000_allow_asap_order_no_show` before this backend, then deploy
+the matching frontend. This migration only permits ASAP no-show records while
+retaining the cancellation checks; it changes no stock, order or financial data.
+It was verified on an isolated test database, not applied to the business DB.
+
+Generic POS invoice/checkout/payment attempts and cancellation of original online
+order lines return `ONLINE_ORDER_PICKUP_REQUIRED`. Use online-order collection or
+whole-order cancellation. Voiding a legacy unpaid POS invoice retains the accepted
+order's stock commitment; already paid legacy inconsistencies need staff review.
+
+For reload recovery, `POST /online-orders/requests/recover-by-key` takes exactly
+`{clientRequestId,requestHash}`. `/customers/orders/recover-by-key` also requires
+`expectedCustomerId`, the owner's session and customer CSRF. These rate-limited,
+`no-store` routes only read saved requests and enforce hash/owner equality. Treat
+the proof as a private credential, never log it or include it in URLs. The frontend
+keeps the original basket/time/price and proof, not contact fields or CAPTCHA.
+Only explicit same-key resend with matching contacts and fresh CAPTCHA can create
+a missing request. Guest recovery never attaches an order to a customer account.
+
 ## Customer Wishlist And Catalog
 
 Apply `20261013000000_customer_wishlist` before deploying the API. Customers use
@@ -55,6 +76,44 @@ Existing table/station IDs, occupancy, tickets, cash shifts and fund balance are
 preserved; only their old demo labels are replaced. Historical order snapshots and
 stock/cash transactions are never rewritten or deleted. Archived opening stock is
 not transferred into the new catalog: post real purchase receipts or stocktake first.
+
+## Local Business Activity
+
+For an explicitly approved development/demo database, the opt-in
+`pnpm prisma:seed:activity` command adds coherent synthetic order, customer,
+inventory and cashier history. It rejects production, non-loopback URLs and
+database names that do not match `--database`. Preview first; `--through` must
+be a fully completed Vietnam business day:
+
+```powershell
+pnpm prisma:seed:activity --database db_nestjs_coffee_shop_be --seed 20261022 --through 2026-10-21
+pnpm prisma:seed:activity --database db_nestjs_coffee_shop_be --seed 20261022 --through 2026-10-21 --apply
+```
+
+The reproducible batch adds 30 days, 300 orders, 50 fictional customer profiles
+with wishlists, purchase receipts, closed shifts, cash invoices, refunds, waste
+and feedback. It uses existing catalog items with active recipes/stations and no
+option groups. Prices and recipes are synthetic historical snapshots, not verified
+historical facts; catalog rows may have been created after the simulated period.
+Existing history, selling flags, prices, images and table occupancy are preserved.
+Documented stock movements update remaining stock and weighted-average costs;
+a separate fund and inactive cashier isolate simulated cash flows.
+
+Supplier/transaction notes and an immutable audit marker identify
+`coffee-homes-local-activity-v1`. Emails use `coffee-homes.example.test`; the
+shared phone `0900000000` is a placeholder, never a verified outreach contact.
+Profiles have no usable login or customer sessions. The importer does not enqueue
+outbox events, print jobs, Telegram messages, provider payments or Gemini calls.
+Current catalog availability still needs manual review.
+
+One serializable transaction and an advisory lock protect the batch. Replaying
+the same parameters writes nothing; changed parameters are rejected after
+completion. Existing stock reservations and closed reporting days block imports.
+Do not delete the completion marker or reseed under another identity; there is
+no automatic reset. Afterwards run `pnpm prisma:preflight` and
+`pnpm permissions:check`, then review the imported Vietnam date range.
+Synthetic activity changes business totals: never promote this database into
+production or present its results as real business/accounting evidence.
 
 NestJS, Prisma, PostgreSQL and Redis backend for a single coffee shop. API
 routes use `/api/v1` by default. PostgreSQL stores business state; Redis is
@@ -226,9 +285,9 @@ application startup or deployment. Review its target database before running.
 `pnpm verify` validates Prisma, lints, type-checks, builds and runs unit tests.
 `pnpm exec jest --config test/jest-e2e.json --maxWorkers=1 --workerThreads --workerIdleMemoryLimit=512MB` requires a separate disposable PostgreSQL
 database, Redis, applied migrations and `NODE_ENV=test`; it mutates test data.
-`pnpm audit --prod --audit-level high` is a required CI/release gate. See
-[dependency review](deploy/release/dependency-review.md) for the last verified
-result and the narrow Prisma CLI override. `.npmrc` disables automatic peer
+`pnpm audit --prod --audit-level high` is a required CI/release gate. Record its
+output for the actual release lockfile; previous results are not a current
+security clearance. `.npmrc` disables automatic peer
 installation; declare a peer explicitly only when the application uses it.
 
 CI also builds runtime/tooling images and runs `node test/runtime-smoke.cjs`.
@@ -248,6 +307,8 @@ replicas. Redis outage delays background/realtime delivery, not callback storage
 
 ## Operations
 
+- [Single VPS deployment](deploy/README.md): production Compose, runtime
+  configuration and controlled migration/permission seeding.
 - [Release and recovery runbook](deploy/release/README.md): migration rehearsal,
   backup/restore, incident response, secret rotation and remaining go-live
   blockers.
@@ -280,6 +341,13 @@ separate staging rehearsal before go-live.
   `POST /api/v1/orders/sessions/:id/items` accepts the same `optionIds` per
   line for POS. No stock or
   payment is reserved. Requests wait up to 30 minutes for staff review.
+- After a lost creation response, `POST /api/v1/online-orders/requests/recover`
+  takes the original checkout body and `clientRequestId` without a CAPTCHA token.
+  Signed-in customers use `POST /api/v1/customers/orders/recover` with their
+  original `expectedCustomerId`. Recovery only reads a saved request after
+  comparing its payload hash and customer; it never creates an order or reserves
+  stock. `ONLINE_ORDER_RECOVERY_NOT_FOUND` requires fresh verification and an
+  explicit resend of the unchanged body/key. Never automatically create on 404.
 - Customers send `{requestId, accessToken}` in the body of
   `POST /api/v1/online-orders/requests/status` to track review, kitchen
   readiness, and payment, or `/requests/cancel` to withdraw a pending request.
@@ -290,9 +358,10 @@ separate staging rehearsal before go-live.
   `/online-orders_review`. Rejection requires `{reason}`. Acceptance creates
   one takeaway order session and kitchen ticket atomically; changed menu prices,
   choices or unavailable items require staff to reject and ask the customer to reorder.
-  Acceptance does not reserve stock or collect payment. Staff use
+  Acceptance snapshots recipes and reserves ingredients atomically, but does not
+  collect payment. Staff use
   `GET /api/v1/online-orders/requests/fulfillment` to monitor accepted orders.
-  Once every item is `READY`, staff with `/invoices_create` and
+  Once every item is `READY`, staff with `/invoices_create`, `/invoices_pay` and
   `/orders_items_handoff` send `{accessToken,amountTendered,idempotencyKey}` to
   `POST /api/v1/online-orders/requests/:id/collect`. The customer must present
   their access token; the open cashier shift, cash invoice, cash ledger entry,
@@ -308,13 +377,15 @@ separate staging rehearsal before go-live.
   `Asia/Ho_Chi_Minh`; the current shop uses 07:00-22:00 and 4 accepted orders
   per slot). A pending request does **not** reserve capacity; acceptance
   rechecks it transactionally. `GET /requests/fulfillment?overdueOnly=true`
-  shows uncollected orders more than 15 minutes past their pickup time;
+  shows scheduled orders past their pickup grace and ASAP orders whose last
+  ready time is more than 15 minutes ago;
   staff decide whether to cancel, and prepared stock is recorded as waste.
 - Staff with `/online-orders_review` may call
   `POST /api/v1/online-orders/requests/:id/no-show` only for an unpaid,
-  scheduled order whose active items are all READY and whose pickup grace period
-  has passed. The 15-minute grace starts at the later of the booked pickup time
-  and the last item-ready time, so kitchen delays are not blamed on the guest.
+  order whose active items are all READY and whose grace period has passed.
+  The 15-minute grace starts at the last item-ready time for ASAP orders and the
+  later of pickup/last-ready time for scheduled orders, so kitchen delays are not
+  blamed on the guest.
   This explicitly cancels the order and session, records prepared ingredients as
   waste, and writes an audit entry; there is no automatic no-show cancellation.
   Staff detail and fulfillment responses include `isNoShowEligible`.
@@ -496,7 +567,7 @@ before deployment or seeding `/online-orders_manage-intake`.
 
 Menu images can be uploaded through the backend to Supabase Storage. The feature
 is disabled by default; manual HTTPS image URLs remain supported. No Supabase
-secret or SDK is needed in the frontend. See [setup and release checks](deploy/supabase-images.md).
+secret or SDK is needed in the frontend. See [setup and release checks](docs/supabase-images.md).
 
 Apply `20261017000000_menu_image_uploads` before deploying this version, even when
 uploads remain disabled: menu image changes use the tracker to attach and retire
@@ -521,3 +592,47 @@ remakes create nonbillable kitchen work with recipe snapshots and inventory wast
 without altering the original receipt. See
 [API contracts, limits and accounting behavior](docs/cash-refunds-remakes.md)
 before enabling frontend actions.
+
+## Invoice And Table Integrity
+
+- Deploy `20261024100000_invoice_document_snapshot` before starting this backend.
+  Invoice documents capture item names, quantities, prices, options and table names
+  at issuance. PostgreSQL prevents overwriting an existing document snapshot.
+  Historical records are marked `LEGACY_BACKFILL`; items already detached from a
+  voided invoice before this migration cannot be reconstructed by the migration.
+- `POST /api/v1/invoices/quote` returns `quoteFingerprint`. Send that fingerprint
+  and `expectedTotal` with invoice creation/checkout to reject changed items or
+  discounts with `409 INVOICE_QUOTE_CHANGED`. Both fields remain optional for
+  existing API integrations; the POS always supplies them and requires review
+  after a mismatch. Never retry a changed quote as a new payment automatically.
+- Invoice void, session cancellation and table clear now require a trimmed
+  `reason` (3-500 characters). Transfer, merge, split, clear and cancellation
+  write the authenticated actor to `ActionLog` in the same transaction.
+- Money accepts at most 16 integer digits and 2 decimal places; tax accepts
+  0-100 with at most 2 decimal places. Send large amounts as decimal strings.
+- POS cash/card recovery preserves the original command and idempotency key
+  across reloads in the same browser tab, scoped to employee and session.
+  After 23 hours, reconcile invoices and cashier shifts manually rather than
+  issuing a fresh payment. A lost browser session is not a cross-device recovery
+  mechanism; the invoice ledger remains the source for reconciliation.
+
+Verification: run `test/invoice-table-integrity.e2e-spec.ts` only against a
+dedicated loopback PostgreSQL database ending in `_test`, with one worker.
+No migration or activity seed runs automatically on application startup.
+
+## Durable Recovery And Monitoring
+
+Apply `20261024200000_outbox_delivery_context` before starting the updated
+backend; stop older workers before deployment. Queued events and active work
+have separate ownership, with heartbeats and abandoned-lease recovery.
+Request IDs follow events into worker logs and audit entries. Monitoring stays
+accessible with its token during Redis limiter outages, and SSE connection
+lifetimes no longer distort REST latency. See the
+[monitoring and recovery runbook](deploy/observability/README.md).
+
+Large Decimal responses are strings rather than rounded numbers; normal-size
+responses keep their existing representation. The same rule applies to stored
+idempotent responses. Run `test/durable-recovery.e2e-spec.ts` on a dedicated
+loopback PostgreSQL database ending in `_test` and dedicated test Redis on a
+non-default port (locally tested on 56389), or the isolated `/14` Redis database
+provided by CI, with one worker. Never point the suite at the shop's live queues.

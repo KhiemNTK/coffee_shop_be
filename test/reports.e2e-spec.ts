@@ -592,6 +592,42 @@ describe('Reports queries (e2e)', () => {
     }
   });
 
+  it('includes fully reserved stock at a zero availability threshold', async () => {
+    await prisma.$transaction(async (tx) => {
+      await tx.inventoryItem.update({
+        where: { id: inventoryItemId! },
+        data: { stock: 10, reservedStock: 10 },
+      });
+      const scoped = new ReportsService(
+        {
+          $transaction: (callback: (client: typeof tx) => Promise<unknown>) =>
+            callback(tx),
+        } as unknown as ExtendedPrismaClient,
+        new ExcelUtilService(),
+      );
+      const report = await scoped.getDashboard({
+        from: new Date('2026-06-01T00:00:00.000Z'),
+        to: new Date('2026-06-03T00:00:00.000Z'),
+        timeZone: 'Asia/Ho_Chi_Minh',
+        granularity: 'day',
+        topLimit: 1,
+        lowStockThreshold: 0,
+      });
+      expect(report.lowStockItems).toEqual([
+        expect.objectContaining({
+          id: inventoryItemId,
+          stock: '10.0000',
+          reservedStock: '10.0000',
+          availableStock: '0.0000',
+        }),
+      ]);
+      await tx.inventoryItem.update({
+        where: { id: inventoryItemId! },
+        data: { stock: '2.5', reservedStock: 0 },
+      });
+    });
+  });
+
   it('aggregates paid sales and operational insights in the requested time zone', async () => {
     const report = await service.getDashboard({
       from: new Date('2026-06-01T00:00:00.000Z'),

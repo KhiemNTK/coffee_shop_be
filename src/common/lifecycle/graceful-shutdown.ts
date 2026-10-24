@@ -7,6 +7,7 @@ interface ShutdownLogger {
 
 export interface GracefulShutdownOptions {
   timeoutMs: number;
+  beforeClose?: () => Promise<void>;
   cleanup?: () => Promise<void>;
   exit?: (code: number) => void;
   logger?: ShutdownLogger;
@@ -49,7 +50,7 @@ async function runShutdown(
 
   try {
     await Promise.race([
-      closeResources(app, options.cleanup),
+      closeResources(app, options.cleanup, options.beforeClose),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(
           () => reject(new Error('Graceful shutdown timed out')),
@@ -73,12 +74,18 @@ async function runShutdown(
 async function closeResources(
   app: Pick<INestApplication, 'close'>,
   cleanup?: () => Promise<void>,
+  beforeClose?: () => Promise<void>,
 ) {
   let closeError: unknown;
   try {
-    await app.close();
+    await beforeClose?.();
   } catch (error) {
     closeError = error;
+  }
+  try {
+    await app.close();
+  } catch (error) {
+    closeError ??= error;
   }
 
   try {

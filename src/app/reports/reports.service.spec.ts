@@ -7,7 +7,6 @@ import { ReportsService } from './reports.service';
 describe('ReportsService', () => {
   const tx = {
     $queryRaw: jest.fn(),
-    inventoryItem: { findMany: jest.fn() },
   };
   const prisma = { $transaction: jest.fn(), $queryRaw: jest.fn() };
   const excelUtil = { generateExcel: jest.fn() };
@@ -104,6 +103,16 @@ describe('ReportsService', () => {
       ])
       .mockResolvedValueOnce([
         {
+          id: 'inventory-item-id',
+          name: 'Coffee beans',
+          stock: new Prisma.Decimal('10'),
+          reservedStock: new Prisma.Decimal('10'),
+          availableStock: new Prisma.Decimal('0'),
+          unitName: 'kg',
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
           inventoryItemId: 'inventory-item-id',
           name: 'Coffee beans',
           unitName: 'kg',
@@ -182,14 +191,6 @@ describe('ReportsService', () => {
           webhookExceptionCount: 1n,
         },
       ]);
-    tx.inventoryItem.findMany.mockResolvedValue([
-      {
-        id: 'inventory-item-id',
-        name: 'Coffee beans',
-        stock: new Prisma.Decimal('2.5'),
-        unit: { name: 'kg' },
-      },
-    ]);
   };
 
   it('returns stable money strings and zero-filled enum breakdowns', async () => {
@@ -246,7 +247,18 @@ describe('ReportsService', () => {
       },
     ]);
     expect(result.reservations).toHaveLength(4);
-    expect(result.lowStockItems[0].stock).toBe('2.5000');
+    expect(result.lowStockItems[0]).toEqual({
+      id: 'inventory-item-id',
+      name: 'Coffee beans',
+      stock: '10.0000',
+      reservedStock: '10.0000',
+      availableStock: '0.0000',
+      unitName: 'kg',
+    });
+    const stockQuery = tx.$queryRaw.mock.calls[7][0] as Prisma.Sql;
+    expect(stockQuery.sql).toContain('i."stock" - i."reservedStock" <=');
+    expect(stockQuery.sql).toContain('ORDER BY "availableStock" ASC');
+    expect(stockQuery.values).toEqual([5, 10]);
     expect(result.inventoryWaste[0].wasteQuantity).toBe('0.1250');
     expect(result.cashRisk.overview).toEqual({
       openingDiscrepantShiftCount: 1,

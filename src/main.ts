@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import { initApp } from './init';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { registerGracefulShutdown } from './common/lifecycle/graceful-shutdown';
+import { OutboxDispatcherService } from './app/durable/outbox-dispatcher.service';
 
 export async function bootstrap(cleanup?: () => Promise<void>) {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -24,6 +25,8 @@ export async function bootstrap(cleanup?: () => Promise<void>) {
   await app.listen(port, host);
   registerGracefulShutdown(app, {
     timeoutMs: shutdownTimeoutMs,
+    // Global module destroy hooks run after consumers have removed their listeners.
+    beforeClose: () => app.get(OutboxDispatcherService).onModuleDestroy(),
     cleanup,
   });
   const protocol = nodeEnvironment === 'production' ? 'https' : 'http';

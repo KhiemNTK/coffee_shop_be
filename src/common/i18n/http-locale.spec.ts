@@ -59,6 +59,11 @@ describe('HTTP language boundary', () => {
     'CASHIER_SHIFT_FUND_INVALID',
     'ONLINE_INTAKE_PAUSED',
     'ONLINE_INTAKE_CHANGED',
+    'TURNSTILE_REQUIRED',
+    'TURNSTILE_INVALID',
+    'TURNSTILE_EXPIRED',
+    'TURNSTILE_UNAVAILABLE',
+    'ONLINE_ORDER_RECOVERY_NOT_FOUND',
   ])(
     'localizes the recovery message for %s without changing English',
     (code) => {

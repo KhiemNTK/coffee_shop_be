@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { INVOICE_REFUNDS_SQL } from '../../common/prisma/invoice-refunds.query';
 import { DailySalesCloseService } from './daily-sales-close.service';
@@ -158,7 +154,19 @@ describe('DailySalesCloseService', () => {
 
     await expect(
       service.close(businessDate, 'employee-id'),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      response: {
+        code: 'DAILY_CLOSE_BLOCKED',
+        blockers: {
+          openShifts: 0,
+          unpaidInvoices: 0,
+          unfinishedItems: 0,
+          uncertainPayments: 0,
+          uncertainRefunds: 1,
+          openIncidents: 0,
+        },
+      },
+    });
     expect(tx.dailySalesClose.create).not.toHaveBeenCalled();
   });
 

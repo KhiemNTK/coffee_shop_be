@@ -115,6 +115,7 @@ export class DailySalesCloseService {
         };
         if (Object.values(pending).some((count) => count > 0)) {
           throw new ConflictException({
+            code: 'DAILY_CLOSE_BLOCKED',
             message: 'Resolve unfinished operations before closing the day.',
             blockers: pending,
           });

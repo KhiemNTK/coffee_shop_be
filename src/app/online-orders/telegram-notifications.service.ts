@@ -190,9 +190,7 @@ export class TelegramNotificationsService
           },
         },
       });
-      const active = (current?.orderSession?.orderItems ?? []).filter(
-        (item) => item.serveStatus !== ServeStatus.CANCELLED,
-      );
+      const active = current?.orderSession?.orderItems ?? [];
       const ready =
         active.length > 0 &&
         active.some((item) => item.serveStatus === ServeStatus.READY) &&
@@ -231,10 +229,9 @@ export class TelegramNotificationsService
   }
 
   private async notifyStatus(payload: unknown) {
-    const event = StatusEventSchema.safeParse(payload);
-    if (!event.success) return;
+    const event = this.parseEvent(StatusEventSchema, payload);
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: this.notificationWhere(event.data.requestId),
+      where: this.notificationWhere(event.requestId),
       select: {
         customerId: true,
         status: true,
@@ -243,10 +240,9 @@ export class TelegramNotificationsService
         noShowAt: true,
       },
     });
-    if (!request?.telegramChatId || request.status !== event.data.status)
-      return;
+    if (!request?.telegramChatId || request.status !== event.status) return;
     if (
-      event.data.status === OnlineOrderStatus.ACCEPTED &&
+      event.status === OnlineOrderStatus.ACCEPTED &&
       request.telegramReadyQueuedAt
     )
       return;
@@ -258,25 +254,25 @@ export class TelegramNotificationsService
       CANCELLED: request.noShowAt
         ? 'Đã quá thời gian nhận món. Quán đã hủy đơn và ghi nhận không đến nhận.'
         : 'Đơn mang đi đã được hủy. Vui lòng xem chi tiết trên trang theo dõi đơn.',
-    }[event.data.status];
+    }[event.status];
     const sent = await this.delivery.send(
       request.telegramChatId,
-      `Đơn #${event.data.requestId.slice(0, 8).toUpperCase()}: ${text}`,
-      this.customerButton(event.data.requestId, request.customerId),
+      `Đơn #${event.requestId.slice(0, 8).toUpperCase()}: ${text}`,
+      this.customerButton(event.requestId, request.customerId),
     );
     if (!sent) await this.unsubscribeChat(request.telegramChatId);
   }
 
   private async queueReady(payload: unknown) {
-    const event = ItemEventSchema.safeParse(payload);
+    const event = this.parseEvent(ItemEventSchema, payload);
     if (
-      !event.success ||
-      event.data.currentStatus !== ServeStatus.READY ||
-      event.data.tableId !== null
+      (event.currentStatus !== ServeStatus.READY &&
+        event.currentStatus !== ServeStatus.CANCELLED) ||
+      event.tableId !== null
     )
       return;
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: { orderSessionId: event.data.orderSessionId },
+      where: { orderSessionId: event.orderSessionId },
       select: {
         id: true,
         status: true,
@@ -287,10 +283,7 @@ export class TelegramNotificationsService
         },
       },
     });
-    const items = request?.orderSession?.orderItems ?? [];
-    const active = items.filter(
-      (item) => item.serveStatus !== ServeStatus.CANCELLED,
-    );
+    const active = request?.orderSession?.orderItems ?? [];
     if (
       request?.status !== OnlineOrderStatus.ACCEPTED ||
       !request.telegramChatId ||
@@ -327,10 +320,9 @@ export class TelegramNotificationsService
   }
 
   private async notifyReady(payload: unknown) {
-    const event = ReadyEventSchema.safeParse(payload);
-    if (!event.success) return;
+    const event = this.parseEvent(ReadyEventSchema, payload);
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: this.notificationWhere(event.data.requestId),
+      where: this.notificationWhere(event.requestId),
       select: {
         customerId: true,
         status: true,
@@ -345,9 +337,7 @@ export class TelegramNotificationsService
       !request.telegramChatId
     )
       return;
-    const active = (request.orderSession?.orderItems ?? []).filter(
-      (item) => item.serveStatus !== ServeStatus.CANCELLED,
-    );
+    const active = request.orderSession?.orderItems ?? [];
     if (
       active.length === 0 ||
       !active.some((item) => item.serveStatus === ServeStatus.READY) ||
@@ -360,8 +350,8 @@ export class TelegramNotificationsService
       return;
     const sent = await this.delivery.send(
       request.telegramChatId,
-      `Đơn #${event.data.requestId.slice(0, 8).toUpperCase()} đã sẵn sàng. Mời bạn đến quầy nhận món và thanh toán.`,
-      this.customerButton(event.data.requestId, request.customerId),
+      `Đơn #${event.requestId.slice(0, 8).toUpperCase()} đã sẵn sàng. Mời bạn đến quầy nhận món và thanh toán.`,
+      this.customerButton(event.requestId, request.customerId),
     );
     if (!sent) await this.unsubscribeChat(request.telegramChatId);
   }
@@ -401,10 +391,10 @@ export class TelegramNotificationsService
 
   private async notifyStaff(payload: unknown) {
     const chatId = this.config.get<string>('TELEGRAM_STAFF_CHAT_ID');
-    const event = ReadyEventSchema.safeParse(payload);
-    if (!chatId || !event.success) return;
+    const event = this.parseEvent(ReadyEventSchema, payload);
+    if (!chatId) return;
     const request = await this.prisma.onlineOrderRequest.findUnique({
-      where: { id: event.data.requestId },
+      where: { id: event.requestId },
       select: {
         status: true,
         expiresAt: true,
@@ -438,7 +428,7 @@ export class TelegramNotificationsService
     const sent = await this.delivery.send(
       chatId,
       [
-        `ĐƠN MANG ĐI MỚI #${event.data.requestId.slice(0, 8).toUpperCase()}`,
+        `ĐƠN MANG ĐI MỚI #${event.requestId.slice(0, 8).toUpperCase()}`,
         ...items,
         ...(request.items.length > 5 ? ['… và các món khác.'] : []),
         `Hẹn nhận: ${pickup}`,
@@ -451,5 +441,12 @@ export class TelegramNotificationsService
       throw new OutboxPermanentError(
         'Telegram staff chat is unavailable; check bot membership and permissions.',
       );
+  }
+
+  private parseEvent<T>(schema: z.ZodType<T>, payload: unknown): T {
+    const parsed = schema.safeParse(payload);
+    if (!parsed.success)
+      throw new OutboxPermanentError('Invalid Telegram event payload.');
+    return parsed.data;
   }
 }

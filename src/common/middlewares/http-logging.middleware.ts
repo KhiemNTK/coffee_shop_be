@@ -47,7 +47,13 @@ export function httpLoggingMiddleware(
         status_code: String(statusCode),
       };
       httpRequestsTotal.inc(labels);
-      httpRequestDurationSeconds.observe(labels, durationSeconds);
+      // Stream lifetime is not REST latency; connections have their own gauge.
+      if (
+        !String(res.getHeader('content-type') ?? '').startsWith(
+          'text/event-stream',
+        )
+      )
+        httpRequestDurationSeconds.observe(labels, durationSeconds);
     }
 
     const logContext = {

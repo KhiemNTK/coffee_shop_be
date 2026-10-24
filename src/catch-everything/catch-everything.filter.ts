@@ -16,6 +16,7 @@ import type { HttpResponseLocals } from '../common/types';
 import type { RequestWithContext } from '../common/middlewares/request-context.middleware';
 import { resolveApiLocale } from '../common/i18n/http-locale';
 import { localizeApiErrors } from '../common/i18n/error-messages';
+import { dailyCloseBlockersSchema } from '../common/validation/daily-close-blockers.schema';
 
 interface ErrorItem {
   message: string;
@@ -62,6 +63,16 @@ export class CatchEverythingFilter implements ExceptionFilter {
 
     const { status, errors } = this.resolveException(exception, reqContext);
     const code = this.resolveErrorCode(exception, status);
+    const payload =
+      exception instanceof HttpException ? exception.getResponse() : null;
+    const blockers =
+      code === 'DAILY_CLOSE_BLOCKED' &&
+      status === HttpStatus.CONFLICT &&
+      typeof payload === 'object' &&
+      payload !== null &&
+      'blockers' in payload
+        ? dailyCloseBlockersSchema.safeParse(payload.blockers)
+        : null;
     response.locals.httpError = {
       name: exception instanceof Error ? exception.name : 'UnknownError',
       code,
@@ -75,6 +86,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
       ),
       code,
       requestId: request.requestId,
+      ...(blockers?.success ? { details: { blockers: blockers.data } } : {}),
     });
 
     httpAdapter.reply(response, responseBody, status);

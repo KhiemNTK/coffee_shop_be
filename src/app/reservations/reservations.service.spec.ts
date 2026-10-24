@@ -262,6 +262,33 @@ describe('ReservationsService', () => {
     );
   });
 
+  it('tracks the current approved booking without changing the original request', async () => {
+    const revisedStart = new Date(startsAt.getTime() + 3_600_000);
+    const revisedEnd = new Date(endsAt.getTime() + 3_600_000);
+    prisma.reservationRequest.findUnique.mockResolvedValue({
+      id: 'request-id',
+      status: ReservationRequestStatus.APPROVED,
+      startsAt,
+      endsAt,
+      guestCount: 2,
+      reservation: {
+        status: ReservationStatus.PENDING,
+        startsAt: revisedStart,
+        endsAt: revisedEnd,
+        guestCount: 4,
+      },
+    });
+    await expect(service.trackPublicRequest('test-token')).resolves.toEqual({
+      requestId: 'request-id',
+      status: ReservationRequestStatus.APPROVED,
+      startsAt: revisedStart,
+      endsAt: revisedEnd,
+      guestCount: 4,
+      reservationStatus: ReservationStatus.PENDING,
+    });
+    expect(prisma.reservationRequest.updateMany).not.toHaveBeenCalled();
+  });
+
   it('withdraws only a pending request and treats repeats as success', async () => {
     prisma.reservationRequest.findUnique.mockResolvedValue({
       id: 'request-id',

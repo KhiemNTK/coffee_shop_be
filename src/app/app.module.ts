@@ -23,7 +23,10 @@ import { CatchEverythingFilter } from '../catch-everything/catch-everything.filt
 import { FormatResponseInterceptor } from '../common/interceptors/format-response/format-response.interceptor';
 import { ZodExceptionService } from '../catch-everything/zod-exception/zod-exception.service';
 import { RateLimitModule } from '../common/security/rate-limit.module';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import {
+  IngressThrottlerGuard,
+  EmployeeThrottlerGuard,
+} from '../common/security/request-throttler.guard';
 import { MailUtilModule } from '../common/utils/mail-util/mail-util.module';
 import { AuthGuard } from './auth/auth.guard';
 import { OrdersModule } from './orders/orders.module';
@@ -92,7 +95,7 @@ import { CustomersModule } from './customers/customers.module';
     ZodExceptionService,
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: IngressThrottlerGuard,
     },
     {
       provide: APP_INTERCEPTOR,
@@ -117,6 +120,10 @@ import { CustomersModule } from './customers/customers.module';
     {
       provide: APP_GUARD,
       useClass: AuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: EmployeeThrottlerGuard,
     },
     {
       provide: APP_GUARD,

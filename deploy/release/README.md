@@ -112,8 +112,7 @@ then deploy the application. Never print old or new values in CI output.
   or 500 RPS burst until run on production-sized staging with saved results.
   Financial and inventory concurrency tests need disposable fixtures and
   distinct idempotency keys; do not point mutation load at live data.
-- On 2026-10-14 the release lockfile audit reported 0 critical, 0 high,
-  2 moderate and 0 low advisories. [Dependency review](dependency-review.md)
-  records their reachability and the scoped override. CI rejects new high or
-  critical advisories. Re-run against the actual release lockfile; this dated
-  result is not a permanent security clearance.
+- Dependency advisories change. Run the audit in the release gate against the
+  actual release lockfile and keep its output with the release evidence. CI
+  rejects high or critical advisories; an earlier successful audit does not
+  clear the current release.

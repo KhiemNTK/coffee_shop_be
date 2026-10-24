@@ -48,6 +48,8 @@ describe('TelegramNotificationsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    prisma.onlineOrderRequest.findUnique.mockReset();
+    prisma.onlineOrderRequest.updateMany.mockReset();
     eventBus = new DomainEventBusService();
     service = new TelegramNotificationsService(
       prisma as unknown as ExtendedPrismaClient,
@@ -159,7 +161,7 @@ describe('TelegramNotificationsService', () => {
       orderSession: {
         orderItems: [
           { serveStatus: ServeStatus.READY },
-          { serveStatus: ServeStatus.CANCELLED },
+          { serveStatus: ServeStatus.READY },
         ],
       },
     });
@@ -211,6 +213,119 @@ describe('TelegramNotificationsService', () => {
     ).rejects.toBeInstanceOf(OutboxDeferredError);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
+
+  it('does not announce a partially cancelled legacy order that cannot be collected', async () => {
+    const request = {
+      id: requestId,
+      status: OnlineOrderStatus.ACCEPTED,
+      telegramChatId: '123456',
+      telegramReadyQueuedAt: null,
+      orderSession: {
+        orderItems: [
+          { serveStatus: ServeStatus.READY },
+          { serveStatus: ServeStatus.PENDING },
+        ],
+      },
+    };
+    prisma.onlineOrderRequest.findUnique.mockResolvedValueOnce(request);
+    await eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+      orderSessionId: sessionId,
+      tableId: null,
+      currentStatus: ServeStatus.READY,
+    });
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+    prisma.onlineOrderRequest.findUnique.mockResolvedValueOnce({
+      ...request,
+      orderSession: {
+        orderItems: [
+          { serveStatus: ServeStatus.READY },
+          { serveStatus: ServeStatus.CANCELLED },
+        ],
+      },
+    });
+    prisma.onlineOrderRequest.updateMany.mockResolvedValueOnce({ count: 1 });
+    await eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+      orderSessionId: sessionId,
+      tableId: null,
+      currentStatus: ServeStatus.CANCELLED,
+    });
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [ServeStatus.CANCELLED],
+    [ServeStatus.READY, ServeStatus.CANCELLED],
+    [ServeStatus.SERVED, ServeStatus.CANCELLED],
+    [ServeStatus.READY, ServeStatus.COOKING, ServeStatus.CANCELLED],
+  ])(
+    'does not announce cancellation as ready when the remaining items are %p',
+    async (...statuses) => {
+      prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+        id: requestId,
+        status: OnlineOrderStatus.ACCEPTED,
+        telegramChatId: '123456',
+        telegramReadyQueuedAt: null,
+        orderSession: {
+          orderItems: statuses.map((serveStatus) => ({ serveStatus })),
+        },
+      });
+      await eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        orderSessionId: sessionId,
+        tableId: null,
+        currentStatus: ServeStatus.CANCELLED,
+      });
+      expect(outbox.enqueue).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps concurrent readiness events behind the same database compare-and-set', async () => {
+    prisma.onlineOrderRequest.findUnique.mockResolvedValue({
+      id: requestId,
+      status: OnlineOrderStatus.ACCEPTED,
+      telegramChatId: '123456',
+      telegramReadyQueuedAt: null,
+      orderSession: { orderItems: [{ serveStatus: ServeStatus.READY }] },
+    });
+    prisma.onlineOrderRequest.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    await Promise.all([
+      eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        orderSessionId: sessionId,
+        tableId: null,
+        currentStatus: ServeStatus.READY,
+      }),
+      eventBus.publish(ORDER_EVENTS.ITEM_STATUS_UPDATED, {
+        orderSessionId: sessionId,
+        tableId: null,
+        currentStatus: ServeStatus.CANCELLED,
+      }),
+    ]);
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ONLINE_ORDER_TELEGRAM_EVENT,
+    ORDER_EVENTS.ITEM_STATUS_UPDATED,
+    ONLINE_ORDER_TELEGRAM_READY_EVENT,
+    ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
+  ])(
+    'rejects malformed internal %s payloads permanently without exposing their contents',
+    async (eventName) => {
+      await expect(
+        eventBus.publish(eventName, {
+          requestId: 'invalid',
+          accessToken: 'must-not-be-logged',
+        }),
+      ).rejects.toThrow(
+        new OutboxPermanentError('Invalid Telegram event payload.'),
+      );
+      expect(prisma.onlineOrderRequest.findUnique).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not queue a ready message after collection', async () => {
     prisma.onlineOrderRequest.findUnique.mockResolvedValue({

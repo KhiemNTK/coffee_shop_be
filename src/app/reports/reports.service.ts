@@ -14,6 +14,7 @@ import type {
   ReportMenuItemRow,
   ReportOnlineOrderJourneyRow,
   ReportKitchenSlaRow,
+  ReportLowStockRow,
   ReportPaymentMethodRow,
   ReportPaymentOperationsRow,
   ReportPromotionRow,
@@ -84,20 +85,19 @@ export class ReportsService {
         const topItems = await this.getTopItems(tx, period, query.topLimit);
         const promotions = await this.getPromotions(tx, period, query.topLimit);
         const reservations = await this.getReservations(tx, period);
-        const lowStockItems = await tx.inventoryItem.findMany({
-          where: {
-            deletedAt: null,
-            stock: { lte: new Prisma.Decimal(query.lowStockThreshold) },
-          },
-          select: {
-            id: true,
-            name: true,
-            stock: true,
-            unit: { select: { name: true } },
-          },
-          orderBy: [{ stock: 'asc' }, { name: 'asc' }],
-          take: query.topLimit,
-        });
+        const lowStockItems = await tx.$queryRaw<
+          ReportLowStockRow[]
+        >(Prisma.sql`
+          SELECT i."id", i."name", i."stock", i."reservedStock",
+                 i."stock" - i."reservedStock" AS "availableStock",
+                 u."name" AS "unitName"
+          FROM "InventoryItem" i
+          JOIN "Unit" u ON u."id" = i."unitId"
+          WHERE i."deletedAt" IS NULL
+            AND i."stock" - i."reservedStock" <= ${query.lowStockThreshold}::numeric
+          ORDER BY "availableStock" ASC, i."name" ASC, i."id" ASC
+          LIMIT ${query.topLimit}
+        `);
         const inventoryWaste = await this.getInventoryWaste(
           tx,
           period,
@@ -118,7 +118,9 @@ export class ReportsService {
             id: item.id,
             name: item.name,
             stock: item.stock.toFixed(4),
-            unitName: item.unit.name,
+            reservedStock: item.reservedStock.toFixed(4),
+            availableStock: item.availableStock.toFixed(4),
+            unitName: item.unitName,
           })),
           inventoryWaste,
           cashRisk,

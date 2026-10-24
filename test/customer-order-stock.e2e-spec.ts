@@ -9,10 +9,13 @@ import type { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
 import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { OnlineOrdersService } from '../src/app/online-orders/online-orders.service';
+import { OnlineOrderIntakeService } from '../src/app/online-orders/online-order-intake.service';
 import { OrdersService } from '../src/app/orders/orders.service';
 import { TakeawayService } from '../src/app/orders/takeaway.service';
 import { InventoryConsumptionService } from '../src/app/inventory/services/inventory-consumption.service';
 import { InventoryMovementService } from '../src/app/inventory/services/inventory-movement.service';
+import { InvoicesService } from '../src/app/invoices/invoices.service';
+import { StocktakeService } from '../src/app/inventory/services/stocktake.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { initApp } from '../src/init';
 
@@ -24,6 +27,7 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
   let takeaway: TakeawayService;
   let consumption: InventoryConsumptionService;
   let movements: InventoryMovementService;
+  let invoices: InvoicesService;
   let throttle: jest.SpyInstance;
   const suffix = randomUUID();
   const ids: Record<string, string> = {};
@@ -93,6 +97,13 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
     takeaway = module.get(TakeawayService);
     consumption = module.get(InventoryConsumptionService);
     movements = module.get(InventoryMovementService);
+    invoices = module.get(InvoicesService);
+    const intake = module.get(OnlineOrderIntakeService);
+    const assertAccepting = intake.assertAccepting.bind(intake);
+    // Opening-hour policy is tested separately; stock transactions must run at any hour.
+    jest
+      .spyOn(intake, 'assertAccepting')
+      .mockImplementation((tx) => assertAccepting(tx, true));
     await app.init();
     ids.position = (
       await prisma.position.create({
@@ -193,6 +204,12 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
         select: { id: true },
       });
       const itemIds = orderItems.map((row) => row.id);
+      const invoiceIds = (
+        await prisma.invoice.findMany({
+          where: { orderSessionId: { in: sessionIds } },
+          select: { id: true },
+        })
+      ).map((row) => row.id);
       await prisma
         .getExtendedClient()
         .$transaction((tx) => consumption.releaseReservations(tx, itemIds));
@@ -202,7 +219,12 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
       await prisma.outboxEvent.deleteMany({
         where: {
           aggregateId: {
-            in: [...sessionIds, ...itemIds, ...requests.map((row) => row.id)],
+            in: [
+              ...sessionIds,
+              ...itemIds,
+              ...invoiceIds,
+              ...requests.map((row) => row.id),
+            ],
           },
         },
       });
@@ -228,6 +250,9 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
         where: { invoice: { orderSessionId: { in: sessionIds } } },
       });
       await prisma.orderItem.deleteMany({ where: { id: { in: itemIds } } });
+      await prisma.cashTransaction.deleteMany({
+        where: { invoiceId: { in: invoiceIds } },
+      });
       await prisma.invoice.deleteMany({
         where: { orderSessionId: { in: sessionIds } },
       });
@@ -240,6 +265,9 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
       });
       await prisma.menuItem.deleteMany({
         where: { id: { in: [ids.menu, ids.secondMenu] } },
+      });
+      await prisma.stocktake.deleteMany({
+        where: { createdById: ids.employee },
       });
       await prisma.inventoryItem.deleteMany({ where: { id: ids.stock } });
       await prisma.inventoryCategory.deleteMany({
@@ -257,6 +285,10 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
       await prisma.idempotencyRequest.deleteMany({
         where: { employeeId: ids.employee },
       });
+      await prisma.cashierShift.deleteMany({
+        where: { employeeId: ids.employee },
+      });
+      if (ids.fund) await prisma.fund.deleteMany({ where: { id: ids.fund } });
       await prisma.employee.deleteMany({ where: { id: ids.employee } });
       await prisma.position.deleteMany({ where: { id: ids.position } });
     } finally {
@@ -543,6 +575,45 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
       .send(input)
       .expect(201);
     const orderId = created.body.data.requestId as string;
+    const savedProof = await prisma.onlineOrderRequest.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { requestHash: true },
+    });
+    const proof = {
+      clientRequestId: input.clientRequestId,
+      requestHash: savedProof.requestHash,
+      expectedCustomerId: a.id,
+    };
+    const recovered = await request(app.getHttpServer())
+      .post(`${prefix}/customers/orders/recover-by-key`)
+      .set('Cookie', a.cookie)
+      .set('X-CSRF-Token', a.csrf)
+      .send(proof)
+      .expect(200);
+    expect(recovered.body.data.requestId).toBe(orderId);
+    expect(recovered.headers['cache-control']).toBe('no-store');
+    await request(app.getHttpServer())
+      .post(`${prefix}/customers/orders/recover-by-key`)
+      .send(proof)
+      .expect(401);
+    await request(app.getHttpServer())
+      .post(`${prefix}/customers/orders/recover-by-key`)
+      .set('Cookie', a.cookie)
+      .send(proof)
+      .expect(403);
+    await request(app.getHttpServer())
+      .post(`${prefix}/customers/orders/recover-by-key`)
+      .set('Cookie', b.cookie)
+      .set('X-CSRF-Token', b.csrf)
+      .send({ ...proof, expectedCustomerId: b.id })
+      .expect(409);
+    await request(app.getHttpServer())
+      .post(`${prefix}/online-orders/requests/recover-by-key`)
+      .send({
+        clientRequestId: proof.clientRequestId,
+        requestHash: proof.requestHash,
+      })
+      .expect(409);
     const replay = await request(app.getHttpServer())
       .post(`${prefix}/customers/orders`)
       .set('Cookie', a.cookie)
@@ -652,5 +723,177 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
       .get(`${prefix}/customers/orders`)
       .set('Cookie', secondDevice.cookie)
       .expect(401);
+  });
+
+  it('holds pending POS invoices once, rolls back the losing invoice and releases only unprepared holds on void', async () => {
+    await prisma.inventoryItem.update({
+      where: { id: ids.stock },
+      data: { stock: '1' },
+    });
+    const pendingSessions: string[] = [];
+    for (let index = 0; index < 2; index++) {
+      const session = await orders.openSession({ employeeId: ids.employee });
+      sessions.push(session.id);
+      pendingSessions.push(session.id);
+      await orders.addOrderItems(
+        session.id,
+        {
+          items: [{ menuItemId: ids.secondMenu, quantity: 1 }],
+          idempotencyKey: randomUUID(),
+        },
+        ids.employee,
+      );
+    }
+    const results = await Promise.allSettled(
+      pendingSessions.map((orderSessionId) =>
+        invoices.createInvoice(ids.employee, { orderSessionId }),
+      ),
+    );
+    const winner = results.find((result) => result.status === 'fulfilled')!;
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    if (winner.status !== 'fulfilled')
+      throw new Error('Expected one committed invoice.');
+    const invoice = winner.value;
+    expect(
+      await prisma.invoice.count({
+        where: { orderSessionId: { in: pendingSessions } },
+      }),
+    ).toBe(1);
+    await prisma
+      .getExtendedClient()
+      .$transaction((tx) => invoices.reserveInvoiceStock(tx, invoice.id));
+    expect(
+      (
+        await prisma.inventoryItem.findUniqueOrThrow({
+          where: { id: ids.stock },
+        })
+      ).reservedStock.toString(),
+    ).toBe('0.6');
+    const stocktakes = app.get(StocktakeService);
+    const count = await stocktakes.create(ids.employee, {
+      inventoryItemIds: [ids.stock],
+      idempotencyKey: randomUUID(),
+    });
+    await stocktakes.updateCounts(count.id, ids.employee, {
+      items: [{ inventoryItemId: ids.stock, countedQuantity: '0.5' }],
+    });
+    await expect(
+      stocktakes.post(count.id, ids.employee, { idempotencyKey: randomUUID() }),
+    ).rejects.toMatchObject({
+      response: { code: 'INVENTORY_STOCKTAKE_RESERVED_STOCK' },
+    });
+    expect(
+      (await prisma.stocktake.findUniqueOrThrow({ where: { id: count.id } }))
+        .status,
+    ).toBe('DRAFT');
+    await stocktakes.cancel(count.id, ids.employee, {
+      reason: 'Resolve commitments before recounting',
+    });
+    await invoices.voidInvoice(invoice.id, ids.employee, {
+      reason: 'Retry checkout',
+    });
+    expect(
+      (
+        await prisma.inventoryItem.findUniqueOrThrow({
+          where: { id: ids.stock },
+        })
+      ).reservedStock.toString(),
+    ).toBe('0');
+    const retry = await invoices.createInvoice(ids.employee, {
+      orderSessionId: invoice.orderSessionId,
+    });
+    const line = await prisma.orderItem.findFirstOrThrow({
+      where: { invoiceId: retry.id },
+    });
+    await orders.updateItemStatus(line.id, ids.employee, {
+      serveStatus: 'COOKING',
+    });
+    await invoices.voidInvoice(retry.id, ids.employee, {
+      reason: 'Retry checkout',
+    });
+    const stock = await prisma.inventoryItem.findUniqueOrThrow({
+      where: { id: ids.stock },
+    });
+    expect(stock.stock.toString()).toBe('0.4');
+    expect(stock.reservedStock.toString()).toBe('0');
+    expect(
+      await prisma.inventoryTransaction.count({
+        where: { orderItemId: line.id },
+      }),
+    ).toBe(1);
+  });
+
+  it('commits only one cash payment when two POS checkouts compete for the last ingredients', async () => {
+    await prisma.inventoryItem.update({
+      where: { id: ids.stock },
+      data: { stock: '1' },
+    });
+    ids.fund = (
+      await prisma.fund.create({
+        data: { name: `Stock cash ${suffix}`, type: 'CASH', balance: 0 },
+      })
+    ).id;
+    await prisma.cashierShift.create({
+      data: { employeeId: ids.employee, fundId: ids.fund, status: 'OPEN' },
+    });
+    const checkoutSessions: string[] = [];
+    for (let index = 0; index < 2; index++) {
+      const session = await orders.openSession({ employeeId: ids.employee });
+      sessions.push(session.id);
+      checkoutSessions.push(session.id);
+      await orders.addOrderItems(
+        session.id,
+        {
+          items: [{ menuItemId: ids.secondMenu, quantity: 1 }],
+          idempotencyKey: randomUUID(),
+        },
+        ids.employee,
+      );
+    }
+    const results = await Promise.allSettled(
+      checkoutSessions.map((orderSessionId) =>
+        invoices.checkoutInvoice(ids.employee, {
+          orderSessionId,
+          paymentMethod: 'CASH',
+          amountTendered: '30000',
+          closeSessionAfterPayment: false,
+          idempotencyKey: randomUUID(),
+        }),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected')!;
+    if (rejected.status !== 'rejected')
+      throw new Error('Expected one rejected checkout.');
+    expect(rejected.reason).toMatchObject({
+      response: { code: 'INVENTORY_INSUFFICIENT_STOCK' },
+    });
+    expect(
+      await prisma.invoice.count({
+        where: {
+          orderSessionId: { in: checkoutSessions },
+          paymentStatus: 'PAID',
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.cashTransaction.count({ where: { fundId: ids.fund } }),
+    ).toBe(1);
+    expect(
+      (
+        await prisma.fund.findUniqueOrThrow({ where: { id: ids.fund } })
+      ).balance.toString(),
+    ).toBe('30000');
+    expect(
+      (
+        await prisma.inventoryItem.findUniqueOrThrow({
+          where: { id: ids.stock },
+        })
+      ).reservedStock.toString(),
+    ).toBe('0.6');
   });
 });

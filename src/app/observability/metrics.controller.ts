@@ -8,12 +8,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'node:crypto';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { SkipAuth } from '../auth/auth.decorator';
 import { MetricsService } from './metrics.service';
 
 @Controller()
 @SkipAuth()
+@SkipThrottle()
 export class MetricsController {
   constructor(
     private readonly metricsService: MetricsService,

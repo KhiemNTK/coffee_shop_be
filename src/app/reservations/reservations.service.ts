@@ -156,16 +156,23 @@ export class ReservationsService
         startsAt: true,
         endsAt: true,
         guestCount: true,
-        reservation: { select: { status: true } },
+        reservation: {
+          select: {
+            status: true,
+            startsAt: true,
+            endsAt: true,
+            guestCount: true,
+          },
+        },
       },
     });
     if (!request) throw new NotFoundException('Request not found.');
     return {
       requestId: request.id,
       status: request.status,
-      startsAt: request.startsAt,
-      endsAt: request.endsAt,
-      guestCount: request.guestCount,
+      startsAt: request.reservation?.startsAt ?? request.startsAt,
+      endsAt: request.reservation?.endsAt ?? request.endsAt,
+      guestCount: request.reservation?.guestCount ?? request.guestCount,
       reservationStatus: request.reservation?.status ?? null,
     };
   }

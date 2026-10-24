@@ -59,6 +59,15 @@ export class OnlineOrderAccessDto extends createZodDto(
   OnlineOrderAccessSchema,
 ) {}
 
+export class RecoverOnlineOrderByKeyDto extends createZodDto(
+  z
+    .object({
+      clientRequestId: z.uuid(),
+      requestHash: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .strict(),
+) {}
+
 export class ReorderTemplateDto extends createZodDto(
   OnlineOrderAccessSchema.extend({
     accessToken: OnlineOrderAccessSchema.shape.accessToken.optional(),

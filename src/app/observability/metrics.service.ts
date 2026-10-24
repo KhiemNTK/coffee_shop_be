@@ -20,6 +20,8 @@ import {
   paymentReviewItems,
   postgresConnections,
   postgresMaxConnections,
+  redisMemoryUsedBytes,
+  redisMaxMemoryBytes,
 } from '../../common/observability/metrics';
 import { HealthService } from '../health/health.service';
 import { BusinessInsightsService } from '../reports/business-insights.service';
@@ -28,6 +30,7 @@ interface OperationalSnapshot {
   postgresConnections: number;
   postgresMaxConnections: number;
   outboxPending: number;
+  outboxEnqueued: number;
   outboxProcessing: number;
   outboxDeadLetter: number;
   outboxLagSeconds: number;
@@ -93,12 +96,13 @@ export class MetricsService {
             (SELECT COUNT(*)::int FROM pg_stat_activity) AS "postgresConnections",
             current_setting('max_connections')::int AS "postgresMaxConnections",
             (SELECT COUNT(*)::int FROM "OutboxEvent" WHERE "status" = 'PENDING') AS "outboxPending",
+            (SELECT COUNT(*)::int FROM "OutboxEvent" WHERE "status" = 'ENQUEUED') AS "outboxEnqueued",
             (SELECT COUNT(*)::int FROM "OutboxEvent" WHERE "status" = 'PROCESSING') AS "outboxProcessing",
             (SELECT COUNT(*)::int FROM "OutboxEvent" WHERE "status" = 'DEAD_LETTER') AS "outboxDeadLetter",
             COALESCE((
               SELECT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN("occurredAt"))::double precision
               FROM "OutboxEvent"
-              WHERE "status" IN ('PENDING', 'PROCESSING')
+              WHERE "status" IN ('PENDING', 'ENQUEUED', 'PROCESSING')
             ), 0) AS "outboxLagSeconds",
             (SELECT COUNT(*)::int FROM "PaymentAttempt" WHERE "status" = 'REQUIRES_REVIEW') AS "paymentAttemptsRequiringReview",
             (SELECT COUNT(*)::int FROM "PaymentRefund" WHERE "status" = 'REQUIRES_REVIEW') AS "paymentRefundsRequiringReview"
@@ -120,6 +124,10 @@ export class MetricsService {
       outboxEvents.set(
         { status: OutboxEventStatus.PENDING },
         snapshot.outboxPending,
+      );
+      outboxEvents.set(
+        { status: OutboxEventStatus.ENQUEUED },
+        snapshot.outboxEnqueued,
       );
       outboxEvents.set(
         { status: OutboxEventStatus.PROCESSING },
@@ -165,6 +173,14 @@ export class MetricsService {
     dependencyUp.set({ dependency: 'redis' }, available ? 1 : 0);
     if (!available) metricsCollectionFailuresTotal.inc({ collector: 'redis' });
     this.logDependencyTransition('redis', available);
+    if (status !== 'up') return;
+    try {
+      const memory = await this.healthService.redisMemory();
+      redisMemoryUsedBytes.set(memory.used);
+      redisMaxMemoryBytes.set(memory.limit);
+    } catch {
+      metricsCollectionFailuresTotal.inc({ collector: 'redis_memory' });
+    }
   }
 
   private logDependencyTransition(

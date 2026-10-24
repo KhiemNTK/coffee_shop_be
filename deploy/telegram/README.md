@@ -34,6 +34,15 @@ For customer subscriptions, register `POST /api/v1/online-orders/telegram/webhoo
 
 Delivery is **at least once**, not exactly once: Telegram can accept a message before a network timeout or a database acknowledgement failure. A retry may send the same short reference again. Do not use a Telegram message as an instruction to charge a customer or prepare a pending order. Webhook acknowledgements for `/start` and `/stop` remain best-effort; durable order state notifications use the outbox.
 
+Readiness is reevaluated after either a ready item or a cancelled item. Cancelling
+the last unready item can make the remaining order ready; cancelling every item
+or handing off every remaining item does not send a ready notification. The
+database compare-and-set and ready-event insert still commit together.
+
+Malformed internal notification payloads go directly to dead-letter with a
+sanitized error, not `PUBLISHED`. Valid but obsolete notifications remain safe
+no-ops. The public Telegram webhook still ignores unsupported updates.
+
 ## Activation checklist
 
 1. Configure credentials and the private group ID; restart the backend. Leave the feature unconfigured when unused. No new migration or seed is required.

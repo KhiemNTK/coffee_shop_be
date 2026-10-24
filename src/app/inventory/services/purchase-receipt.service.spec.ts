@@ -5,6 +5,7 @@ import { InventoryPolicyService } from '../policies/inventory-policy.service';
 import { PurchaseReceiptService } from './purchase-receipt.service';
 
 describe('PurchaseReceiptService', () => {
+  const reviewedAt = new Date('2026-09-23T00:00:00.000Z');
   let service: PurchaseReceiptService;
   let tx: any;
   let audit: { log: jest.Mock };
@@ -101,6 +102,7 @@ describe('PurchaseReceiptService', () => {
       id: 'receipt-id',
       receiptNumber: 'PR-1',
       status: PurchaseReceiptStatus.DRAFT,
+      updatedAt: reviewedAt,
       receivedAt: new Date('2026-09-23T00:00:00.000Z'),
       supplier: { deletedAt: null },
       items: [
@@ -121,6 +123,7 @@ describe('PurchaseReceiptService', () => {
 
     const result = await service.post('receipt-id', 'employee-id', {
       idempotencyKey: 'receipt-post-key',
+      expectedUpdatedAt: reviewedAt,
     });
 
     expect(tx.inventoryItem.updateMany).toHaveBeenCalledWith({
@@ -158,6 +161,7 @@ describe('PurchaseReceiptService', () => {
       id: 'receipt-id',
       receiptNumber: 'PR-1',
       status: PurchaseReceiptStatus.DRAFT,
+      updatedAt: reviewedAt,
       receivedAt: new Date(),
       supplier: { deletedAt: null },
       items: [
@@ -180,10 +184,71 @@ describe('PurchaseReceiptService', () => {
     await expect(
       service.post('receipt-id', 'employee-id', {
         idempotencyKey: 'receipt-post-key',
+        expectedUpdatedAt: reviewedAt,
       }),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(tx.inventoryTransaction.createManyAndReturn).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('rejects a receipt changed after review without touching stock or its status', async () => {
+    tx.purchaseReceipt.findUnique.mockResolvedValue({
+      status: PurchaseReceiptStatus.DRAFT,
+      updatedAt: new Date(reviewedAt.getTime() + 1),
+    });
+    await expect(
+      service.post('receipt-id', 'employee-id', {
+        idempotencyKey: 'stale-review-key',
+        expectedUpdatedAt: reviewedAt,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'INVENTORY_PURCHASE_RECEIPT_CHANGED' },
+    });
+    expect(tx.purchaseReceipt.updateMany).not.toHaveBeenCalled();
+    expect(tx.inventoryItem.updateMany).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+    expect(idempotency.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: { id: 'receipt-id', expectedUpdatedAt: reviewedAt },
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('advances the review token even when an edit occurs within the same millisecond', async () => {
+    jest.useFakeTimers({ now: reviewedAt });
+    try {
+      tx.purchaseReceipt.findUnique.mockResolvedValue({
+        status: PurchaseReceiptStatus.DRAFT,
+        updatedAt: reviewedAt,
+      });
+      tx.purchaseReceipt.update = jest
+        .fn()
+        .mockResolvedValue({ id: 'receipt-id' });
+      const editable = new PurchaseReceiptService(
+        {} as never,
+        new InventoryPolicyService(),
+        {
+          runSerializable: jest.fn((operation) => operation(tx)),
+        } as never,
+        audit,
+        idempotency as never,
+        outbox as never,
+        {} as never,
+      );
+      await editable.update('receipt-id', 'employee-id', {
+        note: 'Updated note',
+      });
+      expect(tx.purchaseReceipt.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            updatedAt: new Date(reviewedAt.getTime() + 1),
+          }),
+        }),
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

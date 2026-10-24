@@ -1,4 +1,5 @@
 import { InventoryTxType } from '@prisma/client';
+import { Decimal } from '@prisma/client/runtime/library';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
@@ -6,8 +7,15 @@ export const InventoryDecimalInputSchema = z.union([
   z
     .string()
     .trim()
-    .regex(/^\d+(\.\d{1,4})?$/, 'Invalid decimal value'),
-  z.number().nonnegative(),
+    .regex(/^\d{1,14}(\.\d{1,4})?$/, 'Invalid decimal value'),
+  z
+    .number()
+    .nonnegative()
+    .refine(
+      (value) =>
+        value < 100_000_000_000_000 && new Decimal(value).decimalPlaces() <= 4,
+      'Quantity must have at most 14 integer digits and 4 decimal places.',
+    ),
 ]);
 
 export const PositiveInventoryDecimalInputSchema =
@@ -22,8 +30,8 @@ export const OptionalDateSchema = z
   .transform((value) => (value ? new Date(value) : undefined));
 
 export const InventoryPaginationSchema = z.object({
-  itemPerPage: z.coerce.number().min(1).max(100).default(10),
-  page: z.coerce.number().min(1).default(1),
+  itemPerPage: z.coerce.number().int().min(1).max(100).default(10),
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
   select: z.string().optional(),
   keyword: z.string().trim().min(1).max(120).optional(),
 });
@@ -38,8 +46,16 @@ export const MoneyInputSchema = z.union([
   z
     .string()
     .trim()
-    .regex(/^\d+(\.\d{1,2})?$/, 'Invalid money value'),
-  z.number().nonnegative(),
+    .regex(/^\d{1,16}(\.\d{1,2})?$/, 'Invalid money value'),
+  z
+    .number()
+    .nonnegative()
+    .refine(
+      (value) =>
+        value < 10_000_000_000_000_000 &&
+        new Decimal(value).decimalPlaces() <= 2,
+      'Money must have at most 16 integer digits and 2 decimal places.',
+    ),
 ]);
 
 const InventoryMovementBaseSchema = z.object({

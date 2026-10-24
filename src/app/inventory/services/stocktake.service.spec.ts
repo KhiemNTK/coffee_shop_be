@@ -126,6 +126,7 @@ describe('StocktakeService', () => {
             id: 'item-id',
             deletedAt: null,
             stock: new Decimal(10),
+            reservedStock: new Decimal(0),
             averageUnitCost: new Decimal(20_000),
           },
         },
@@ -198,6 +199,7 @@ describe('StocktakeService', () => {
             id: 'item-id',
             deletedAt: null,
             stock: new Decimal(11),
+            reservedStock: new Decimal(0),
             averageUnitCost: new Decimal(20_000),
           },
         },
@@ -228,6 +230,7 @@ describe('StocktakeService', () => {
             id: 'item-id',
             deletedAt: null,
             stock: new Decimal(10),
+            reservedStock: new Decimal(0),
             averageUnitCost: new Decimal(20_000),
           },
         },
@@ -268,6 +271,7 @@ describe('StocktakeService', () => {
             id: 'item-id',
             deletedAt: null,
             stock: new Decimal(10),
+            reservedStock: new Decimal(0),
             averageUnitCost: new Decimal(20_000),
           },
         },
@@ -283,6 +287,37 @@ describe('StocktakeService', () => {
 
     expect(tx.inventoryTransaction.createManyAndReturn).not.toHaveBeenCalled();
     expect(tx.stocktakeItem.update).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('reports a reservation conflict, not a stale snapshot, when the physical count is below held stock', async () => {
+    tx.stocktake.findUnique.mockResolvedValue({
+      id: 'stocktake-id',
+      status: StocktakeStatus.DRAFT,
+      items: [
+        {
+          id: 'line-id',
+          expectedQuantity: new Decimal(10),
+          countedQuantity: new Decimal(5),
+          inventoryItem: {
+            id: 'item-id',
+            deletedAt: null,
+            stock: new Decimal(10),
+            reservedStock: new Decimal(8),
+            averageUnitCost: new Decimal(20_000),
+          },
+        },
+      ],
+    });
+    await expect(
+      service.post('stocktake-id', 'employee-id', {
+        idempotencyKey: 'held-stock-post-key',
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'INVENTORY_STOCKTAKE_RESERVED_STOCK' },
+    });
+    expect(tx.inventoryItem.updateMany).not.toHaveBeenCalled();
+    expect(tx.inventoryTransaction.createManyAndReturn).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 });

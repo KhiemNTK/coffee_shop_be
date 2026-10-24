@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Header,
+  HttpCode,
   Param,
   Post,
   Query,
@@ -22,7 +23,11 @@ import type { CustomerRequest } from '../../common/types';
 import { SkipAuth } from '../auth/auth.decorator';
 import { OnlineOrdersService } from '../online-orders/online-orders.service';
 import { CustomerGuard } from './customer.guard';
-import { CreateCustomerOrderDto, GetCustomerOrdersDto } from './customer.dto';
+import {
+  CreateCustomerOrderDto,
+  GetCustomerOrdersDto,
+  RecoverCustomerOrderByKeyDto,
+} from './customer.dto';
 
 @ApiTags('Customer Orders')
 @ApiCookieAuth(CUSTOMER_SESSION_COOKIE)
@@ -62,6 +67,38 @@ export class CustomerOrdersController {
       )),
       customerId: request.customer.id,
     };
+  }
+
+  @Post('recover')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  recover(
+    @Req() request: CustomerRequest,
+    @Body() dto: CreateCustomerOrderDto,
+  ) {
+    if (request.customer.id !== dto.expectedCustomerId)
+      throw new ConflictException({
+        code: 'CUSTOMER_SESSION_CHANGED',
+        message: 'Customer account changed. Reload before retrying.',
+      });
+    return this.onlineOrders.recoverPublicRequest(dto, request.customer.id);
+  }
+
+  @Post('recover-by-key')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  recoverByKey(
+    @Req() request: CustomerRequest,
+    @Body() dto: RecoverCustomerOrderByKeyDto,
+  ) {
+    if (request.customer.id !== dto.expectedCustomerId)
+      throw new ConflictException({
+        code: 'CUSTOMER_SESSION_CHANGED',
+        message: 'Customer account changed. Reload before retrying.',
+      });
+    return this.onlineOrders.recoverByKey(dto, request.customer.id);
   }
 
   @Get(':id/reorder-template')

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 import {
   PrismaClient,
   PurchaseReceiptStatus,
@@ -49,9 +50,17 @@ describe('Inventory procurement and stocktake (e2e)', () => {
   let inventoryItemId: string;
   let supplierId: string;
   let receiptId: string;
+  const receiptIds: string[] = [];
   let stocktakeId: string;
 
   beforeAll(async () => {
+    const target = new URL(process.env.DATABASE_URL ?? '');
+    assert(
+      process.env.NODE_ENV === 'test' &&
+        ['127.0.0.1', 'localhost'].includes(target.hostname) &&
+        target.pathname.endsWith('_test'),
+      'Use only an isolated local test database.',
+    );
     const position = await prisma.position.create({
       data: { name: `Procurement Position ${suffix}`, salary: 0 },
     });
@@ -98,8 +107,8 @@ describe('Inventory procurement and stocktake (e2e)', () => {
         );
         await tx.actionLog.deleteMany({ where: { employeeId } });
       });
-      const documentIds = [receiptId, stocktakeId].filter((id): id is string =>
-        Boolean(id),
+      const documentIds = [...receiptIds, stocktakeId].filter(
+        (id): id is string => Boolean(id),
       );
       if (documentIds.length > 0) {
         await prisma.outboxEvent.deleteMany({
@@ -107,11 +116,15 @@ describe('Inventory procurement and stocktake (e2e)', () => {
         });
       }
       await prisma.idempotencyRequest.deleteMany({ where: { employeeId } });
-      if (receiptId) {
+      if (receiptIds.length) {
         await prisma.inventoryTransaction.deleteMany({
-          where: { purchaseReceiptItem: { purchaseReceiptId: receiptId } },
+          where: {
+            purchaseReceiptItem: { purchaseReceiptId: { in: receiptIds } },
+          },
         });
-        await prisma.purchaseReceipt.deleteMany({ where: { id: receiptId } });
+        await prisma.purchaseReceipt.deleteMany({
+          where: { id: { in: receiptIds } },
+        });
       }
       if (stocktakeId) {
         await prisma.inventoryTransaction.deleteMany({
@@ -139,13 +152,16 @@ describe('Inventory procurement and stocktake (e2e)', () => {
       items: [{ inventoryItemId, quantity: 5, unitPrice: 23_000 }],
     });
     receiptId = receipt.id;
+    receiptIds.push(receipt.id);
 
     const results = await Promise.allSettled([
       purchaseReceipts.post(receiptId, employeeId, {
         idempotencyKey: `post-a-${suffix}`,
+        expectedUpdatedAt: receipt.updatedAt,
       }),
       purchaseReceipts.post(receiptId, employeeId, {
         idempotencyKey: `post-b-${suffix}`,
+        expectedUpdatedAt: receipt.updatedAt,
       }),
     ]);
     expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(
@@ -198,5 +214,46 @@ describe('Inventory procurement and stocktake (e2e)', () => {
         where: { stocktakeItem: { stocktakeId } },
       }),
     ).toBe(0);
+  });
+
+  it('rejects a stale review and replays a successful posting without importing twice', async () => {
+    const receipt = await purchaseReceipts.create(employeeId, {
+      supplierId,
+      receivedAt: undefined,
+      note: null,
+      idempotencyKey: randomUUID(),
+      items: [{ inventoryItemId, quantity: '1', unitPrice: '23000' }],
+    });
+    receiptIds.push(receipt.id);
+    const edited = await purchaseReceipts.update(receipt.id, employeeId, {
+      items: [{ inventoryItemId, quantity: '2', unitPrice: '25000' }],
+    });
+    expect(edited.updatedAt.getTime()).toBeGreaterThan(
+      receipt.updatedAt.getTime(),
+    );
+    await expect(
+      purchaseReceipts.post(receipt.id, employeeId, {
+        idempotencyKey: randomUUID(),
+        expectedUpdatedAt: receipt.updatedAt,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'INVENTORY_PURCHASE_RECEIPT_CHANGED' },
+    });
+    expect(
+      await prisma.inventoryTransaction.count({
+        where: { purchaseReceiptItem: { purchaseReceiptId: receipt.id } },
+      }),
+    ).toBe(0);
+    const review = {
+      idempotencyKey: randomUUID(),
+      expectedUpdatedAt: edited.updatedAt,
+    };
+    await purchaseReceipts.post(receipt.id, employeeId, review);
+    await purchaseReceipts.post(receipt.id, employeeId, review);
+    expect(
+      await prisma.inventoryTransaction.count({
+        where: { purchaseReceiptItem: { purchaseReceiptId: receipt.id } },
+      }),
+    ).toBe(1);
   });
 });

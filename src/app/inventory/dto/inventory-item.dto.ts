@@ -49,7 +49,11 @@ export class GetInventoryItemsDto extends createZodDto(
   InventoryPaginationSchema.extend({
     categoryId: z.uuid('Invalid UUID for inventory category').optional(),
     unitId: z.uuid('Invalid UUID for unit').optional(),
-    lowStockOnly: z.coerce.boolean().optional().default(false),
+    lowStockOnly: z.preprocess((value) => {
+      if (value === 'true') return true;
+      if (value === 'false') return false;
+      return value;
+    }, z.boolean().optional().default(false)),
     maxStock: InventoryDecimalInputSchema.optional(),
   }),
 ) {}

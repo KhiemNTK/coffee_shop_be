@@ -36,7 +36,13 @@ export class UpdatePurchaseReceiptDto extends createZodDto(
 ) {}
 
 export class PostPurchaseReceiptDto extends createZodDto(
-  z.object({ idempotencyKey: RequiredIdempotencyKeySchema }),
+  z.object({
+    idempotencyKey: RequiredIdempotencyKeySchema,
+    expectedUpdatedAt: z
+      .string()
+      .datetime({ offset: true })
+      .transform((value) => new Date(value)),
+  }),
 ) {}
 
 export class CancelPurchaseReceiptDto extends createZodDto(

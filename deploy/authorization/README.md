@@ -17,6 +17,22 @@ roles; it does not edit permission definitions.
 - Roles Excel import only creates role names and descriptions, not grants. It is
   not an RBAC backup; there is no new frontend Excel workflow.
 
+## Role lifecycle
+
+- Employee profiles do not include role assignments. Use the dedicated
+  `/employees/:id/roles` endpoint with `/employees_roles_read`.
+- `POST /roles` accepts optional `templateRoleId` and `expectedPermissionIds`.
+  Copying also requires role read, permission read-for-role and permission
+  assignment rights, plus every copied permission. It creates an independent
+  custom role, never a system role or an employee assignment. The frontend
+  previews the source grants and sends their baseline to detect concurrent edits.
+- Metadata updates do not change grants. Creation, metadata updates and imports
+  write their audit in the same transaction; import audits only inserted rows.
+- Assigned roles cannot be deleted (`409 ROLE_IN_USE`), including assignments to
+  inactive employees. Reassign employees first; there is no force-delete option.
+- Seed preflight rejects custom roles using reserved system names. Rename those
+  roles explicitly before retrying; the seed never takes ownership by name alone.
+
 The frontend contract is generated with `pnpm permissions:sync` in the frontend
 repo and checked with `pnpm permissions:check` against the sibling backend.
 Route-policy tests also reject permission keys absent from the code catalog.

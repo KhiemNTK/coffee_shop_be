@@ -38,6 +38,59 @@ groups:
 
   - name: coffee-shop-api
     rules:
+      - alert: CoffeeShopRedisMemoryPressure
+        expr: coffee_shop_redis_memory_used_bytes / coffee_shop_redis_maxmemory_bytes > 0.8 and coffee_shop_redis_maxmemory_bytes > 0 and on(instance) coffee_shop_dependency_up{dependency="redis"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis memory exceeds 80 percent of maxmemory
+          description: Inspect queue retention and memory before writes are refused; do not enable key eviction for BullMQ.
+
+      - alert: CoffeeShopRedisMemoryUnbounded
+        expr: coffee_shop_redis_maxmemory_bytes == 0 and on(instance) coffee_shop_dependency_up{dependency="redis"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis has no configured memory limit
+          description: Configure maxmemory with noeviction and leave container headroom for AOF rewriting and clients.
+
+      - alert: CoffeeShopRateLimiterUnavailable
+        expr: increase(coffee_shop_rate_limit_unavailable_total[5m]) >= 3
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis-backed rate limiting is refusing requests
+          description: Inspect Redis command failures, ACLs, memory and persistence; PING success alone does not prove writes work.
+
+      - alert: CoffeeShopPostgresUnavailable
+        expr: coffee_shop_dependency_up{dependency="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: PostgreSQL is unavailable or cannot be inspected
+          description: Check database connectivity and collector logs, even when API traffic is low.
+
+      - alert: CoffeeShopMetricsCollectionFailing
+        expr: sum by (instance, collector) (increase(coffee_shop_metrics_collection_failures_total[5m])) >= 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Operational metric collection is failing
+          description: Published gauges may be stale; inspect collector errors before trusting backlog or payment counts.
+
+      - alert: CoffeeShopTurnstileUnavailable
+        expr: sum(increase(coffee_shop_turnstile_verifications_total{outcome="unavailable"}[5m])) >= 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Human verification is failing at the provider boundary
+          description: Inspect turnstile.unavailable logs and Cloudflare settings; never disable server verification to restore access.
+
       - alert: CoffeeShopApiTargetDown
         expr: up{job="coffee-shop-api"} == 0
         for: 2m
