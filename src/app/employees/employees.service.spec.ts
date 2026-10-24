@@ -31,6 +31,21 @@ describe('EmployeesService', () => {
     expect(service).toBeDefined();
   });
 
+  it('keeps role assignments out of the ordinary employee profile', async () => {
+    const findUnique = jest.fn().mockResolvedValue({ id: 'employee' });
+    const subject = new EmployeesService(
+      { employee: { findUnique } } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    await subject.getEmployeeById('employee');
+    const { select } = findUnique.mock.calls[0][0];
+    expect(select).not.toHaveProperty('employeeRoles');
+    expect(select).not.toHaveProperty('password');
+    expect(select).toHaveProperty('position', true);
+  });
+
   it('validates paging and preserves false instead of coercing it to true', () => {
     expect(
       GetEmployeesPaginationDto.schema.parse({

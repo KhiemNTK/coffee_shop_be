@@ -14,11 +14,11 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
 import {
   CreateRoleDto,
-  CreateRoleInputSchema,
   ExportRolesDto,
   GetRolesPaginationDto,
   ImportRolesDto,
   ReplaceRolePermissionsDto,
+  RoleMetadataInputSchema,
   UpdateRoleDto,
 } from './dto';
 import {
@@ -47,11 +47,87 @@ export class RolesService {
     private authorizationService: AuthorizationService,
   ) {}
 
-  async createRole(createRoleDto: CreateRoleDto) {
-    await this.ensureRoleNameAvailable(createRoleDto.name);
-
-    return this.prisma.role.create({
-      data: createRoleDto,
+  async createRole(
+    { name, description, templateRoleId, expectedPermissionIds }: CreateRoleDto,
+    actorId: string,
+  ) {
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      const actor =
+        await this.authorizationService.getFreshAuthorizationContext(
+          actorId,
+          tx,
+        );
+      this.authorizationService.assertCanGrantPermissions(actor, [
+        PermissionKeys.ROLES_CREATE,
+        ...(templateRoleId
+          ? [
+              PermissionKeys.ROLES_READ,
+              PermissionKeys.ROLE_PERMISSIONS_READ,
+              PermissionKeys.ROLE_PERMISSIONS_UPDATE,
+            ]
+          : []),
+      ]);
+      await this.ensureRoleNameAvailable(tx, name);
+      const template = templateRoleId
+        ? await tx.role.findUnique({
+            where: { id: templateRoleId, deletedAt: null },
+            select: {
+              rolePermissions: {
+                where: { permission: { deletedAt: null } },
+                select: { permission: { select: { id: true, key: true } } },
+              },
+            },
+          })
+        : null;
+      if (templateRoleId && !template)
+        throw new NotFoundException(SYSTEM_ERRORS.ROLE_NOT_FOUND);
+      const permissions =
+        template?.rolePermissions.map((item) => item.permission) ?? [];
+      this.authorizationService.assertCanGrantPermissions(
+        actor,
+        permissions.map((permission) => permission.key),
+      );
+      if (templateRoleId && expectedPermissionIds !== undefined) {
+        const expected = new Set(expectedPermissionIds);
+        if (
+          expected.size !== expectedPermissionIds.length ||
+          permissions.length !== expected.size ||
+          permissions.some((permission) => !expected.has(permission.id))
+        )
+          throw new ConflictException({
+            code: 'AUTHORIZATION_CHANGED',
+            message:
+              'Access assignments changed. Reload and review before saving.',
+          });
+      }
+      const role = await tx.role.create({
+        data: {
+          name,
+          description,
+          isSystemRole: false,
+          rolePermissions: {
+            create: permissions.map((permission) => ({
+              permissionId: permission.id,
+            })),
+          },
+        },
+      });
+      await tx.actionLog.create({
+        data: {
+          employeeId: actorId,
+          actionType: 'ROLE_CREATED',
+          details: {
+            roleId: role.id,
+            templateRoleId: templateRoleId ?? null,
+            before: null,
+            after: { name: role.name, description: role.description },
+            afterPermissionIds: permissions
+              .map((permission) => permission.id)
+              .sort(),
+          },
+        },
+      });
+      return role;
     });
   }
 
@@ -99,23 +175,49 @@ export class RolesService {
     return role;
   }
 
-  async updateRole(id: string, updateRoleDto: UpdateRoleDto) {
-    const role = await this.getRoleById(id);
-    if (role.isSystemRole) {
-      throw new BadRequestException(
-        AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED,
-      );
-    }
-
-    if (updateRoleDto.name) {
-      await this.ensureRoleNameAvailable(updateRoleDto.name, id);
-    }
-
-    const updated = await this.prisma.role.update({
-      where: { id },
-      data: updateRoleDto,
+  async updateRole(
+    id: string,
+    { name, description }: UpdateRoleDto,
+    actorId: string,
+  ) {
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      const actor =
+        await this.authorizationService.getFreshAuthorizationContext(
+          actorId,
+          tx,
+        );
+      this.authorizationService.assertCanGrantPermissions(actor, [
+        PermissionKeys.ROLES_UPDATE,
+      ]);
+      const role = await tx.role.findUnique({ where: { id, deletedAt: null } });
+      if (!role) throw new NotFoundException(SYSTEM_ERRORS.ROLE_NOT_FOUND);
+      if (role.isSystemRole)
+        throw new BadRequestException(
+          AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED,
+        );
+      if (name) await this.ensureRoleNameAvailable(tx, name, id);
+      if (
+        (name === undefined || name === role.name) &&
+        (description === undefined || description === role.description)
+      )
+        return role;
+      const updated = await tx.role.update({
+        where: { id, deletedAt: null },
+        data: { name, description },
+      });
+      await tx.actionLog.create({
+        data: {
+          employeeId: actorId,
+          actionType: 'ROLE_UPDATED',
+          details: {
+            roleId: id,
+            before: { name: role.name, description: role.description },
+            after: { name: updated.name, description: updated.description },
+          },
+        },
+      });
+      return updated;
     });
-    return updated;
   }
 
   async deleteRole(id: string, actorId: string) {
@@ -130,8 +232,16 @@ export class RolesService {
         throw new BadRequestException(
           SYSTEM_ERRORS.SYSTEM_ROLE_CANNOT_BE_DELETED,
         );
+      const assignment = await tx.employeeRole.findFirst({
+        where: { roleId: id },
+        select: { employeeId: true },
+      });
+      if (assignment)
+        throw new ConflictException({
+          code: 'ROLE_IN_USE',
+          message: 'Reassign all employees before deleting this role.',
+        });
       await tx.rolePermission.deleteMany({ where: { roleId: id } });
-      await tx.employeeRole.deleteMany({ where: { roleId: id } });
       await tx.role.update({
         where: { id, deletedAt: null },
         data: { deletedAt: new Date() },
@@ -347,7 +457,7 @@ export class RolesService {
     return data;
   }
 
-  async importRoles({ file }: ImportRolesDto) {
+  async importRoles({ file, employee }: ImportRolesDto) {
     const roleSheetName = this.excelSheets[this.roleEntityName];
     const dataCreated = await this.excelUtilService.read(file);
     const roleData = dataCreated[roleSheetName];
@@ -358,7 +468,7 @@ export class RolesService {
     }
     const insertData = roleData.map(
       (item, index): Prisma.RoleCreateManyInput => {
-        const parsed = CreateRoleInputSchema.safeParse(item);
+        const parsed = RoleMetadataInputSchema.safeParse(item);
         if (!parsed.success) {
           throw new BadRequestException({
             message: `Invalid role in sheet '${roleSheetName}' at row ${index + 2}.`,
@@ -373,20 +483,48 @@ export class RolesService {
         };
       },
     );
-    const result = await this.prisma.role.createMany({
-      data: insertData,
-      skipDuplicates: true,
-    });
+    const inserted = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const actor =
+          await this.authorizationService.getFreshAuthorizationContext(
+            employee.employeeId,
+            tx,
+          );
+        this.authorizationService.assertCanGrantPermissions(actor, [
+          PermissionKeys.ROLES_CREATE,
+        ]);
+        const roles = await tx.role.createManyAndReturn({
+          data: insertData,
+          skipDuplicates: true,
+          select: { id: true, name: true, description: true },
+        });
+        if (roles.length)
+          await tx.actionLog.create({
+            data: {
+              employeeId: employee.employeeId,
+              actionType: 'ROLES_IMPORTED',
+              details: { before: null, after: roles },
+            },
+          });
+        return roles;
+      },
+    );
     return {
       success: true,
-      message: `Imported ${result.count} roles successfully.`,
+      message: `Imported ${inserted.length} roles successfully.`,
     };
   }
 
-  private async ensureRoleNameAvailable(name: string, excludeId?: string) {
-    const existing = await this.prisma.role.findFirst({
+  private async ensureRoleNameAvailable(
+    tx: ExtendedPrismaTransactionClient,
+    name: string,
+    excludeId?: string,
+  ) {
+    const existing = await tx.role.findFirst({
       where: {
         name,
+        deletedAt: null,
         ...(excludeId ? { id: { not: excludeId } } : {}),
       },
       select: { id: true },

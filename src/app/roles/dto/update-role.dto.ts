@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { CreateRoleInputSchema } from './create-role.dto';
+import { RoleMetadataInputSchema } from './create-role.dto';
 
-export const UpdateRoleInputSchema = CreateRoleInputSchema.partial();
+export const UpdateRoleInputSchema = RoleMetadataInputSchema.partial();
 export class UpdateRoleDto extends createZodDto(UpdateRoleInputSchema) {}

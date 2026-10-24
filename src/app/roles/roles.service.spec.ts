@@ -27,16 +27,32 @@ describe('RoleService', () => {
 
 describe('Role import validation', () => {
   let service: RolesService;
-  let prisma: { role: { createMany: jest.Mock } };
+  let prisma: {
+    role: { createManyAndReturn: jest.Mock };
+    actionLog: { create: jest.Mock };
+    $transaction: jest.Mock;
+  };
   let excel: { read: jest.Mock };
   const input: ImportRolesDto = {
     file: { buffer: Buffer.from('fixture') } as File,
-    employee: {} as never,
+    employee: { employeeId: 'actor' },
+  };
+  const authorization = {
+    getFreshAuthorizationContext: jest.fn().mockResolvedValue({}),
+    assertCanGrantPermissions: jest.fn(),
   };
 
   beforeEach(() => {
     prisma = {
-      role: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      role: {
+        createManyAndReturn: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'imported', name: 'CUSTOM', description: 'Service role' },
+          ]),
+      },
+      actionLog: { create: jest.fn() },
+      $transaction: jest.fn((callback) => callback(prisma)),
     };
     excel = {
       read: jest.fn().mockResolvedValue({ RoleEntity: [{ name: 'WAITER' }] }),
@@ -46,7 +62,7 @@ describe('Role import validation', () => {
       {} as never,
       {} as never,
       excel as never,
-      {} as never,
+      authorization as never,
     );
   });
 
@@ -63,6 +79,7 @@ describe('Role import validation', () => {
           updatedAt: new Date(0),
           rolePermissions: { create: [{ permissionId: 'admin' }] },
           employeeRoles: { create: [{ employeeId: 'attacker' }] },
+          templateRoleId: 'untrusted-template',
         },
       ],
     });
@@ -71,8 +88,8 @@ describe('Role import validation', () => {
       success: true,
       message: 'Imported 1 roles successfully.',
     });
-    expect(prisma.role.createMany).toHaveBeenCalledTimes(1);
-    expect(prisma.role.createMany).toHaveBeenCalledWith({
+    expect(prisma.role.createManyAndReturn).toHaveBeenCalledTimes(1);
+    expect(prisma.role.createManyAndReturn).toHaveBeenCalledWith({
       data: [
         {
           name: 'CUSTOM',
@@ -82,6 +99,19 @@ describe('Role import validation', () => {
         },
       ],
       skipDuplicates: true,
+      select: { id: true, name: true, description: true },
+    });
+    expect(prisma.actionLog.create).toHaveBeenCalledWith({
+      data: {
+        employeeId: 'actor',
+        actionType: 'ROLES_IMPORTED',
+        details: {
+          before: null,
+          after: [
+            { id: 'imported', name: 'CUSTOM', description: 'Service role' },
+          ],
+        },
+      },
     });
   });
 
@@ -90,7 +120,7 @@ describe('Role import validation', () => {
       RoleEntity: [{ name: 'FIRST', description: null }, { name: 'SECOND' }],
     });
     await service.importRoles(input);
-    expect(prisma.role.createMany).toHaveBeenCalledWith({
+    expect(prisma.role.createManyAndReturn).toHaveBeenCalledWith({
       data: [
         {
           name: 'FIRST',
@@ -106,6 +136,7 @@ describe('Role import validation', () => {
         },
       ],
       skipDuplicates: true,
+      select: { id: true, name: true, description: true },
     });
   });
 
@@ -123,7 +154,8 @@ describe('Role import validation', () => {
     await expect(service.importRoles(input)).rejects.toThrow(
       "Invalid role in sheet 'RoleEntity' at row 3.",
     );
-    expect(prisma.role.createMany).not.toHaveBeenCalled();
+    expect(prisma.role.createManyAndReturn).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it.each([{}, { RoleEntity: [] }, { OtherSheet: [{ name: 'CUSTOM' }] }])(
@@ -133,7 +165,7 @@ describe('Role import validation', () => {
       await expect(service.importRoles(input)).rejects.toThrow(
         "Sheet 'RoleEntity' is empty or not found",
       );
-      expect(prisma.role.createMany).not.toHaveBeenCalled();
+      expect(prisma.role.createManyAndReturn).not.toHaveBeenCalled();
     },
   );
 
@@ -141,14 +173,29 @@ describe('Role import validation', () => {
     const error = new BadRequestException('Excel data row limit exceeded.');
     excel.read.mockRejectedValue(error);
     await expect(service.importRoles(input)).rejects.toBe(error);
-    expect(prisma.role.createMany).not.toHaveBeenCalled();
+    expect(prisma.role.createManyAndReturn).not.toHaveBeenCalled();
   });
 
   it('propagates database errors', async () => {
     const error = new Error('Database unavailable');
-    prisma.role.createMany.mockRejectedValue(error);
+    prisma.role.createManyAndReturn.mockRejectedValue(error);
     await expect(service.importRoles(input)).rejects.toBe(error);
-    expect(prisma.role.createMany).toHaveBeenCalledTimes(1);
+    expect(prisma.role.createManyAndReturn).toHaveBeenCalledTimes(1);
+    expect(prisma.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('does not audit skipped duplicates or hide an audit failure', async () => {
+    prisma.role.createManyAndReturn.mockResolvedValueOnce([]);
+    await expect(service.importRoles(input)).resolves.toMatchObject({
+      message: 'Imported 0 roles successfully.',
+    });
+    expect(prisma.actionLog.create).not.toHaveBeenCalled();
+    prisma.actionLog.create.mockRejectedValueOnce(
+      new Error('Audit unavailable'),
+    );
+    await expect(service.importRoles(input)).rejects.toThrow(
+      'Audit unavailable',
+    );
   });
 
   it('does not import protected fields from real normalized Excel headers', async () => {
@@ -175,13 +222,13 @@ describe('Role import validation', () => {
       {} as never,
       {} as never,
       excelUtil,
-      {} as never,
+      authorization as never,
     );
     await importer.importRoles({
       ...input,
       file: { buffer: Buffer.from(await workbook.xlsx.writeBuffer()) } as File,
     });
-    expect(prisma.role.createMany).toHaveBeenCalledWith({
+    expect(prisma.role.createManyAndReturn).toHaveBeenCalledWith({
       data: [
         {
           name: 'CUSTOM',
@@ -191,7 +238,219 @@ describe('Role import validation', () => {
         },
       ],
       skipDuplicates: true,
+      select: { id: true, name: true, description: true },
     });
+  });
+});
+
+describe('Role metadata and templates', () => {
+  const metadata = {
+    id: 'role',
+    name: 'Custom',
+    description: null,
+    isSystemRole: false,
+  };
+  function fixture() {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([
+        {
+          employeeId: 'actor',
+          employeeEmail: 'actor@example.test',
+          roleNames: [],
+          permissionKeys: Object.values(PermissionKeys),
+        },
+      ]),
+      role: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(metadata),
+        create: jest.fn().mockResolvedValue(metadata),
+        update: jest.fn().mockResolvedValue({ ...metadata, name: 'Renamed' }),
+      },
+      actionLog: { create: jest.fn() },
+    };
+    const prisma = { ...tx, $transaction: jest.fn((callback) => callback(tx)) };
+    return {
+      tx,
+      service: new RolesService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        new AuthorizationService(prisma as never),
+      ),
+    };
+  }
+
+  it('creates an empty custom role and audits its metadata in the transaction', async () => {
+    const { tx, service } = fixture();
+    await service.createRole({ name: 'Custom' }, 'actor');
+    expect(tx.role.create).toHaveBeenCalledWith({
+      data: {
+        name: 'Custom',
+        description: undefined,
+        isSystemRole: false,
+        rolePermissions: { create: [] },
+      },
+    });
+    expect(tx.actionLog.create).toHaveBeenCalledWith({
+      data: {
+        employeeId: 'actor',
+        actionType: 'ROLE_CREATED',
+        details: {
+          roleId: 'role',
+          templateRoleId: null,
+          before: null,
+          after: { name: 'Custom', description: null },
+          afterPermissionIds: [],
+        },
+      },
+    });
+  });
+
+  it('copies active grants without copying system identity or assignments', async () => {
+    const { tx, service } = fixture();
+    tx.role.findUnique.mockResolvedValue({
+      rolePermissions: [
+        { permission: { id: 'read', key: PermissionKeys.MENU_READ } },
+      ],
+    });
+    await service.createRole(
+      { name: 'Custom', templateRoleId: 'source' },
+      'actor',
+    );
+    expect(tx.role.create).toHaveBeenCalledWith({
+      data: {
+        name: 'Custom',
+        description: undefined,
+        isSystemRole: false,
+        rolePermissions: { create: [{ permissionId: 'read' }] },
+      },
+    });
+    expect(tx.role.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'source', deletedAt: null },
+      }),
+    );
+    expect(tx.actionLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          details: expect.objectContaining({
+            templateRoleId: 'source',
+            afterPermissionIds: ['read'],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [PermissionKeys.ROLES_CREATE],
+    [
+      PermissionKeys.ROLES_CREATE,
+      PermissionKeys.ROLES_READ,
+      PermissionKeys.ROLE_PERMISSIONS_READ,
+      PermissionKeys.ROLE_PERMISSIONS_UPDATE,
+    ],
+  ])(
+    'rejects template copying with missing action or source-grant authority: %p',
+    async (...keys) => {
+      const { tx, service } = fixture();
+      tx.$queryRaw.mockResolvedValue([
+        { employeeId: 'actor', permissionKeys: keys, roleNames: [] },
+      ] as never);
+      tx.role.findUnique.mockResolvedValue({
+        rolePermissions: [
+          {
+            permission: {
+              id: 'refund',
+              key: PermissionKeys.PAYMENT_REFUNDS_CREATE,
+            },
+          },
+        ],
+      });
+      await expect(
+        service.createRole(
+          { name: 'Custom', templateRoleId: 'source' },
+          'actor',
+        ),
+      ).rejects.toThrow(AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE);
+      expect(tx.role.create).not.toHaveBeenCalled();
+      expect(tx.actionLog.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects missing/deleted templates and active name collisions before writing', async () => {
+    const { tx, service } = fixture();
+    tx.role.findUnique.mockResolvedValue(null);
+    await expect(
+      service.createRole(
+        { name: 'Custom', templateRoleId: 'missing' },
+        'actor',
+      ),
+    ).rejects.toThrow('Role not found');
+    tx.role.findFirst.mockResolvedValue({ id: 'existing' });
+    await expect(
+      service.createRole({ name: 'Custom' }, 'actor'),
+    ).rejects.toThrow(AUTHORIZATION_ERRORS.ROLE_NAME_EXISTS);
+    expect(tx.role.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a template changed since preview without creating an empty or partial role', async () => {
+    const { tx, service } = fixture();
+    tx.role.findUnique.mockResolvedValue({
+      rolePermissions: [
+        { permission: { id: 'read', key: PermissionKeys.MENU_READ } },
+      ],
+    });
+    await expect(
+      service.createRole(
+        { name: 'Custom', templateRoleId: 'source', expectedPermissionIds: [] },
+        'actor',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'AUTHORIZATION_CHANGED' } });
+    expect(tx.role.create).not.toHaveBeenCalled();
+  });
+
+  it('updates only metadata, auditing before/after without touching grants', async () => {
+    const { tx, service } = fixture();
+    await service.updateRole('role', { name: 'Renamed' }, 'actor');
+    expect(tx.role.update).toHaveBeenCalledWith({
+      where: { id: 'role', deletedAt: null },
+      data: { name: 'Renamed', description: undefined },
+    });
+    expect(tx.actionLog.create).toHaveBeenCalledWith({
+      data: {
+        employeeId: 'actor',
+        actionType: 'ROLE_UPDATED',
+        details: {
+          roleId: 'role',
+          before: { name: 'Custom', description: null },
+          after: { name: 'Renamed', description: null },
+        },
+      },
+    });
+  });
+
+  it('protects system metadata and does not audit unchanged metadata', async () => {
+    const { tx, service } = fixture();
+    await service.updateRole('role', { name: 'Custom' }, 'actor');
+    expect(tx.role.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+    tx.role.findUnique.mockResolvedValue({ ...metadata, isSystemRole: true });
+    await expect(
+      service.updateRole('role', { name: 'Renamed' }, 'actor'),
+    ).rejects.toThrow(AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED);
+  });
+
+  it('does not report success when the transactional audit fails', async () => {
+    const { tx, service } = fixture();
+    tx.actionLog.create.mockRejectedValue(new Error('Audit unavailable'));
+    await expect(
+      service.createRole({ name: 'Custom' }, 'actor'),
+    ).rejects.toThrow('Audit unavailable');
+    await expect(
+      service.updateRole('role', { name: 'Renamed' }, 'actor'),
+    ).rejects.toThrow('Audit unavailable');
   });
 });
 
@@ -214,6 +473,7 @@ describe('Role permission delegation', () => {
         },
       ]),
       role: {
+        findFirst: jest.fn().mockResolvedValue(null),
         findUnique: jest.fn().mockResolvedValue({
           id: 'role',
           name: 'CUSTOM',
@@ -231,7 +491,7 @@ describe('Role permission delegation', () => {
       },
       employeeRole: {
         findUnique: jest.fn().mockResolvedValue(null),
-        deleteMany: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       rolePermission: { deleteMany: jest.fn(), createMany: jest.fn() },
       actionLog: { create: jest.fn() },
@@ -290,7 +550,7 @@ describe('Role permission delegation', () => {
     await expect(service.deleteRole('role', 'actor')).rejects.toThrow(
       AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE,
     );
-    expect(tx.employeeRole.deleteMany).not.toHaveBeenCalled();
+    expect(tx.role.update).not.toHaveBeenCalled();
   });
 
   it('cannot rewrite or delete a role assigned to the actor', async () => {
@@ -408,5 +668,17 @@ describe('Role permission delegation', () => {
       data: { deletedAt: expect.any(Date) },
     });
     expect(tx.actionLog.create).toHaveBeenCalled();
+  });
+
+  it('blocks deletion while assigned, even to an inactive or deleted employee', async () => {
+    tx.employeeRole.findFirst.mockResolvedValue({
+      employeeId: 'inactive-employee',
+    });
+    await expect(service.deleteRole('role', 'actor')).rejects.toMatchObject({
+      response: { code: 'ROLE_IN_USE' },
+    });
+    expect(tx.rolePermission.deleteMany).not.toHaveBeenCalled();
+    expect(tx.role.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
   });
 });

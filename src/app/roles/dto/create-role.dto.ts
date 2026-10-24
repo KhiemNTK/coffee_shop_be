@@ -2,7 +2,7 @@ import { ImportExcel } from '../../../common/utils/excel-util/dto/excel-util.dto
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
-export const CreateRoleInputSchema = z.object({
+export const RoleMetadataInputSchema = z.object({
   name: z
     .string()
     .trim()
@@ -15,6 +15,11 @@ export const CreateRoleInputSchema = z.object({
     .max(500, 'Description must not exceed 500 characters')
     .nullable()
     .optional(),
+});
+
+export const CreateRoleInputSchema = RoleMetadataInputSchema.extend({
+  templateRoleId: z.uuid().optional(),
+  expectedPermissionIds: z.array(z.uuid()).max(200).optional(),
 });
 
 class CreateRoleDto extends createZodDto(CreateRoleInputSchema) {}

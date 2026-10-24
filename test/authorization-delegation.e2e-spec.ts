@@ -12,6 +12,7 @@ import { PaginationUtilService } from '../src/common/utils/pagination-util/pagin
 import { PermissionKeys } from '../src/common/consts/permission-keys';
 import { AUTHORIZATION_ERRORS } from '../src/common/consts/message';
 import { RolesService } from '../src/app/roles/roles.service';
+import { ExcelUtilService } from '../src/common/utils/excel-util/excel-util.service';
 
 describe('Authorization delegation (PostgreSQL)', () => {
   let base: PrismaService;
@@ -426,5 +427,240 @@ describe('Authorization delegation (PostgreSQL)', () => {
         },
       }),
     ).toBe(1);
+  });
+
+  it('copies system grants into an independent custom role and blocks deleting it until reassigned', async () => {
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      {} as never,
+      authorization,
+    );
+    const source = await base.rolePermission.findMany({
+      where: { roleId: ids.cashierRole },
+    });
+    const created = await roles.createRole(
+      {
+        name: 'Copied cashier',
+        templateRoleId: ids.cashierRole,
+        expectedPermissionIds: source.map((entry) => entry.permissionId),
+      },
+      ids.delegate,
+    );
+    expect(created.isSystemRole).toBe(false);
+    expect(
+      await base.rolePermission.findMany({
+        where: { roleId: created.id },
+        select: { permissionId: true },
+      }),
+    ).toEqual(source.map((entry) => ({ permissionId: entry.permissionId })));
+    expect(await employees.getEmployeeById(ids.cashier)).not.toHaveProperty(
+      'employeeRoles',
+    );
+    const existing = await base.employeeRole.findMany({
+      where: { employeeId: ids.cashier },
+    });
+    await employees.replaceEmployeeRoles(
+      ids.cashier,
+      { roleIds: [...existing.map((entry) => entry.roleId), created.id] },
+      ids.delegate,
+    );
+    await expect(
+      roles.deleteRole(created.id, ids.delegate),
+    ).rejects.toMatchObject({ response: { code: 'ROLE_IN_USE' } });
+    expect(
+      await base.role.findUnique({ where: { id: created.id } }),
+    ).toMatchObject({ deletedAt: null });
+    await roles.updateRole(
+      created.id,
+      { name: 'Renamed cashier copy' },
+      ids.delegate,
+    );
+    expect(
+      await base.actionLog.findFirst({
+        where: {
+          actionType: 'ROLE_UPDATED',
+          details: { path: ['roleId'], equals: created.id },
+        },
+      }),
+    ).toMatchObject({
+      employeeId: ids.delegate,
+      details: {
+        roleId: created.id,
+        before: { name: 'Copied cashier', description: null },
+        after: { name: 'Renamed cashier copy', description: null },
+      },
+    });
+    await employees.replaceEmployeeRoles(
+      ids.cashier,
+      { roleIds: existing.map((entry) => entry.roleId) },
+      ids.delegate,
+    );
+    await roles.deleteRole(created.id, ids.delegate);
+    expect(
+      await base.rolePermission.count({ where: { roleId: created.id } }),
+    ).toBe(0);
+    expect(
+      await base.role.findUnique({ where: { id: created.id } }),
+    ).toMatchObject({ deletedAt: expect.any(Date) });
+    expect(
+      await base.role.findUnique({ where: { id: ids.cashierRole } }),
+    ).toMatchObject({ name: 'CASHIER', isSystemRole: true, deletedAt: null });
+  });
+
+  it('imports metadata only and audits only rows actually inserted', async () => {
+    const excel = {
+      read: jest.fn().mockResolvedValue({
+        RoleEntity: [
+          {
+            name: 'Imported custom role',
+            description: 'Metadata only',
+            templateRoleId: ids.cashierRole,
+            isSystemRole: true,
+          },
+          { name: 'CASHIER' },
+        ],
+      }),
+    };
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      excel as unknown as ExcelUtilService,
+      authorization,
+    );
+    await expect(
+      roles.importRoles({
+        file: {} as never,
+        employee: { employeeId: ids.delegate },
+      }),
+    ).resolves.toMatchObject({ message: 'Imported 1 roles successfully.' });
+    const created = await base.role.findFirstOrThrow({
+      where: { name: 'Imported custom role' },
+    });
+    expect(created.isSystemRole).toBe(false);
+    expect(
+      await base.rolePermission.count({ where: { roleId: created.id } }),
+    ).toBe(0);
+    expect(
+      await base.actionLog.findFirst({
+        where: { actionType: 'ROLES_IMPORTED' },
+      }),
+    ).toMatchObject({
+      employeeId: ids.delegate,
+      details: {
+        before: null,
+        after: [
+          {
+            id: created.id,
+            name: created.name,
+            description: created.description,
+          },
+        ],
+      },
+    });
+  });
+
+  it('cannot leave an employee assigned to a deleted role during concurrent deletion and assignment', async () => {
+    const { positionId } = await base.employee.findUniqueOrThrow({
+      where: { id: ids.manager },
+    });
+    const id = randomUUID();
+    await base.employee.create({
+      data: {
+        id,
+        email: `${id}@authz-test.example`,
+        username: id,
+        fullName: 'Delete assignment race',
+        password: 'test-only',
+        positionId,
+      },
+    });
+    const role = await base.role.create({
+      data: { name: 'Concurrent role deletion' },
+    });
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      {} as never,
+      authorization,
+    );
+    const results = await Promise.allSettled([
+      roles.deleteRole(role.id, ids.delegate),
+      employees.replaceEmployeeRoles(id, { roleIds: [role.id] }, ids.delegate),
+    ]);
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const stored = await base.role.findUniqueOrThrow({
+      where: { id: role.id },
+    });
+    expect(await base.employeeRole.count({ where: { roleId: role.id } })).toBe(
+      stored.deletedAt ? 0 : 1,
+    );
+  });
+
+  it('rolls back created, copied, imported and renamed roles if their audit insert fails', async () => {
+    const existing = await base.role.create({
+      data: { name: 'Audit rollback source' },
+    });
+    const excel = {
+      read: jest
+        .fn()
+        .mockResolvedValue({ RoleEntity: [{ name: 'Audit rollback import' }] }),
+    };
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      excel as unknown as ExcelUtilService,
+      authorization,
+    );
+    await base.$executeRaw`ALTER TABLE "ActionLog" ADD CONSTRAINT authz_role_audit_failure CHECK ("actionType" NOT IN ('ROLE_CREATED', 'ROLE_UPDATED', 'ROLES_IMPORTED')) NOT VALID`;
+    try {
+      await expect(
+        roles.createRole({ name: 'Audit rollback empty' }, ids.delegate),
+      ).rejects.toThrow();
+      await expect(
+        roles.createRole(
+          { name: 'Audit rollback copy', templateRoleId: ids.cashierRole },
+          ids.delegate,
+        ),
+      ).rejects.toThrow();
+      await expect(
+        roles.updateRole(
+          existing.id,
+          { name: 'Audit rollback renamed' },
+          ids.delegate,
+        ),
+      ).rejects.toThrow();
+      await expect(
+        roles.importRoles({
+          file: {} as never,
+          employee: { employeeId: ids.delegate },
+        }),
+      ).rejects.toThrow();
+      expect(
+        await base.role.count({
+          where: {
+            name: {
+              in: [
+                'Audit rollback empty',
+                'Audit rollback copy',
+                'Audit rollback renamed',
+                'Audit rollback import',
+              ],
+            },
+          },
+        }),
+      ).toBe(0);
+      expect(
+        await base.role.findUnique({ where: { id: existing.id } }),
+      ).toMatchObject({ name: 'Audit rollback source' });
+    } finally {
+      await base.$executeRaw`ALTER TABLE "ActionLog" DROP CONSTRAINT authz_role_audit_failure`;
+    }
   });
 });

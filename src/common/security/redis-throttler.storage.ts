@@ -1,6 +1,7 @@
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import Redis from 'ioredis';
+import { rateLimitUnavailableTotal } from '../observability/metrics';
 
 const INCREMENT_SCRIPT = `
 local hits = redis.call('INCR', KEYS[1])
@@ -49,6 +50,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
       limit,
       blockDuration,
     ).catch(() => {
+      rateLimitUnavailableTotal.inc();
       throw new ServiceUnavailableException({
         code: 'RATE_LIMIT_UNAVAILABLE',
         message: 'Rate limiting is temporarily unavailable. Please retry.',

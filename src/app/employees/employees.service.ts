@@ -149,9 +149,6 @@ export class EmployeesService {
       select: {
         ...EMPLOYEE_PUBLIC_SELECT,
         position: true,
-        employeeRoles: {
-          include: { role: true },
-        },
       },
     });
 

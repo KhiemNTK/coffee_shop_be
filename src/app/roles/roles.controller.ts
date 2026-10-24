@@ -36,8 +36,11 @@ export class RolesController {
 
   @Post()
   @RequirePermissions(PermissionKeys.ROLES_CREATE)
-  createRole(@Body() createRoleDto: CreateRoleDto) {
-    return this.rolesService.createRole(createRoleDto);
+  createRole(
+    @Body() createRoleDto: CreateRoleDto,
+    @Employee('employeeId') actorId: string,
+  ) {
+    return this.rolesService.createRole(createRoleDto, actorId);
   }
 
   @Get()
@@ -94,8 +97,12 @@ export class RolesController {
 
   @Patch(':id')
   @RequirePermissions(PermissionKeys.ROLES_UPDATE)
-  updateRole(@Param() { id }: IDDto, @Body() updateRoleDto: UpdateRoleDto) {
-    return this.rolesService.updateRole(id, updateRoleDto);
+  updateRole(
+    @Param() { id }: IDDto,
+    @Body() updateRoleDto: UpdateRoleDto,
+    @Employee('employeeId') actorId: string,
+  ) {
+    return this.rolesService.updateRole(id, updateRoleDto, actorId);
   }
 
   @Delete(':id')

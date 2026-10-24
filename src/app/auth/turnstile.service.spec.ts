@@ -1,9 +1,11 @@
 import { ConfigService } from '@nestjs/config';
 import {
   ForbiddenException,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { TurnstileService } from './turnstile.service';
+import { turnstileVerificationsTotal } from '../../common/observability/metrics';
 
 const config = (secret?: string, environment = 'production') => {
   const values: Record<string, string | undefined> = {
@@ -18,6 +20,12 @@ const config = (secret?: string, environment = 'production') => {
 };
 
 describe('TurnstileService', () => {
+  const errorLog = jest.fn();
+  beforeEach(() => {
+    errorLog.mockClear();
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(errorLog);
+    turnstileVerificationsTotal.reset();
+  });
   afterEach(() => jest.restoreAllMocks());
 
   it('permits unconfigured development but fails closed in production', async () => {
@@ -103,5 +111,65 @@ describe('TurnstileService', () => {
         'password_reset',
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it.each([
+    ['invalid-input-secret', 503, 'TURNSTILE_UNAVAILABLE'],
+    ['missing-input-secret', 503, 'TURNSTILE_UNAVAILABLE'],
+    ['bad-request', 503, 'TURNSTILE_UNAVAILABLE'],
+    ['internal-error', 503, 'TURNSTILE_UNAVAILABLE'],
+    ['invalid-input-response', 403, 'TURNSTILE_INVALID'],
+    ['timeout-or-duplicate', 403, 'TURNSTILE_EXPIRED'],
+  ])(
+    'maps %s without blaming users for provider failures',
+    async (code, status, expectedCode) => {
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({ success: false, 'error-codes': [code] }),
+          ),
+        );
+      await expect(
+        new TurnstileService(config('private-secret')).verify('private-token'),
+      ).rejects.toMatchObject({ status, response: { code: expectedCode } });
+      const logs = JSON.stringify(errorLog.mock.calls);
+      expect(logs).not.toContain('private-secret');
+      expect(logs).not.toContain('private-token');
+      if (status === 503) expect(logs).toContain(code);
+    },
+  );
+
+  it.each([null, {}, { success: 'true' }])(
+    'fails closed for malformed Siteverify responses: %j',
+    async (body) => {
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(JSON.stringify(body)));
+      await expect(
+        new TurnstileService(config('private-secret')).verify('private-token'),
+      ).rejects.toMatchObject({
+        status: 503,
+        response: { code: 'TURNSTILE_UNAVAILABLE' },
+      });
+    },
+  );
+
+  it('records bounded outcomes without sending missing tokens to Siteverify', async () => {
+    const fetchSpy = jest.spyOn(globalThis, 'fetch');
+    await expect(
+      new TurnstileService(config('private-secret')).verify(
+        undefined,
+        undefined,
+        'unbounded-action',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'TURNSTILE_REQUIRED' } });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect((await turnstileVerificationsTotal.get()).values).toEqual([
+      expect.objectContaining({
+        value: 1,
+        labels: { action: 'other', outcome: 'required' },
+      }),
+    ]);
   });
 });
