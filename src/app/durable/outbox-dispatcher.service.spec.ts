@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { OutboxEventStatus } from '@prisma/client';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -6,14 +7,21 @@ import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import type { ClaimedOutboxEvent } from '../../common/types';
 import { DomainEventBusService } from './domain-event-bus.service';
 import { OutboxDispatcherService } from './outbox-dispatcher.service';
+import { getRequestContext } from '../../common/request-context';
 import {
   OutboxDeferredError,
   OutboxPermanentError,
 } from './outbox-delivery.error';
 
+jest.mock('node:crypto', () => ({
+  ...jest.requireActual('node:crypto'),
+  randomUUID: jest.fn(),
+}));
+
 jest.mock('bullmq', () => ({
   Queue: jest.fn().mockImplementation(() => ({
     on: jest.fn(),
+    waitUntilReady: jest.fn().mockResolvedValue(undefined),
     close: jest.fn().mockResolvedValue(undefined),
   })),
   Worker: jest.fn().mockImplementation(() => ({
@@ -23,6 +31,7 @@ jest.mock('bullmq', () => ({
 }));
 
 describe('OutboxDispatcherService', () => {
+  const executionLease = '00000000-0000-4000-8000-000000000099';
   const event = {
     id: 'event-id',
     topic: 'order',
@@ -32,6 +41,7 @@ describe('OutboxDispatcherService', () => {
     payload: { invoiceId: 'invoice-id' },
     attempts: 0,
     lockedBy: 'lease-id',
+    availableAt: new Date(0),
     occurredAt: new Date(),
   };
   const prisma = {
@@ -48,13 +58,14 @@ describe('OutboxDispatcherService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.mocked(randomUUID).mockReturnValue(executionLease);
     config.get.mockReturnValue(undefined);
     prisma.$queryRaw.mockResolvedValue([event]);
     prisma.$executeRaw.mockResolvedValue(0);
     prisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     prisma.outboxEvent.findUnique.mockResolvedValue({
       ...event,
-      status: OutboxEventStatus.PROCESSING,
+      status: OutboxEventStatus.ENQUEUED,
     });
     prisma.idempotencyRequest.deleteMany.mockResolvedValue({ count: 0 });
     eventBus = new DomainEventBusService();
@@ -78,7 +89,7 @@ describe('OutboxDispatcherService', () => {
       where: {
         id: event.id,
         status: OutboxEventStatus.PROCESSING,
-        lockedBy: event.lockedBy,
+        lockedBy: executionLease,
       },
       data: expect.objectContaining({
         status: OutboxEventStatus.PUBLISHED,
@@ -133,6 +144,10 @@ describe('OutboxDispatcherService', () => {
       expect.any(Function),
       expect.objectContaining({ connection }),
     );
+    const queueOptions = jest.mocked(Queue).mock.calls[0][1];
+    expect(queueOptions?.connection).toHaveProperty('commandTimeout', 2_000);
+    const workerOptions = jest.mocked(Worker).mock.calls[0][2];
+    expect(workerOptions?.connection).not.toHaveProperty('commandTimeout');
     await service.onModuleDestroy();
   });
 
@@ -147,7 +162,7 @@ describe('OutboxDispatcherService', () => {
       where: {
         id: event.id,
         status: OutboxEventStatus.PROCESSING,
-        lockedBy: event.lockedBy,
+        lockedBy: executionLease,
       },
       data: expect.objectContaining({
         status: OutboxEventStatus.PENDING,
@@ -161,6 +176,11 @@ describe('OutboxDispatcherService', () => {
   it('moves a repeatedly failing event to dead-letter', async () => {
     const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation();
     prisma.$queryRaw.mockResolvedValue([{ ...event, attempts: 4 }]);
+    prisma.outboxEvent.findUnique.mockResolvedValue({
+      ...event,
+      status: OutboxEventStatus.ENQUEUED,
+      attempts: 4,
+    });
     eventBus.on(event.eventName, () => {
       throw new Error('permanent failure');
     });
@@ -171,7 +191,7 @@ describe('OutboxDispatcherService', () => {
       where: {
         id: event.id,
         status: OutboxEventStatus.PROCESSING,
-        lockedBy: event.lockedBy,
+        lockedBy: executionLease,
       },
       data: expect.objectContaining({
         status: OutboxEventStatus.DEAD_LETTER,
@@ -182,6 +202,8 @@ describe('OutboxDispatcherService', () => {
     expect(errorLog).toHaveBeenCalledWith({
       event: 'outbox.event.dead_lettered',
       outboxEventId: event.id,
+      eventName: event.eventName,
+      aggregateId: event.aggregateId,
       attempts: 5,
       error: 'permanent failure',
     });
@@ -189,6 +211,7 @@ describe('OutboxDispatcherService', () => {
 
   it('releases a claimed event when Redis enqueue is unavailable', async () => {
     const queue = {
+      waitUntilReady: jest.fn().mockResolvedValue(undefined),
       getJob: jest.fn().mockResolvedValue(undefined),
       add: jest.fn().mockRejectedValue(new Error('redis unavailable')),
       close: jest.fn().mockResolvedValue(undefined),
@@ -201,7 +224,9 @@ describe('OutboxDispatcherService', () => {
     expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
       where: {
         id: event.id,
-        status: OutboxEventStatus.PROCESSING,
+        status: {
+          in: [OutboxEventStatus.ENQUEUED, OutboxEventStatus.PROCESSING],
+        },
         lockedBy: event.lockedBy,
       },
       data: expect.objectContaining({
@@ -223,6 +248,7 @@ describe('OutboxDispatcherService', () => {
         retry: jest.fn().mockResolvedValue(undefined),
       };
       const queue = {
+        waitUntilReady: jest.fn().mockResolvedValue(undefined),
         getJob: jest.fn().mockResolvedValue(job),
         add: jest.fn(),
       };
@@ -246,6 +272,7 @@ describe('OutboxDispatcherService', () => {
         updateData: jest.fn(),
       };
       const queue = {
+        waitUntilReady: jest.fn().mockResolvedValue(undefined),
         getJob: jest.fn().mockResolvedValue(job),
         add: jest.fn(),
       };
@@ -272,24 +299,14 @@ describe('OutboxDispatcherService', () => {
       }
     ).processJob(job);
 
-  it('records database read failures through the retry path', async () => {
+  it('retries a failed database read without modifying an unowned event', async () => {
     prisma.outboxEvent.findUnique.mockRejectedValue(
       new Error('database unavailable'),
     );
     await expect(processJob(queuedJob())).rejects.toThrow(
       'database unavailable',
     );
-    expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: event.id,
-        status: OutboxEventStatus.PROCESSING,
-        lockedBy: event.lockedBy,
-      },
-      data: expect.objectContaining({
-        attempts: 1,
-        lastError: 'database unavailable',
-      }),
-    });
+    expect(prisma.outboxEvent.updateMany).not.toHaveBeenCalled();
   });
 
   it.each(['redis', 'direct'])(
@@ -310,8 +327,10 @@ describe('OutboxDispatcherService', () => {
       expect(deferred).toEqual({
         where: {
           id: event.id,
-          status: OutboxEventStatus.PROCESSING,
-          lockedBy: event.lockedBy,
+          status: {
+            in: [OutboxEventStatus.ENQUEUED, OutboxEventStatus.PROCESSING],
+          },
+          lockedBy: executionLease,
         },
         data: {
           status: OutboxEventStatus.PENDING,
@@ -353,7 +372,7 @@ describe('OutboxDispatcherService', () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation();
     prisma.outboxEvent.findUnique.mockResolvedValue({
       ...event,
-      status: OutboxEventStatus.PROCESSING,
+      status: OutboxEventStatus.ENQUEUED,
       attempts: 4,
     });
     eventBus.on(event.eventName, () => {
@@ -363,8 +382,22 @@ describe('OutboxDispatcherService', () => {
     expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
       where: {
         id: event.id,
-        status: OutboxEventStatus.PROCESSING,
+        status: OutboxEventStatus.ENQUEUED,
         lockedBy: event.lockedBy,
+        attempts: 4,
+        availableAt: { equals: event.availableAt, lte: expect.any(Date) },
+      },
+      data: {
+        status: OutboxEventStatus.PROCESSING,
+        lockedBy: executionLease,
+        lockedAt: expect.any(Date),
+      },
+    });
+    expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: event.id,
+        status: OutboxEventStatus.PROCESSING,
+        lockedBy: executionLease,
       },
       data: expect.objectContaining({
         attempts: 5,
@@ -393,14 +426,20 @@ describe('OutboxDispatcherService', () => {
       retry: jest.fn(),
       updateData: jest.fn(),
     };
-    const queue = { getJob: jest.fn().mockResolvedValue(job), add: jest.fn() };
+    const queue = {
+      waitUntilReady: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockResolvedValue(job),
+      add: jest.fn(),
+    };
     (service as unknown as { queue: typeof queue }).queue = queue;
     await service.drainOnce();
     expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
           id: event.id,
-          status: OutboxEventStatus.PROCESSING,
+          status: {
+            in: [OutboxEventStatus.ENQUEUED, OutboxEventStatus.PROCESSING],
+          },
           lockedBy: event.lockedBy,
         },
         data: expect.objectContaining({ status: OutboxEventStatus.PENDING }),
@@ -412,16 +451,241 @@ describe('OutboxDispatcherService', () => {
 
   it('fences a delivery that loses its lease while the consumer is running', async () => {
     eventBus.on(event.eventName, () => undefined);
-    prisma.outboxEvent.updateMany.mockResolvedValue({ count: 0 });
+    prisma.outboxEvent.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
     await processJob(queuedJob());
     expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
           id: event.id,
           status: OutboxEventStatus.PROCESSING,
-          lockedBy: event.lockedBy,
+          lockedBy: executionLease,
         },
       }),
     );
+  });
+
+  it.each(['readiness', 'getJob'])(
+    'bounds an unresponsive Redis %s, releases the unqueued batch and permits the next drain',
+    async (phase) => {
+      jest.useFakeTimers();
+      let finishRead!: (job: undefined) => void;
+      const stalled = new Promise<undefined>((resolve) => {
+        finishRead = resolve;
+      });
+      const queue = {
+        waitUntilReady: jest.fn().mockResolvedValue(undefined),
+        getJob: jest.fn().mockResolvedValue(undefined),
+        add: jest.fn().mockResolvedValue(undefined),
+      };
+      if (phase === 'readiness')
+        queue.waitUntilReady.mockReturnValueOnce(stalled);
+      else queue.getJob.mockReturnValueOnce(stalled);
+      Reflect.set(service, 'queue', queue);
+      const second = { ...event, id: 'second-event', lockedBy: 'second-lease' };
+      prisma.$queryRaw.mockResolvedValue([event, second]);
+      try {
+        const drain = service.drainOnce();
+        expect(service.drainOnce()).toBe(drain);
+        await jest.advanceTimersByTimeAsync(2_000);
+        await drain;
+        expect(queue.add).not.toHaveBeenCalled();
+        expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              id: event.id,
+              status: { in: ['ENQUEUED', 'PROCESSING'] },
+              lockedBy: event.lockedBy,
+            },
+            data: expect.objectContaining({
+              status: 'PENDING',
+              lastError: 'Outbox Redis operation timed out',
+            }),
+          }),
+        );
+        expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+          where: {
+            status: 'ENQUEUED',
+            OR: [{ id: second.id, lockedBy: second.lockedBy }],
+          },
+          data: {
+            status: 'PENDING',
+            lockedAt: null,
+            lockedBy: null,
+            availableAt: expect.any(Date),
+            lastError: 'Outbox dispatch batch interrupted.',
+          },
+        });
+        finishRead(undefined);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(queue.add).not.toHaveBeenCalled();
+        prisma.$queryRaw.mockResolvedValue([event]);
+        await service.drainOnce();
+        expect(queue.add).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    },
+  );
+
+  it('joins an in-flight enqueue, releases remaining claims and closes worker before queue', async () => {
+    let finishRead!: (job: undefined) => void;
+    const read = new Promise<undefined>((resolve) => {
+      finishRead = resolve;
+    });
+    const order: string[] = [];
+    const queue = {
+      waitUntilReady: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockReturnValue(read),
+      add: jest.fn().mockImplementation(() => {
+        order.push('enqueue');
+        return Promise.resolve();
+      }),
+      close: jest.fn().mockImplementation(() => {
+        order.push('queue');
+        return Promise.resolve();
+      }),
+      disconnect: jest.fn(),
+    };
+    const worker = {
+      close: jest.fn().mockImplementation(() => {
+        order.push('worker');
+        return Promise.resolve();
+      }),
+      disconnect: jest.fn(),
+    };
+    Reflect.set(service, 'queue', queue);
+    Reflect.set(service, 'worker', worker);
+    const second = { ...event, id: 'unqueued' };
+    prisma.$queryRaw.mockResolvedValue([event, second]);
+    const drain = service.drainOnce();
+    await new Promise(setImmediate);
+    expect(queue.getJob).toHaveBeenCalledTimes(1);
+    const shutdown = service.onModuleDestroy();
+    expect(service.onModuleDestroy()).toBe(shutdown);
+    await service.drainOnce();
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(queue.close).not.toHaveBeenCalled();
+    finishRead(undefined);
+    await shutdown;
+    await drain;
+    expect(order).toEqual(['enqueue', 'worker', 'queue']);
+    await service.onModuleDestroy();
+    expect(queue.close).toHaveBeenCalledTimes(1);
+    expect(worker.close).toHaveBeenCalledTimes(1);
+    expect(queue.getJob).toHaveBeenCalledTimes(1);
+    expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          status: 'ENQUEUED',
+          OR: [{ id: second.id, lockedBy: second.lockedBy }],
+        },
+        data: expect.objectContaining({
+          status: 'PENDING',
+          lastError: 'Outbox dispatcher stopped before enqueue.',
+        }),
+      }),
+    );
+  });
+
+  it('does not claim after shutdown starts during a pending claim', async () => {
+    let finishClaim!: (events: (typeof event)[]) => void;
+    prisma.$queryRaw.mockReturnValue(
+      new Promise<(typeof event)[]>((resolve) => {
+        finishClaim = resolve;
+      }),
+    );
+    const listener = jest.fn();
+    eventBus.on(event.eventName, listener);
+    const drain = service.drainOnce();
+    await new Promise(setImmediate);
+    const shutdown = service.onModuleDestroy();
+    finishClaim([event]);
+    await shutdown;
+    await drain;
+    await service.drainOnce();
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(listener).not.toHaveBeenCalled();
+    expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          status: 'ENQUEUED',
+          OR: [{ id: event.id, lockedBy: event.lockedBy }],
+        },
+        data: expect.objectContaining({ status: 'PENDING' }),
+      }),
+    );
+  });
+
+  it('renews a running execution without overlapping renewal queries and restores its request context', async () => {
+    jest.useFakeTimers();
+    let finish!: () => void;
+    let finishRenewal!: (result: { count: number }) => void;
+    prisma.outboxEvent.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ count: number }>((resolve) => {
+            finishRenewal = resolve;
+          }),
+      );
+    const contextSeen = jest.fn();
+    prisma.outboxEvent.findUnique.mockResolvedValue({
+      ...event,
+      status: OutboxEventStatus.ENQUEUED,
+      context: { requestId: 'request-12345678', employeeId: 'employee-id' },
+    });
+    eventBus.on(event.eventName, async () => {
+      contextSeen(getRequestContext());
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    });
+    try {
+      const delivery = processJob(queuedJob());
+      await jest.advanceTimersByTimeAsync(20_000);
+      expect(contextSeen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: 'request-12345678',
+          employeeId: 'employee-id',
+          outboxEventId: event.id,
+        }),
+      );
+      expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+        where: { id: event.id, status: 'PROCESSING', lockedBy: executionLease },
+        data: { lockedAt: expect.any(Date) },
+      });
+      await jest.advanceTimersByTimeAsync(20_000);
+      expect(prisma.outboxEvent.updateMany).toHaveBeenCalledTimes(2);
+      finishRenewal({ count: 1 });
+      finish();
+      await delivery;
+      expect(jest.getTimerCount()).toBe(0);
+      expect(getRequestContext()).toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('checks abandoned leases every 15 seconds independently of five-minute cleanup', async () => {
+    jest.useFakeTimers();
+    prisma.$queryRaw.mockResolvedValue([]);
+    try {
+      await service.drainOnce();
+      await jest.advanceTimersByTimeAsync(15_000);
+      await service.drainOnce();
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(6);
+      const recovery = prisma.outboxEvent.updateMany.mock.calls.filter(
+        ([args]) => args.where.lockedAt,
+      );
+      expect(recovery).toHaveLength(2);
+      expect(recovery[1][0].where).toEqual({
+        status: { in: ['ENQUEUED', 'PROCESSING'] },
+        lockedAt: { lt: new Date(Date.now() - 90_000) },
+      });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

@@ -9,7 +9,7 @@ import type {
   IdempotentOperation,
   IdempotentOperationInput,
 } from '../../common/types';
-import { convertDecimalsToNumbers } from '../../common/utils/decimal-response.util';
+import { serializeDecimalResponse } from '../../common/utils/decimal-response.util';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -111,7 +111,7 @@ export class IdempotencyService {
 
   private toJson(value: unknown): Prisma.InputJsonValue {
     return JSON.parse(
-      JSON.stringify(convertDecimalsToNumbers(value)),
+      JSON.stringify(serializeDecimalResponse(value)),
     ) as Prisma.InputJsonValue;
   }
 

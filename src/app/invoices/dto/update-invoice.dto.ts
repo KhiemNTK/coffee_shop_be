@@ -1,12 +1,12 @@
 import { PaymentMethod, PaymentStatus } from '@prisma/client';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { DecimalInputSchema } from './create-invoice.dto';
+import { MoneyInputSchema } from '../../../common/validation/money.schema';
 
 export const UpdateInvoicePaymentInputSchema = z.object({
   paymentStatus: z.literal(PaymentStatus.PAID),
   paymentMethod: z.enum([PaymentMethod.CASH, PaymentMethod.CARD]).optional(),
-  amountTendered: DecimalInputSchema.optional(),
+  amountTendered: MoneyInputSchema.optional(),
   closeSessionAfterPayment: z.boolean().optional().default(true),
 });
 

@@ -372,4 +372,47 @@ describe('PrintingService receipt reprints', () => {
     ).rejects.toBeInstanceOf(ConflictException);
     expect(tx.printJob.create).not.toHaveBeenCalled();
   });
+
+  it('builds a first receipt from the immutable document, not renamed live rows', async () => {
+    tx.printJob.findFirst.mockResolvedValue(null);
+    const invoice = await tx.invoice.findFirst();
+    tx.invoice.findFirst.mockResolvedValue({
+      ...invoice,
+      documentSnapshot: {
+        version: 1,
+        source: 'ISSUED',
+        tableId: 'original-table',
+        tableName: 'Original table',
+        issuedByName: 'Invoice issuer',
+        promotionName: null,
+        items: [
+          {
+            orderItemId: 'item-id',
+            menuItemId: 'menu-id',
+            name: 'Original coffee',
+            quantity: 2,
+            unitPrice: '25000.00',
+            note: null,
+            selectedOptions: [],
+          },
+        ],
+      },
+    });
+    const result = await service.reprintReceipt(
+      'invoice-id',
+      'employee-id',
+      dto,
+    );
+    expect(result.payload).toMatchObject({
+      tableName: 'Original table',
+      cashierName: 'Renamed cashier',
+      items: [
+        {
+          name: 'Original coffee',
+          unitPrice: '25000.00',
+          lineTotal: '50000.00',
+        },
+      ],
+    });
+  });
 });

@@ -2,3 +2,4 @@ export * from './create-invoice.dto';
 export * from './get-invoice.dto';
 export * from './update-invoice.dto';
 export * from './cash-refund.dto';
+export * from './void-invoice.dto';

@@ -31,6 +31,7 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
+import { assertPosOrderMutationAllowed } from '../orders/online-order-policy';
 import { CreatePaymentAttemptDto, GetPaymentAttemptsDto } from './dto';
 import { VnpayService } from './vnpay.service';
 import { MomoService } from './momo.service';
@@ -148,6 +149,9 @@ export class PaymentsService {
               invoiceNumber: true,
               totalAmount: true,
               paymentStatus: true,
+              orderSession: {
+                select: { onlineOrderRequest: { select: { id: true } } },
+              },
             },
           });
           if (!invoice) {
@@ -155,6 +159,9 @@ export class PaymentsService {
               `Invoice with ID ${invoiceId} not found.`,
             );
           }
+          assertPosOrderMutationAllowed(
+            invoice.orderSession?.onlineOrderRequest,
+          );
           if (invoice.paymentStatus !== PaymentStatus.UNPAID) {
             throw new ConflictException(
               'Only unpaid invoices can create payment attempts.',
@@ -185,6 +192,7 @@ export class PaymentsService {
             tx,
             employeeId,
           );
+          await this.invoicesService.reserveInvoiceStock(tx, invoiceId);
           const now = new Date();
           const ttlMinutes = this.config.get<number>(
             `${provider}_ATTEMPT_TTL_MINUTES`,

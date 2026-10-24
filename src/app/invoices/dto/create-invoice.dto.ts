@@ -1,14 +1,10 @@
 import { PaymentMethod } from '@prisma/client';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-
-export const DecimalInputSchema = z.union([
-  z
-    .string()
-    .trim()
-    .regex(/^\d+(\.\d{1,4})?$/, 'Invalid decimal value'),
-  z.number().nonnegative(),
-]);
+import {
+  MoneyInputSchema,
+  TaxRateInputSchema,
+} from '../../../common/validation/money.schema';
 
 const InvoiceItemIdsSchema = z
   .array(z.uuid('Invalid UUID for order item'))
@@ -20,12 +16,17 @@ export const CreateInvoiceInputSchema = z.object({
   orderSessionId: z.uuid('Invalid UUID for order session'),
   orderItemIds: InvoiceItemIdsSchema,
   promotionId: z.uuid('Invalid UUID for promotion').nullable().optional(),
-  taxRate: DecimalInputSchema.optional(),
+  taxRate: TaxRateInputSchema.optional(),
+  quoteFingerprint: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  expectedTotal: MoneyInputSchema.optional(),
 });
 
 export const CheckoutInvoiceInputSchema = CreateInvoiceInputSchema.extend({
   paymentMethod: z.enum(PaymentMethod),
-  amountTendered: DecimalInputSchema.optional(),
+  amountTendered: MoneyInputSchema.optional(),
   closeSessionAfterPayment: z.boolean().optional().default(true),
   idempotencyKey: z
     .string()

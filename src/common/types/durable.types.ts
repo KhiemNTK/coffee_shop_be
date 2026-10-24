@@ -1,5 +1,12 @@
-import type { Prisma } from '@prisma/client';
 import type { ExtendedPrismaTransactionClient } from './prisma.types';
+import type { RequestContext } from './request-context.types';
+
+export type OutboxDeliveryContext = Partial<
+  Pick<RequestContext, 'requestId' | 'employeeId' | 'traceId'>
+> & {
+  traceparent?: string;
+  tracestate?: string;
+};
 
 export interface OutboxEventInput {
   topic: 'order' | 'inventory' | 'payment' | 'auth' | 'reports';
@@ -26,7 +33,8 @@ export interface ClaimedOutboxEvent {
   eventName: string;
   aggregateType: string;
   aggregateId: string;
-  payload: Prisma.JsonValue;
+  payload: unknown;
+  context?: unknown;
   attempts: number;
   lockedBy: string;
   occurredAt: Date;

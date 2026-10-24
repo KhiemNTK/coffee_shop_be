@@ -2,7 +2,7 @@ import { ConflictException } from '@nestjs/common';
 import { IdempotencyRequestStatus, Prisma } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { IdempotencyService } from './idempotency.service';
-import { convertDecimalsToNumbers } from '../../common/utils/decimal-response.util';
+import { serializeDecimalResponse } from '../../common/utils/decimal-response.util';
 
 describe('IdempotencyService', () => {
   const tx = {
@@ -160,9 +160,33 @@ describe('IdempotencyService', () => {
     });
     const replay = await service.execute(input, operation);
     expect(stored.response.totalAmount).toBe(42000);
-    expect(JSON.parse(JSON.stringify(convertDecimalsToNumbers(first)))).toEqual(
+    expect(JSON.parse(JSON.stringify(serializeDecimalResponse(first)))).toEqual(
       replay,
     );
     expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves large money in the first HTTP representation and the stored replay', async () => {
+    const input = {
+      employeeId: 'employee',
+      operation: 'invoice.checkout',
+      key: 'wide-money',
+      request: {},
+    };
+    const first = await service.execute(input, () =>
+      Promise.resolve({
+        totalAmount: new Prisma.Decimal('9999999999999999.99'),
+      }),
+    );
+    const data = tx.idempotencyRequest.update.mock.calls[0][0].data;
+    prisma.idempotencyRequest.findUnique.mockResolvedValue({
+      ...data,
+      requestHash:
+        tx.idempotencyRequest.create.mock.calls[0][0].data.requestHash,
+    });
+    expect(data.response.totalAmount).toBe('9999999999999999.99');
+    expect(serializeDecimalResponse(first)).toEqual(
+      await service.execute(input, jest.fn()),
+    );
   });
 });

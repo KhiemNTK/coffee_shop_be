@@ -22,6 +22,7 @@ describe('Pre-check transaction integrity (PostgreSQL)', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     return new PrintingService(
       client as never,

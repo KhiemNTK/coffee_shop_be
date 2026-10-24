@@ -15,6 +15,7 @@ import { Throttle } from '@nestjs/throttler';
 import {
   AddOrderItemsDto,
   CancelOrderItemDto,
+  CancelSessionDto,
   ClearDiningTableDto,
   RemakeOrderItemDto,
   GetHandoffItemsDto,
@@ -242,31 +243,53 @@ export class OrdersController {
 
   @Delete('sessions/:id')
   @RequirePermissions(PermissionKeys.ORDERS_SESSIONS_CANCEL)
-  cancelSession(@Param() { id }: IDDto) {
-    return this.ordersService.cancelSession(id);
+  cancelSession(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CancelSessionDto,
+  ) {
+    return this.ordersService.cancelSession(id, employeeId, dto.reason);
   }
 
   @Post('sessions/transfer-table')
   @RequirePermissions(PermissionKeys.ORDERS_TABLES_TRANSFER)
-  transferTable(@Body() dto: TransferDiningTableDto) {
-    return this.ordersService.transferTable(dto);
+  transferTable(
+    @Body() dto: TransferDiningTableDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.transferTable(dto, employeeId);
   }
 
   @Post('sessions/merge')
   @RequirePermissions(PermissionKeys.ORDERS_TABLES_MERGE)
-  mergeTables(@Body() dto: MergeDiningTableDto) {
-    return this.ordersService.mergeTables(dto);
+  mergeTables(
+    @Body() dto: MergeDiningTableDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.mergeTables(dto, employeeId);
   }
 
   @Post('sessions/split')
   @RequirePermissions(PermissionKeys.ORDERS_TABLES_SPLIT)
-  splitTable(@Body() dto: SplitOrderSessionDto) {
-    return this.ordersService.splitTable(dto);
+  splitTable(
+    @Body() dto: SplitOrderSessionDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.splitTable(dto, employeeId);
   }
 
   @Post('tables/:id/clear')
   @RequirePermissions(PermissionKeys.ORDERS_TABLES_CLEAR)
-  clearTable(@Param() { id }: IDDto, @Body() dto: ClearDiningTableDto) {
-    return this.ordersService.clearTable(id, dto.expectedOrderSessionId);
+  clearTable(
+    @Param() { id }: IDDto,
+    @Body() dto: ClearDiningTableDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.ordersService.clearTable(
+      id,
+      dto.expectedOrderSessionId,
+      employeeId,
+      dto.reason,
+    );
   }
 }

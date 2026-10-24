@@ -254,9 +254,9 @@ describe('OrdersService', () => {
       orderItems: [],
       onlineOrderRequest: { id: 'request-id' },
     });
-    await expect(service.cancelSession('session-id')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(
+      service.cancelSession('session-id', 'employee-id', 'Customer cancelled'),
+    ).rejects.toBeInstanceOf(ConflictException);
     expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
@@ -1175,6 +1175,28 @@ describe('OrdersService', () => {
     expect(page.list[0]).not.toHaveProperty('kitchenTicketItem');
   });
 
+  it('rejects cancelling one original online-order line without changing stock or waste', async () => {
+    tx.orderItem.findUnique.mockResolvedValue({
+      id: 'item-id',
+      serveStatus: ServeStatus.READY,
+      isPaid: false,
+      invoiceId: null,
+      orderSession: {
+        sessionStatus: SessionStatus.ACTIVE,
+        onlineOrderRequest: { id: 'request-id' },
+      },
+    });
+    await expect(
+      service.cancelItem('item-id', 'employee-id', { reason: 'Wrong drink' }),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.recordWaste).not.toHaveBeenCalled();
+    expect(outbox.enqueue).not.toHaveBeenCalled();
+  });
+
   it('rejects cancelling a paid order item', async () => {
     tx.orderItem.findUnique.mockResolvedValue({
       id: 'order-item-id',
@@ -1473,12 +1495,15 @@ describe('OrdersService', () => {
     ]);
 
     await expect(
-      service.mergeTables({
-        sourceTableIds: ['source-table-id'],
-        destinationTableId: 'destination-table-id',
-        sourceOrderSessionIds: ['source-session-id'],
-        destinationOrderSessionId: 'target-session-id',
-      }),
+      service.mergeTables(
+        {
+          sourceTableIds: ['source-table-id'],
+          destinationTableId: 'destination-table-id',
+          sourceOrderSessionIds: ['source-session-id'],
+          destinationOrderSessionId: 'target-session-id',
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
@@ -1496,11 +1521,14 @@ describe('OrdersService', () => {
       });
     tx.orderSession.findFirst.mockResolvedValue(null);
     await expect(
-      service.transferTable({
-        fromTableId: 'source-table',
-        toTableId: 'target-table',
-        sourceOrderSessionId: 'old-session',
-      }),
+      service.transferTable(
+        {
+          fromTableId: 'source-table',
+          toTableId: 'target-table',
+          sourceOrderSessionId: 'old-session',
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(tx.orderSession.findFirst).toHaveBeenCalledWith({
       where: {
@@ -1516,12 +1544,15 @@ describe('OrdersService', () => {
   it('does not merge into a newer destination session', async () => {
     tx.orderSession.findFirst.mockResolvedValue(null);
     await expect(
-      service.mergeTables({
-        sourceTableIds: ['A1'],
-        destinationTableId: 'A2',
-        sourceOrderSessionIds: ['source'],
-        destinationOrderSessionId: 'old-target',
-      }),
+      service.mergeTables(
+        {
+          sourceTableIds: ['A1'],
+          destinationTableId: 'A2',
+          sourceOrderSessionIds: ['source'],
+          destinationOrderSessionId: 'old-target',
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(tx.orderSession.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1542,11 +1573,16 @@ describe('OrdersService', () => {
       orderItems: [],
     });
     await expect(
-      service.clearTable('table-id', 'old-session'),
+      service.clearTable(
+        'table-id',
+        'old-session',
+        'employee-id',
+        'Customer cancelled',
+      ),
     ).rejects.toBeInstanceOf(ConflictException);
-    await expect(service.clearTable('table-id', null)).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(
+      service.clearTable('table-id', null, 'employee-id', 'Customer cancelled'),
+    ).rejects.toBeInstanceOf(ConflictException);
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
@@ -1576,17 +1612,20 @@ describe('OrdersService', () => {
     ]);
 
     await expect(
-      service.splitTable({
-        sourceOrderSessionId: 'source-session-id',
-        destinationTableId: 'destination-table-id',
-        itemsToMove: [
-          {
-            orderItemId: 'order-item-id',
-            quantityToMove: 1,
-            expectedOriginalQuantity: 2,
-          },
-        ],
-      }),
+      service.splitTable(
+        {
+          sourceOrderSessionId: 'source-session-id',
+          destinationTableId: 'destination-table-id',
+          itemsToMove: [
+            {
+              orderItemId: 'order-item-id',
+              quantityToMove: 1,
+              expectedOriginalQuantity: 2,
+            },
+          ],
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
@@ -1619,17 +1658,20 @@ describe('OrdersService', () => {
     ]);
 
     await expect(
-      service.splitTable({
-        sourceOrderSessionId: 'source-session-id',
-        destinationTableId: 'destination-table-id',
-        itemsToMove: [
-          {
-            orderItemId: 'order-item-id',
-            quantityToMove: 1,
-            expectedOriginalQuantity: 2,
-          },
-        ],
-      }),
+      service.splitTable(
+        {
+          sourceOrderSessionId: 'source-session-id',
+          destinationTableId: 'destination-table-id',
+          itemsToMove: [
+            {
+              orderItemId: 'order-item-id',
+              quantityToMove: 1,
+              expectedOriginalQuantity: 2,
+            },
+          ],
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();

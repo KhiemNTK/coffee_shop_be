@@ -15,7 +15,7 @@ import { PrismaService } from '../src/common/prisma/prisma.service';
 import { runWithRequestContext } from '../src/common/request-context';
 import { ManagementExceptionsService } from '../src/app/management-exceptions/management-exceptions.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
-import { convertDecimalsToNumbers } from '../src/common/utils/decimal-response.util';
+import { serializeDecimalResponse } from '../src/common/utils/decimal-response.util';
 
 describe('Durable transaction platform (e2e)', () => {
   const basePrisma = new PrismaService();
@@ -141,7 +141,7 @@ describe('Durable transaction platform (e2e)', () => {
     );
     const first = await idempotency.execute(input, operation);
     const replay = await idempotency.execute(input, operation);
-    expect(JSON.parse(JSON.stringify(convertDecimalsToNumbers(first)))).toEqual(
+    expect(JSON.parse(JSON.stringify(serializeDecimalResponse(first)))).toEqual(
       replay,
     );
     expect(replay.amount).toBe(42.25);
@@ -319,7 +319,7 @@ describe('Durable transaction platform (e2e)', () => {
         aggregateType: 'TestAggregate',
         aggregateId: `manual-redis-${suffix}`,
         payload: {},
-        status: 'PROCESSING',
+        status: 'ENQUEUED',
         lockedAt: new Date(),
         lockedBy: 'original-lease',
       },
@@ -433,7 +433,7 @@ describe('Durable transaction platform (e2e)', () => {
         aggregateType: 'TestAggregate',
         aggregateId,
         payload: { aggregateId },
-        status: OutboxEventStatus.PROCESSING,
+        status: OutboxEventStatus.ENQUEUED,
         lockedAt: new Date(),
         lockedBy: 'unavailable-dispatcher',
       },
@@ -464,9 +464,7 @@ describe('Durable transaction platform (e2e)', () => {
         },
       });
       fail = false;
-      (
-        dispatcher as unknown as { lastHousekeepingAt: number }
-      ).lastHousekeepingAt = 0;
+      (dispatcher as unknown as { lastRecoveryAt: number }).lastRecoveryAt = 0;
       await dispatcher.drainOnce();
       expect(await waitForPublished(created.id)).toBe(
         OutboxEventStatus.PUBLISHED,

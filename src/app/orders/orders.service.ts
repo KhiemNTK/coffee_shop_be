@@ -1,4 +1,5 @@
 import { TakeawayService } from './takeaway.service';
+import { assertPosOrderMutationAllowed } from './online-order-policy';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
@@ -1004,7 +1005,9 @@ export class OrdersService {
       const item = await tx.orderItem.findUnique({
         where: { id },
         include: {
-          orderSession: true,
+          orderSession: {
+            include: { onlineOrderRequest: { select: { id: true } } },
+          },
           replacementRemake: { select: { id: true } },
         },
       });
@@ -1014,6 +1017,7 @@ export class OrdersService {
       }
 
       if (!item.replacementRemake) {
+        assertPosOrderMutationAllowed(item.orderSession.onlineOrderRequest);
         this.orderPolicy.assertNoPaidOrInvoicedItems(
           [item],
           'Cannot cancel a paid or invoiced order item.',
@@ -1133,8 +1137,9 @@ export class OrdersService {
     return result.updatedItem;
   }
 
-  async cancelSession(id: string) {
+  async cancelSession(id: string, employeeId: string, reason: string) {
     const updatedSession = await this.runSerializableTransaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const session = await tx.orderSession.findUnique({
         where: { id },
         include: {
@@ -1207,6 +1212,13 @@ export class OrdersService {
         throw new NotFoundException(`Order session with ID ${id} not found.`);
       }
 
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_SESSION_CANCELLED',
+          details: { orderSessionId: id, tableId: session.tableId, reason },
+        },
+      });
       await this.enqueueOrderEvent(
         tx,
         ORDER_EVENTS.SESSION_CANCELLED,
@@ -1225,12 +1237,12 @@ export class OrdersService {
     return updatedSession;
   }
 
-  async transferTable({
-    sourceOrderSessionId,
-    fromTableId,
-    toTableId,
-  }: TransferDiningTableDto) {
+  async transferTable(
+    { sourceOrderSessionId, fromTableId, toTableId }: TransferDiningTableDto,
+    employeeId: string,
+  ) {
     const result = await this.runSerializableTransaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const fromTable = await tx.diningTable.findUnique({
         where: { id: fromTableId },
       });
@@ -1318,6 +1330,13 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_TABLE_TRANSFERRED',
+          details: { orderSessionId: activeSession.id, fromTableId, toTableId },
+        },
+      });
       await this.enqueueOrderEvent(
         tx,
         ORDER_EVENTS.SESSION_TABLE_TRANSFERRED,
@@ -1344,15 +1363,19 @@ export class OrdersService {
     return result.response;
   }
 
-  async mergeTables({
-    sourceTableIds,
-    destinationTableId,
-    sourceOrderSessionIds,
-    destinationOrderSessionId,
-  }: MergeDiningTableDto) {
+  async mergeTables(
+    {
+      sourceTableIds,
+      destinationTableId,
+      sourceOrderSessionIds,
+      destinationOrderSessionId,
+    }: MergeDiningTableDto,
+    employeeId: string,
+  ) {
     const uniqueSourceTableIds = [...new Set(sourceTableIds)];
 
     const result = await this.runSerializableTransaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const targetSession = await tx.orderSession.findFirst({
         where: {
           id: destinationOrderSessionId,
@@ -1436,6 +1459,18 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_TABLES_MERGED',
+          details: {
+            targetSessionId: targetSession.id,
+            destinationTableId,
+            sourceSessionIds,
+            sourceTableIds: uniqueSourceTableIds,
+          },
+        },
+      });
       await this.enqueueOrderEvent(
         tx,
         ORDER_EVENTS.SESSIONS_MERGED,
@@ -1467,11 +1502,14 @@ export class OrdersService {
     return result.response;
   }
 
-  async splitTable({
-    sourceOrderSessionId,
-    destinationTableId,
-    itemsToMove,
-  }: SplitOrderSessionDto) {
+  async splitTable(
+    {
+      sourceOrderSessionId,
+      destinationTableId,
+      itemsToMove,
+    }: SplitOrderSessionDto,
+    employeeId: string,
+  ) {
     const orderItemIds = itemsToMove.map((item) => item.orderItemId);
     const uniqueOrderItemIds = [...new Set(orderItemIds)];
 
@@ -1480,6 +1518,7 @@ export class OrdersService {
     }
 
     const result = await this.runSerializableTransaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const destTable = await tx.diningTable.findUnique({
         where: { id: destinationTableId },
       });
@@ -1704,6 +1743,19 @@ export class OrdersService {
         }
       }
 
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_TABLE_SPLIT',
+          details: {
+            sourceSessionId: sourceSession.id,
+            newSessionId: newDestSession.id,
+            sourceTableId: sourceSession.tableId,
+            destinationTableId,
+            itemsToMove,
+          },
+        },
+      });
       await this.enqueueOrderEvent(
         tx,
         ORDER_EVENTS.SESSION_SPLIT,
@@ -1802,8 +1854,14 @@ export class OrdersService {
     });
   }
 
-  async clearTable(tableId: string, expectedOrderSessionId: string | null) {
+  async clearTable(
+    tableId: string,
+    expectedOrderSessionId: string | null,
+    employeeId: string,
+    reason: string,
+  ) {
     const result = await this.runSerializableTransaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
       const table = await tx.diningTable.findUnique({
         where: { id: tableId },
       });
@@ -1864,6 +1922,17 @@ export class OrdersService {
         data: { status: TableStatus.EMPTY },
       });
 
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'ORDER_TABLE_CLEARED',
+          details: {
+            tableId,
+            cancelledSessionId: activeSession?.id ?? null,
+            reason,
+          },
+        },
+      });
       await this.enqueueOrderEvent(
         tx,
         ORDER_EVENTS.TABLE_CLEARED,

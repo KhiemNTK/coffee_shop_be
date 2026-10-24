@@ -4,14 +4,19 @@ import type {
   ExtendedPrismaTransactionClient,
   OutboxEventInput,
 } from '../../common/types';
+import { captureOutboxContext } from './outbox-context';
 
 @Injectable()
 export class OutboxService {
   enqueue(tx: ExtendedPrismaTransactionClient, input: OutboxEventInput) {
+    const context = captureOutboxContext();
     return tx.outboxEvent.create({
       data: {
         ...input,
         payload: this.toJson(input.payload),
+        ...(Object.keys(context).length
+          ? { context: this.toJson(context) }
+          : {}),
       },
       select: { id: true },
     });

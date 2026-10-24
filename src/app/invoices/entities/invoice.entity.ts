@@ -2,6 +2,7 @@ import {
   Invoice as InvoicePrisma,
   PaymentMethod,
   PaymentStatus,
+  Prisma,
 } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 
@@ -19,6 +20,7 @@ export class InvoiceEntity implements InvoicePrisma {
   pickupCodeIssuedAt!: Date | null;
   taxAmount!: Decimal;
   taxRate!: Decimal;
+  documentSnapshot!: Prisma.JsonValue | null;
   createdAt!: Date;
   updatedAt!: Date;
   orderSessionId!: string;

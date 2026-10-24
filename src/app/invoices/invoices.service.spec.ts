@@ -18,10 +18,15 @@ import { PromotionCalculatorService } from '../promotions/services/promotion-cal
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
 import { InvoicesService } from './invoices.service';
+import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 
 describe('InvoicesService', () => {
   let service: InvoicesService;
   let tx: any;
+  let inventory: {
+    reservePendingItems: jest.Mock;
+    releaseReservations: jest.Mock;
+  };
   let promotionCalculator: { calculateDiscountTx: jest.Mock };
   let ledger: {
     requireOpenShift: jest.Mock;
@@ -37,7 +42,11 @@ describe('InvoicesService', () => {
       orderSession: { tableId: null },
     };
     tx = {
-      employee: { findUnique: jest.fn().mockResolvedValue({ isActive: true }) },
+      employee: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ isActive: true, fullName: 'Cashier' }),
+      },
       orderSession: {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findUnique: jest.fn().mockResolvedValue({
@@ -56,6 +65,10 @@ describe('InvoicesService', () => {
             serveStatus: ServeStatus.SERVED,
             isPaid: false,
             invoiceId: null,
+            menuItemId: 'menu-id',
+            menuItem: { id: 'menu-id', name: 'Coffee' },
+            note: null,
+            selectedOptions: [],
           },
         ]),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -68,6 +81,7 @@ describe('InvoicesService', () => {
         findUnique: jest.fn().mockResolvedValue(finalInvoice),
       },
       outboxEvent: { create: jest.fn().mockResolvedValue({ id: 'event-id' }) },
+      actionLog: { create: jest.fn() },
     };
     const prisma = {
       $transaction: jest.fn((callback: (client: any) => unknown) =>
@@ -81,6 +95,10 @@ describe('InvoicesService', () => {
       recordCashInvoice: jest.fn(),
     };
     const outbox = { enqueue: jest.fn() };
+    inventory = {
+      reservePendingItems: jest.fn().mockResolvedValue(undefined),
+      releaseReservations: jest.fn().mockResolvedValue(undefined),
+    };
     promotionCalculator = {
       calculateDiscountTx: jest.fn().mockResolvedValue({
         promotionId: 'promotion-id',
@@ -103,10 +121,78 @@ describe('InvoicesService', () => {
         { provide: OutboxService, useValue: outbox },
         { provide: PromotionCalculatorService, useValue: promotionCalculator },
         { provide: CashierShiftLedgerService, useValue: ledger },
+        { provide: InventoryConsumptionService, useValue: inventory },
       ],
     }).compile();
 
     service = module.get(InvoicesService);
+  });
+
+  it.each(['quote', 'create', 'checkout'])(
+    'rejects POS %s for online orders before writing invoices or cash',
+    async (operation) => {
+      tx.orderSession.findUnique.mockResolvedValue({
+        id: 'session-id',
+        sessionStatus: SessionStatus.ACTIVE,
+        tableId: null,
+        onlineOrderRequest: { id: 'request-id' },
+      });
+      const input = { orderSessionId: 'session-id' };
+      const result =
+        operation === 'quote'
+          ? service.quoteInvoice('employee-id', input)
+          : operation === 'create'
+            ? service.createInvoice('employee-id', input)
+            : service.checkoutInvoice('employee-id', {
+                ...input,
+                paymentMethod: PaymentMethod.CASH,
+                amountTendered: '50000',
+                closeSessionAfterPayment: true,
+              });
+      await expect(result).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+      });
+      expect(tx.invoice.create).not.toHaveBeenCalled();
+      expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+      expect(inventory.reservePendingItems).not.toHaveBeenCalled();
+    },
+  );
+
+  it('allows the transaction-owned online pickup checkout', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      sessionStatus: SessionStatus.ACTIVE,
+      tableId: null,
+      onlineOrderRequest: { id: 'request-id' },
+    });
+    await service.checkoutOnlinePickupInTransaction(
+      tx as never,
+      'employee-id',
+      'session-id',
+      '50000',
+    );
+    expect(tx.invoice.create).toHaveBeenCalledTimes(1);
+    expect(ledger.recordCashInvoice).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects manual payment of a legacy online-order invoice', async () => {
+    tx.invoice.findUnique.mockResolvedValue({
+      id: 'invoice-id',
+      paymentStatus: PaymentStatus.UNPAID,
+      orderSession: { onlineOrderRequest: { id: 'request-id' } },
+    });
+    await expect(
+      service.updatePayment('invoice-id', 'employee-id', {
+        paymentStatus: PaymentStatus.PAID,
+        paymentMethod: PaymentMethod.CASH,
+        amountTendered: '50000',
+        closeSessionAfterPayment: true,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
   });
 
   it('keeps dine-in occupied even when all items are paid', async () => {
@@ -171,6 +257,139 @@ describe('InvoicesService', () => {
     expect(tx.invoice.create).not.toHaveBeenCalled();
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+    expect(inventory.reservePendingItems).not.toHaveBeenCalled();
+  });
+
+  it('takes an inventory commitment before recording any cash payment', async () => {
+    await service.checkoutInvoice('employee-id', {
+      orderSessionId: 'session-id',
+      paymentMethod: PaymentMethod.CASH,
+      amountTendered: '50000',
+      closeSessionAfterPayment: false,
+    });
+    expect(inventory.reservePendingItems).toHaveBeenCalledWith(tx, {
+      invoiceId: 'invoice-id',
+    });
+    expect(
+      inventory.reservePendingItems.mock.invocationCallOrder[0],
+    ).toBeLessThan(ledger.recordCashInvoice.mock.invocationCallOrder[0]);
+  });
+
+  it('captures the issued items independently of mutable operational rows', async () => {
+    await service.createInvoice('employee-id', {
+      orderSessionId: 'session-id',
+    });
+    const { data } = tx.invoice.create.mock.calls[0][0];
+    expect(data.documentSnapshot).toMatchObject({
+      version: 1,
+      source: 'ISSUED',
+      issuedByName: 'Cashier',
+      items: [
+        {
+          orderItemId: 'item-id',
+          name: 'Coffee',
+          quantity: 1,
+          unitPrice: '45000.00',
+        },
+      ],
+    });
+  });
+
+  it('rejects a promotion changed after quote, before invoice, ledger or stock writes', async () => {
+    const input = { orderSessionId: 'session-id', promotionId: 'promotion-id' };
+    const quote = await service.quoteInvoice('employee-id', input);
+    promotionCalculator.calculateDiscountTx.mockResolvedValue({
+      promotionId: 'promotion-id',
+      discountAmount: new Prisma.Decimal('2250'),
+    });
+    await expect(
+      service.checkoutInvoice('employee-id', {
+        ...input,
+        quoteFingerprint: quote.quoteFingerprint,
+        amountTendered: '50000',
+        paymentMethod: PaymentMethod.CASH,
+        closeSessionAfterPayment: false,
+      }),
+    ).rejects.toMatchObject({ response: { code: 'INVOICE_QUOTE_CHANGED' } });
+    expect(tx.invoice.create).not.toHaveBeenCalled();
+    expect(inventory.reservePendingItems).not.toHaveBeenCalled();
+    expect(ledger.recordCashInvoice).not.toHaveBeenCalled();
+  });
+
+  it('accepts the same authoritative quote and rejects excess tax precision in direct calls', async () => {
+    const input = { orderSessionId: 'session-id', taxRate: '8.13' };
+    const quote = await service.quoteInvoice('employee-id', input);
+    await service.createInvoice('employee-id', {
+      ...input,
+      quoteFingerprint: quote.quoteFingerprint,
+    });
+    expect(tx.invoice.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          taxRate: new Prisma.Decimal('8.13'),
+          taxAmount: new Prisma.Decimal('3658.50'),
+        }),
+      }),
+    );
+    await expect(
+      service.quoteInvoice('employee-id', { ...input, taxRate: '8.125' }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('fails checkout before recording cash if the pending recipe cannot be held', async () => {
+    inventory.reservePendingItems.mockRejectedValue(
+      new ConflictException({ code: 'INVENTORY_INSUFFICIENT_STOCK' }),
+    );
+    await expect(
+      service.checkoutInvoice('employee-id', {
+        orderSessionId: 'session-id',
+        paymentMethod: PaymentMethod.CASH,
+        amountTendered: '50000',
+        closeSessionAfterPayment: false,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(ledger.recordCashInvoice).not.toHaveBeenCalled();
+    expect(tx.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('releases pending invoice holds when the invoice is voided', async () => {
+    tx.invoice.findUnique.mockResolvedValue({
+      id: 'invoice-id',
+      paymentStatus: PaymentStatus.UNPAID,
+      orderSession: { tableId: null },
+      documentSnapshot: { version: 1 },
+    });
+    tx.invoice.update = jest.fn();
+    tx.paymentAttempt = { findFirst: jest.fn().mockResolvedValue(null) };
+    tx.orderItem.findMany.mockResolvedValue([{ id: 'pending-line' }]);
+    await service.voidInvoice('invoice-id', 'employee-id', {
+      reason: 'Duplicate invoice',
+    });
+    expect(inventory.releaseReservations).toHaveBeenCalledWith(tx, [
+      'pending-line',
+    ]);
+    expect(
+      inventory.releaseReservations.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(
+      (tx.orderItem.updateMany as jest.Mock).mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps an accepted online commitment when voiding a legacy POS invoice', async () => {
+    tx.invoice.findUnique.mockResolvedValue({
+      id: 'invoice-id',
+      paymentStatus: PaymentStatus.UNPAID,
+      orderSession: { tableId: null, onlineOrderRequest: { id: 'request-id' } },
+      documentSnapshot: { version: 1 },
+    });
+    tx.invoice.update = jest.fn();
+    tx.paymentAttempt = { findFirst: jest.fn().mockResolvedValue(null) };
+    tx.orderItem.findMany.mockResolvedValue([{ id: 'pending-line' }]);
+    await service.voidInvoice('invoice-id', 'employee-id', {
+      reason: 'Duplicate invoice',
+    });
+    expect(tx.orderItem.updateMany).toHaveBeenCalled();
+    expect(inventory.releaseReservations).not.toHaveBeenCalled();
   });
 
   it('rejects quotes for already invoiced lines', async () => {
@@ -262,7 +481,9 @@ describe('InvoicesService', () => {
         }),
       ).rejects.toBeInstanceOf(ConflictException);
       await expect(
-        service.voidInvoice('invoice-id', 'employee-id'),
+        service.voidInvoice('invoice-id', 'employee-id', {
+          reason: 'Duplicate invoice',
+        }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(tx.paymentAttempt.findFirst).toHaveBeenCalledWith({
         where: {

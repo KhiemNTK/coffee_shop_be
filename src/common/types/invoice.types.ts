@@ -8,7 +8,34 @@ export interface InvoiceLineSnapshot {
   serveStatus: ServeStatus;
   isPaid: boolean;
   invoiceId: string | null;
+  menuItemId: string;
+  menuItem: { id: string; name: string };
+  note: string | null;
+  selectedOptions: unknown;
 }
+
+export type InvoiceDocumentSnapshot = {
+  version: 1;
+  source: 'ISSUED' | 'LEGACY_BACKFILL';
+  tableId: string | null;
+  tableName: string | null;
+  issuedByName: string;
+  promotionName: string | null;
+  items: {
+    orderItemId: string;
+    menuItemId: string;
+    name: string;
+    quantity: number;
+    unitPrice: string;
+    note: string | null;
+    selectedOptions: {
+      id: string;
+      groupName: string;
+      name: string;
+      priceDelta: string;
+    }[];
+  }[];
+};
 
 export interface InvoiceCalculationResult {
   subTotal: Decimal;
@@ -25,6 +52,8 @@ export interface CreateInvoiceInput {
   orderItemIds?: string[];
   promotionId?: string | null;
   taxRate?: string | number;
+  quoteFingerprint?: string;
+  expectedTotal?: string | number;
 }
 
 export interface InvoicePaymentTransition {

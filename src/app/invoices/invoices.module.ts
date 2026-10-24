@@ -7,9 +7,15 @@ import { PromotionsModule } from '../promotions/promotions.module';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
 import { CashierShiftsModule } from '../cashier-shifts/cashier-shifts.module';
+import { InventoryModule } from '../inventory/inventory.module';
 
 @Module({
-  imports: [CashierShiftsModule, PaginationUtilModule, PromotionsModule],
+  imports: [
+    CashierShiftsModule,
+    PaginationUtilModule,
+    PromotionsModule,
+    InventoryModule,
+  ],
   controllers: [InvoicesController],
   providers: [
     InvoicesService,

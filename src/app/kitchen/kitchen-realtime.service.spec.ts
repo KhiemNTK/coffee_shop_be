@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { get, type ClientRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import type Redis from 'ioredis';
 import {
   kitchenSseActiveConnections,
   metricsRegistry,
@@ -36,7 +37,7 @@ describe('KitchenRealtimeService shutdown', () => {
     try {
       service.stream().subscribe({ complete });
       service.stream().subscribe({ complete });
-      expect(jest.getTimerCount()).toBe(2);
+      expect(jest.getTimerCount()).toBe(4);
       service.onModuleDestroy();
       expect(complete).toHaveBeenCalledTimes(2);
       expect(jest.getTimerCount()).toBe(0);
@@ -117,7 +118,9 @@ describe('KitchenRealtimeService shutdown', () => {
     const service = new KitchenRealtimeService(new ConfigService(), bus);
     const receive = jest.fn();
     service.onModuleInit();
-    const subscription = service.stream().subscribe(receive);
+    const subscription = service.stream().subscribe((message) => {
+      if (message.type === 'kitchen.refresh') receive(message);
+    });
     const stationId = randomUUID();
     const availableAt = new Date().toISOString();
     try {
@@ -140,6 +143,112 @@ describe('KitchenRealtimeService shutdown', () => {
       expect(receive.mock.calls[2][0].data).not.toHaveProperty('newTickets');
       await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
       expect(receive).toHaveBeenCalledTimes(4);
+    } finally {
+      subscription.unsubscribe();
+      service.onModuleDestroy();
+    }
+  });
+
+  it('renews every stream within one minute and stops forwarding events until guards run again', async () => {
+    jest.useFakeTimers();
+    const bus = new DomainEventBusService();
+    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    service.onModuleInit();
+    const receive = jest.fn();
+    const complete = jest.fn();
+    try {
+      service.stream().subscribe({ next: receive, complete });
+      await jest.advanceTimersByTimeAsync(59_999);
+      expect(complete).not.toHaveBeenCalled();
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
+      expect(receive.mock.lastCall?.[0].type).toBe('kitchen.refresh');
+      await jest.advanceTimersByTimeAsync(1);
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(receive.mock.lastCall?.[0].type).toBe('kitchen.renew');
+      expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(0);
+      const count = receive.mock.calls.length;
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
+      expect(receive).toHaveBeenCalledTimes(count);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      service.onModuleDestroy();
+      jest.useRealTimers();
+    }
+  });
+
+  it('bounds Redis publish and subscribe commands without opening a connection', () => {
+    const service = new KitchenRealtimeService(
+      new ConfigService({ REDIS_URL: 'redis://127.0.0.1:6379' }),
+      new DomainEventBusService(),
+    );
+    try {
+      for (const key of ['publisher', 'subscriber']) {
+        const redis = Reflect.get(service, key) as Redis;
+        expect(redis.status).toBe('wait');
+        expect(redis.options).toMatchObject({
+          connectTimeout: 1_000,
+          commandTimeout: 2_000,
+          enableOfflineQueue: false,
+        });
+      }
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
+  it('delivers local refreshes while the subscriber is down and deduplicates its Redis echo', async () => {
+    const bus = new DomainEventBusService();
+    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    const publisher = {
+      status: 'ready',
+      publish: jest.fn().mockResolvedValue(0),
+      disconnect: jest.fn(),
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(undefined),
+    };
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    const subscriber = {
+      status: 'ready',
+      subscribe: jest.fn().mockResolvedValue(1),
+      connect: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn(),
+      on: jest.fn((name: string, handler: (...args: unknown[]) => void) =>
+        handlers.set(name, handler),
+      ),
+    };
+    Reflect.set(service, 'publisher', publisher);
+    Reflect.set(service, 'subscriber', subscriber);
+    const receive = jest.fn();
+    service.onModuleInit();
+    await service.onApplicationBootstrap();
+    const subscription = service.stream().subscribe(receive);
+    try {
+      await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
+      const message = receive.mock.calls.find(
+        ([message]) => message.type === 'kitchen.refresh',
+      )![0];
+      expect(message).toBeDefined();
+      expect(receive.mock.lastCall?.[0]).toMatchObject({
+        type: 'kitchen.connection',
+        data: { realtime: false },
+      });
+      handlers.get('message')!('channel', JSON.stringify(message.data));
+      expect(
+        receive.mock.calls.filter(
+          ([message]) => message.type === 'kitchen.refresh',
+        ),
+      ).toHaveLength(1);
+      handlers.get('ready')!();
+      await Promise.resolve();
+      expect(receive.mock.lastCall?.[0]).toMatchObject({
+        type: 'kitchen.connection',
+        data: { realtime: true },
+      });
+      handlers.get('close')!();
+      expect(receive.mock.lastCall?.[0]).toMatchObject({
+        type: 'kitchen.connection',
+        data: { realtime: false },
+      });
     } finally {
       subscription.unsubscribe();
       service.onModuleDestroy();

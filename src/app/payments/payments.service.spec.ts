@@ -48,6 +48,7 @@ describe('PaymentsService', () => {
   const ledger = { requireOpenShift: jest.fn() };
   const invoices = {
     completeOnlinePayment: jest.fn(),
+    reserveInvoiceStock: jest.fn(),
   };
   const outbox = { enqueue: jest.fn() };
   const vnpay = {
@@ -116,6 +117,7 @@ describe('PaymentsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    invoices.reserveInvoiceStock.mockResolvedValue(undefined);
     prisma.paymentAttempt.findUnique.mockResolvedValue(null);
     prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
@@ -131,6 +133,50 @@ describe('PaymentsService', () => {
     ledger.requireOpenShift.mockResolvedValue({ id: 'shift-id' });
     tx.paymentAttempt.create.mockResolvedValue(attempt);
     vnpay.createPaymentUrl.mockReturnValue('https://sandbox/payment');
+  });
+
+  it('blocks new provider attempts for a legacy online-order invoice', async () => {
+    tx.invoice.findUnique.mockResolvedValue({
+      ...attempt.invoice,
+      orderSession: { onlineOrderRequest: { id: 'request-id' } },
+    });
+    await expect(
+      service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+        idempotencyKey: 'online-order-bypass',
+        locale: 'vn',
+        closeSessionAfterPayment: true,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'ONLINE_ORDER_PICKUP_REQUIRED' },
+    });
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
+    expect(ledger.requireOpenShift).not.toHaveBeenCalled();
+  });
+
+  it('reserves pending ingredients before creating a provider attempt', async () => {
+    await service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+      idempotencyKey: 'reserve-before-provider',
+      locale: 'vn',
+      closeSessionAfterPayment: false,
+    });
+    expect(invoices.reserveInvoiceStock).toHaveBeenCalledWith(tx, 'invoice-id');
+    expect(
+      invoices.reserveInvoiceStock.mock.invocationCallOrder[0],
+    ).toBeLessThan(tx.paymentAttempt.create.mock.invocationCallOrder[0]);
+  });
+
+  it('does not create a provider attempt when ingredients cannot be held', async () => {
+    invoices.reserveInvoiceStock.mockRejectedValue(
+      new ConflictException({ code: 'INVENTORY_INSUFFICIENT_STOCK' }),
+    );
+    await expect(
+      service.createAttempt('invoice-id', 'employee-id', '127.0.0.1', {
+        idempotencyKey: 'unavailable-ingredients',
+        locale: 'vn',
+        closeSessionAfterPayment: false,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.paymentAttempt.create).not.toHaveBeenCalled();
   });
 
   it('does not leak a reconstructable payOS checkout handle through ordinary reads', async () => {

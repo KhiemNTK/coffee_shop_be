@@ -30,7 +30,12 @@ export class InvoicePolicyService {
     }
   }
 
-  assertInvoiceItemsAreBillable(items: InvoiceLineSnapshot[]) {
+  assertInvoiceItemsAreBillable(
+    items: Pick<
+      InvoiceLineSnapshot,
+      'id' | 'quantity' | 'priceAtTime' | 'serveStatus' | 'isPaid' | 'invoiceId'
+    >[],
+  ) {
     if (items.length === 0) {
       throw new BadRequestException('No billable order items found.');
     }

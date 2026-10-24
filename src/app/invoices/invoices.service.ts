@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -28,21 +28,30 @@ import type {
   InvoiceLineSnapshot,
   PromotionCalculationResult,
   OrderEventBase,
+  CreateInvoiceInput,
 } from '../../common/types';
+import {
+  MoneyInputSchema,
+  TaxRateInputSchema,
+} from '../../common/validation/money.schema';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { OutboxService } from '../durable/outbox.service';
 import { ORDER_EVENTS } from '../orders/events/order.events';
+import { assertPosOrderMutationAllowed } from '../orders/online-order-policy';
 import { PromotionCalculatorService } from '../promotions/services/promotion-calculator.service';
 import {
   CheckoutInvoiceDto,
   CreateInvoiceDto,
   GetInvoicesPaginationDto,
   UpdateInvoicePaymentDto,
+  VoidInvoiceDto,
 } from './dto';
+import { createInvoiceSnapshot } from './invoice-snapshot';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicePolicyService } from './invoice-policy.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
+import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 
 @Injectable()
 export class InvoicesService {
@@ -59,6 +68,7 @@ export class InvoicesService {
     private readonly outbox: OutboxService,
     private readonly promotionCalculatorService: PromotionCalculatorService,
     private readonly cashierShiftLedger: CashierShiftLedgerService,
+    private readonly inventoryConsumption: InventoryConsumptionService,
   ) {}
 
   private readonly invoiceInclude = {
@@ -134,9 +144,14 @@ export class InvoicesService {
     this.invoicePolicy.assertActiveEmployee(employee);
     const session = await tx.orderSession.findUnique({
       where: { id: input.orderSessionId },
-      select: { sessionStatus: true },
+      select: {
+        sessionStatus: true,
+        tableId: true,
+        onlineOrderRequest: { select: { id: true } },
+      },
     });
     if (!session) throw new NotFoundException('Order session not found.');
+    assertPosOrderMutationAllowed(session.onlineOrderRequest);
     this.invoicePolicy.assertActiveSession(session.sessionStatus);
     const items = await this.getInvoiceItems(tx, input);
     this.invoicePolicy.assertInvoiceItemsAreBillable(items);
@@ -148,15 +163,22 @@ export class InvoicesService {
           at: new Date(),
         })
       : null;
+    const calculation = this.calculateInvoice({
+      subTotal,
+      promotionCalculation,
+      taxRate: input.taxRate,
+      paymentStatus: PaymentStatus.UNPAID,
+      paymentMethod: PaymentMethod.CASH,
+    });
     return {
       orderItemIds: items.map((item) => item.id),
-      ...this.calculateInvoice({
-        subTotal,
-        promotionCalculation,
-        taxRate: input.taxRate,
-        paymentStatus: PaymentStatus.UNPAID,
-        paymentMethod: PaymentMethod.CASH,
-      }),
+      ...calculation,
+      quoteFingerprint: this.quoteFingerprint(
+        input,
+        session,
+        items,
+        calculation,
+      ),
     };
   }
 
@@ -200,15 +222,19 @@ export class InvoicesService {
     orderSessionId: string,
     amountTendered: string,
   ) {
-    return this.createInvoiceInTransaction(tx, {
-      employeeId,
-      input: { orderSessionId },
-      paymentStatus: PaymentStatus.PAID,
-      paymentMethod: PaymentMethod.CASH,
-      amountTendered,
-      closeSessionAfterPayment: true,
-      eventNames: [ORDER_EVENTS.INVOICE_CREATED, ORDER_EVENTS.INVOICE_PAID],
-    });
+    return this.createInvoiceInTransaction(
+      tx,
+      {
+        employeeId,
+        input: { orderSessionId },
+        paymentStatus: PaymentStatus.PAID,
+        paymentMethod: PaymentMethod.CASH,
+        amountTendered,
+        closeSessionAfterPayment: true,
+        eventNames: [ORDER_EVENTS.INVOICE_CREATED, ORDER_EVENTS.INVOICE_PAID],
+      },
+      true,
+    );
   }
 
   async getInvoices({
@@ -291,7 +317,9 @@ export class InvoicesService {
       const existingInvoice = await tx.invoice.findUnique({
         where: { id },
         include: {
-          orderSession: true,
+          orderSession: {
+            include: { onlineOrderRequest: { select: { id: true } } },
+          },
           orderItems: {
             select: {
               id: true,
@@ -307,6 +335,9 @@ export class InvoicesService {
       }
 
       this.invoicePolicy.assertInvoiceIsUnpaid(existingInvoice);
+      assertPosOrderMutationAllowed(
+        existingInvoice.orderSession.onlineOrderRequest,
+      );
       await this.assertNoUnresolvedOnlinePayment(tx, id);
 
       const paymentMethod =
@@ -345,16 +376,6 @@ export class InvoicesService {
         },
       });
 
-      if (paymentMethod === PaymentMethod.CASH) {
-        await this.cashierShiftLedger.recordCashInvoice(tx, {
-          shift,
-          invoiceId: existingInvoice.id,
-          invoiceNumber: existingInvoice.invoiceNumber,
-          employeeId,
-          amount: existingInvoice.totalAmount,
-        });
-      }
-
       await tx.orderItem.updateMany({
         where: {
           invoiceId: id,
@@ -364,6 +385,17 @@ export class InvoicesService {
           isPaid: true,
         },
       });
+
+      await this.reserveInvoiceStock(tx, id);
+      if (paymentMethod === PaymentMethod.CASH) {
+        await this.cashierShiftLedger.recordCashInvoice(tx, {
+          shift,
+          invoiceId: existingInvoice.id,
+          invoiceNumber: existingInvoice.invoiceNumber,
+          employeeId,
+          amount: existingInvoice.totalAmount,
+        });
+      }
 
       if (updatePaymentDto.closeSessionAfterPayment) {
         await this.closeSessionIfFullyPaid(tx, existingInvoice.orderSession);
@@ -376,7 +408,7 @@ export class InvoicesService {
     return invoice;
   }
 
-  async voidInvoice(id: string, employeeId: string) {
+  async voidInvoice(id: string, employeeId: string, dto: VoidInvoiceDto) {
     const invoice = await this.runSerializableTransaction(async (tx) => {
       const employee = await tx.employee.findUnique({
         where: { id: employeeId },
@@ -386,7 +418,15 @@ export class InvoicesService {
 
       const existingInvoice = await tx.invoice.findUnique({
         where: { id },
-        include: { orderSession: true },
+        include: {
+          ...this.invoiceInclude,
+          orderSession: {
+            include: {
+              table: true,
+              onlineOrderRequest: { select: { id: true } },
+            },
+          },
+        },
       });
 
       if (!existingInvoice) {
@@ -396,6 +436,27 @@ export class InvoicesService {
       this.invoicePolicy.assertInvoiceIsUnpaid(existingInvoice);
       await this.assertNoUnresolvedOnlinePayment(tx, id);
 
+      await tx.invoice.update({
+        where: { id },
+        data: {
+          paymentStatus: PaymentStatus.VOIDED,
+          ...(existingInvoice.documentSnapshot == null
+            ? {
+                documentSnapshot: createInvoiceSnapshot({
+                  table: existingInvoice.orderSession.table,
+                  issuedByName: existingInvoice.employee.fullName,
+                  promotionName: existingInvoice.promotion?.name ?? null,
+                  items: existingInvoice.orderItems,
+                  source: 'LEGACY_BACKFILL',
+                }),
+              }
+            : {}),
+        },
+      });
+      const pendingItems = await tx.orderItem.findMany({
+        where: { invoiceId: id, serveStatus: ServeStatus.PENDING },
+        select: { id: true },
+      });
       await tx.orderItem.updateMany({
         where: {
           invoiceId: id,
@@ -407,15 +468,29 @@ export class InvoicesService {
         },
       });
 
-      await tx.invoice.update({
-        where: { id },
-        data: {
-          paymentStatus: PaymentStatus.VOIDED,
-          employeeId,
-        },
-      });
+      // Match preparation's item-before-stock lock order.
+      // A legacy POS invoice does not own the accepted online order's commitment.
+      if (!existingInvoice.orderSession.onlineOrderRequest)
+        await this.inventoryConsumption.releaseReservations(
+          tx,
+          pendingItems.map((item) => item.id),
+        );
 
       const invoice = await this.findInvoiceInTransaction(tx, id);
+      await tx.actionLog.create({
+        data: {
+          employeeId,
+          actionType: 'INVOICE_VOIDED',
+          details: {
+            invoiceId: id,
+            invoiceNumber: invoice.invoiceNumber,
+            orderSessionId: invoice.orderSessionId,
+            reason: dto.reason,
+            before: { paymentStatus: existingInvoice.paymentStatus },
+            after: { paymentStatus: PaymentStatus.VOIDED },
+          },
+        },
+      });
       await this.enqueueInvoiceEvent(tx, ORDER_EVENTS.INVOICE_VOIDED, invoice);
       return invoice;
     });
@@ -474,6 +549,10 @@ export class InvoicesService {
     return paidInvoice;
   }
 
+  reserveInvoiceStock(tx: ExtendedPrismaTransactionClient, invoiceId: string) {
+    return this.inventoryConsumption.reservePendingItems(tx, { invoiceId });
+  }
+
   private async createInvoiceInternal({
     employeeId,
     input,
@@ -518,7 +597,7 @@ export class InvoicesService {
       eventNames,
     }: {
       employeeId: string;
-      input: CreateInvoiceDto;
+      input: CreateInvoiceInput;
       paymentStatus: PaymentStatus;
       paymentMethod: PaymentMethod;
       amountTendered?: string | number;
@@ -527,10 +606,11 @@ export class InvoicesService {
         typeof ORDER_EVENTS.INVOICE_CREATED | typeof ORDER_EVENTS.INVOICE_PAID
       >;
     },
+    onlinePickup = false,
   ) {
     const employee = await tx.employee.findUnique({
       where: { id: employeeId },
-      select: { isActive: true },
+      select: { isActive: true, fullName: true },
     });
     this.invoicePolicy.assertActiveEmployee(employee);
 
@@ -540,6 +620,8 @@ export class InvoicesService {
         id: true,
         sessionStatus: true,
         tableId: true,
+        table: { select: { id: true, name: true } },
+        onlineOrderRequest: { select: { id: true } },
       },
     });
 
@@ -549,6 +631,8 @@ export class InvoicesService {
       );
     }
     this.invoicePolicy.assertActiveSession(session.sessionStatus);
+    if (!onlinePickup)
+      assertPosOrderMutationAllowed(session.onlineOrderRequest);
     const shift =
       paymentStatus === PaymentStatus.PAID
         ? await this.cashierShiftLedger.requireOpenShift(tx, employeeId)
@@ -577,6 +661,27 @@ export class InvoicesService {
       amountTendered,
     });
 
+    if (
+      (input.quoteFingerprint &&
+        input.quoteFingerprint !==
+          this.quoteFingerprint(input, session, items, calculation)) ||
+      (input.expectedTotal !== undefined &&
+        !calculation.totalAmount.eq(this.toDecimal(input.expectedTotal)))
+    ) {
+      throw new ConflictException({
+        code: 'INVOICE_QUOTE_CHANGED',
+        message:
+          'Invoice quote changed. Review the items and total before confirming payment.',
+      });
+    }
+    if (paymentStatus === PaymentStatus.PAID) {
+      this.invoicePolicy.assertPaidPaymentAmount({
+        paymentMethod,
+        amountTendered: calculation.amountTendered,
+        totalAmount: calculation.totalAmount,
+      });
+    }
+
     const invoice = await tx.invoice.create({
       data: {
         invoiceNumber: await this.invoiceNumberService.generate(tx),
@@ -593,6 +698,12 @@ export class InvoicesService {
         employeeId,
         shiftId: shift?.id ?? null,
         promotionId: promotionCalculation?.promotionId ?? null,
+        documentSnapshot: createInvoiceSnapshot({
+          table: session.table,
+          issuedByName: employee!.fullName,
+          promotionName: promotionCalculation?.promotionName ?? null,
+          items,
+        }),
       },
       select: { id: true, invoiceNumber: true },
     });
@@ -616,6 +727,8 @@ export class InvoicesService {
         'One or more order items were changed by another operation. Please refresh and try again.',
       );
     }
+
+    await this.reserveInvoiceStock(tx, invoice.id);
 
     if (
       paymentStatus === PaymentStatus.PAID &&
@@ -680,6 +793,10 @@ export class InvoicesService {
         serveStatus: true,
         isPaid: true,
         invoiceId: true,
+        menuItemId: true,
+        menuItem: { select: { id: true, name: true } },
+        note: true,
+        selectedOptions: true,
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -710,7 +827,12 @@ export class InvoicesService {
   }): InvoiceCalculationResult {
     const discountAmount =
       promotionCalculation?.discountAmount ?? new Decimal(0);
-    const resolvedTaxRate = this.toDecimal(taxRate ?? 0);
+    const parsedTaxRate = TaxRateInputSchema.safeParse(taxRate ?? 0);
+    if (!parsedTaxRate.success)
+      throw new BadRequestException(
+        'Tax rate must be between 0 and 100 with at most 2 decimal places.',
+      );
+    const resolvedTaxRate = new Decimal(parsedTaxRate.data);
     const taxableAmount = Decimal.max(subTotal.minus(discountAmount), 0);
     const taxAmount = taxableAmount
       .mul(resolvedTaxRate)
@@ -726,13 +848,10 @@ export class InvoicesService {
           })
         : null;
 
-    if (paymentStatus === PaymentStatus.PAID) {
-      this.invoicePolicy.assertPaidPaymentAmount({
-        paymentMethod,
-        amountTendered: resolvedAmountTendered,
-        totalAmount,
-      });
-    }
+    if (!MoneyInputSchema.safeParse(totalAmount.toFixed(2)).success)
+      throw new BadRequestException(
+        'Invoice amount exceeds supported precision.',
+      );
 
     return {
       subTotal,
@@ -768,7 +887,43 @@ export class InvoicesService {
   }
 
   private toDecimal(value: string | number | Decimal) {
-    return new Decimal(value).toDecimalPlaces(4);
+    const parsed = MoneyInputSchema.safeParse(
+      Decimal.isDecimal(value) ? value.toFixed() : value,
+    );
+    if (!parsed.success)
+      throw new BadRequestException(
+        'Money must have at most 16 integer digits and 2 decimal places.',
+      );
+    return new Decimal(parsed.data);
+  }
+
+  private quoteFingerprint(
+    input: CreateInvoiceInput,
+    session: { tableId?: string | null },
+    items: InvoiceLineSnapshot[],
+    calculation: InvoiceCalculationResult,
+  ) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          orderSessionId: input.orderSessionId,
+          tableId: session.tableId ?? null,
+          items: [...items]
+            .sort((left, right) => left.id.localeCompare(right.id))
+            .map((item) => [
+              item.id,
+              item.quantity,
+              item.priceAtTime.toFixed(2),
+            ]),
+          promotionId: input.promotionId ?? null,
+          subTotal: calculation.subTotal.toFixed(2),
+          discountAmount: calculation.discountAmount.toFixed(2),
+          taxRate: calculation.taxRate.toFixed(2),
+          taxAmount: calculation.taxAmount.toFixed(2),
+          totalAmount: calculation.totalAmount.toFixed(2),
+        }),
+      )
+      .digest('hex');
   }
 
   private calculateSubTotal(items: InvoiceLineSnapshot[]) {

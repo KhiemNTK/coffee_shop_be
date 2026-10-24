@@ -37,6 +37,7 @@ import type { PromotionCalculatorService } from '../src/app/promotions/services/
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { QueryUtilService } from '../src/common/utils/query-util/query-util.service';
 import { ORDER_EVENTS } from '../src/app/orders/events/order.events';
+import { InventoryConsumptionService } from '../src/app/inventory/services/inventory-consumption.service';
 
 describe('VNPay payment lifecycle (e2e)', () => {
   const prisma = new PrismaClient();
@@ -74,6 +75,7 @@ describe('VNPay payment lifecycle (e2e)', () => {
     outbox,
     {} as PromotionCalculatorService,
     ledger,
+    new InventoryConsumptionService(outbox),
   );
   const payments = new PaymentsService(
     extendedPrisma,
@@ -750,6 +752,93 @@ describe('VNPay payment lifecycle (e2e)', () => {
     20000,
   );
 
+  it('reserves pending ingredients before returning a payment URL and does not reserve twice on retry', async () => {
+    const { invoice, menuItemId } = await createUnpaidInvoice('30000');
+    const ingredient = await prisma.inventoryItem.create({
+      data: {
+        name: `Payment ingredient ${suffix}`,
+        stock: '1',
+        averageUnitCost: '100',
+        unit: { create: { name: `Payment unit ${suffix}` } },
+        category: { create: { name: `Payment ingredients ${suffix}` } },
+      },
+    });
+    try {
+      await prisma.menuItemIngredient.create({
+        data: { menuItemId, inventoryItemId: ingredient.id, quantity: '1' },
+      });
+      await prisma.orderItem.updateMany({
+        where: { invoiceId: invoice.id },
+        data: { serveStatus: ServeStatus.PENDING },
+      });
+      const request = {
+        idempotencyKey: randomUUID(),
+        locale: 'vn' as const,
+        closeSessionAfterPayment: false,
+      };
+      const attempt = await payments.createAttempt(
+        invoice.id,
+        employeeId,
+        '127.0.0.1',
+        request,
+      );
+      expect(attempt.paymentUrl).toBeTruthy();
+      expect(
+        (
+          await prisma.inventoryItem.findUniqueOrThrow({
+            where: { id: ingredient.id },
+          })
+        ).reservedStock.toString(),
+      ).toBe('1');
+      expect(
+        await prisma.inventoryReservation.count({
+          where: { inventoryItemId: ingredient.id },
+        }),
+      ).toBe(1);
+      expect(
+        (
+          await payments.createAttempt(
+            invoice.id,
+            employeeId,
+            '127.0.0.1',
+            request,
+          )
+        ).id,
+      ).toBe(attempt.id);
+      expect(
+        (
+          await prisma.inventoryItem.findUniqueOrThrow({
+            where: { id: ingredient.id },
+          })
+        ).reservedStock.toString(),
+      ).toBe('1');
+    } finally {
+      const itemIds = (
+        await prisma.orderItem.findMany({
+          where: { invoiceId: invoice.id },
+          select: { id: true },
+        })
+      ).map((item) => item.id);
+      await prisma.$transaction((tx) =>
+        new InventoryConsumptionService(outbox).releaseReservations(
+          tx as never,
+          itemIds,
+        ),
+      );
+      await prisma.orderItemRecipeIngredient.deleteMany({
+        where: { inventoryItemId: ingredient.id },
+      });
+      await prisma.menuItemIngredient.deleteMany({
+        where: { inventoryItemId: ingredient.id },
+      });
+      await prisma.inventoryItem.delete({ where: { id: ingredient.id } });
+      await prisma.unit.delete({ where: { id: ingredient.unitId } });
+      await prisma.inventoryCategory.delete({
+        where: { id: ingredient.categoryId },
+      });
+    }
+  });
+
   it('finalizes a signed IPN exactly once without booking cash', async () => {
     const { invoice, session, table } = await createUnpaidInvoice('125000');
     const created = await payments.createAttempt(
@@ -1053,9 +1142,11 @@ describe('VNPay payment lifecycle (e2e)', () => {
         closeSessionAfterPayment: false,
       }),
     ).rejects.toThrow('unresolved online payment');
-    await expect(invoices.voidInvoice(invoice.id, employeeId)).rejects.toThrow(
-      'unresolved online payment',
-    );
+    await expect(
+      invoices.voidInvoice(invoice.id, employeeId, {
+        reason: 'Customer cancelled',
+      }),
+    ).rejects.toThrow('unresolved online payment');
     await expect(
       payments.createAttempt(invoice.id, employeeId, '127.0.0.1', {
         ...dto,

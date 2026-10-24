@@ -31,6 +31,7 @@ import { PaginationUtilService } from '../../common/utils/pagination-util/pagina
 import { IdempotencyService } from '../durable/idempotency.service';
 import { readSelectedOptions } from '../menu/menu-option-selection';
 import { InvoicesService } from '../invoices/invoices.service';
+import { readInvoiceSnapshot } from '../invoices/invoice-snapshot';
 import {
   ClaimPrintJobsDto,
   CreatePrintDeviceDto,
@@ -842,12 +843,15 @@ export class PrintingService {
   }
 
   private receiptPayload(invoice: ReceiptInvoice): ReceiptPrintPayload {
+    const snapshot = readInvoiceSnapshot(invoice.documentSnapshot);
     return {
       isReprint: false,
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoiceNumber,
       createdAt: invoice.createdAt.toISOString(),
-      tableName: invoice.orderSession.table?.name ?? null,
+      tableName: snapshot
+        ? snapshot.tableName
+        : (invoice.orderSession.table?.name ?? null),
       cashierName: invoice.employee.fullName,
       paymentMethod: invoice.paymentMethod,
       paymentStatus: invoice.paymentStatus,
@@ -857,14 +861,25 @@ export class PrintingService {
       totalAmount: invoice.totalAmount.toString(),
       amountTendered: invoice.amountTendered?.toString() ?? null,
       changeAmount: invoice.changeAmount?.toString() ?? null,
-      items: invoice.orderItems.map((item) => ({
-        orderItemId: item.id,
-        name: item.menuItem.name,
-        quantity: item.quantity,
-        unitPrice: item.priceAtTime.toString(),
-        lineTotal: item.priceAtTime.mul(item.quantity).toString(),
-        selectedOptions: readSelectedOptions(item.selectedOptions),
-      })),
+      items: snapshot
+        ? snapshot.items.map((item) => ({
+            orderItemId: item.orderItemId,
+            name: item.name,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            lineTotal: new Prisma.Decimal(item.unitPrice)
+              .mul(item.quantity)
+              .toFixed(2),
+            selectedOptions: item.selectedOptions,
+          }))
+        : invoice.orderItems.map((item) => ({
+            orderItemId: item.id,
+            name: item.menuItem.name,
+            quantity: item.quantity,
+            unitPrice: item.priceAtTime.toString(),
+            lineTotal: item.priceAtTime.mul(item.quantity).toString(),
+            selectedOptions: readSelectedOptions(item.selectedOptions),
+          })),
     };
   }
 

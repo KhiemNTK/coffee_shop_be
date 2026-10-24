@@ -19,6 +19,7 @@ import {
   GetCashRefundsDto,
   GetInvoicesPaginationDto,
   UpdateInvoicePaymentDto,
+  VoidInvoiceDto,
 } from './dto';
 import { InvoicesService } from './invoices.service';
 import { CashRefundsService } from './cash-refunds.service';
@@ -104,7 +105,8 @@ export class InvoicesController {
   voidInvoice(
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,
+    @Body() dto: VoidInvoiceDto,
   ) {
-    return this.invoicesService.voidInvoice(id, employeeId);
+    return this.invoicesService.voidInvoice(id, employeeId, dto);
   }
 }

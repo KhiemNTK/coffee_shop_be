@@ -10,3 +10,4 @@ export * from './transfer-dining-table.dto';
 export * from './merge-dining-table.dto';
 export * from './split-dining-table.dto';
 export * from './clear-dining-table.dto';
+export * from './cancel-session.dto';
