@@ -74,7 +74,10 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.refreshPairs();
     } catch (error) {
-      this.logger.error('Recommendation pair refresh failed.', error);
+      this.logger.error(
+        'Recommendation pair refresh failed.',
+        error instanceof Error ? error.stack : undefined,
+      );
     }
   }
 
@@ -330,8 +333,9 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
     const rankedIds = rankRecommendationCandidates(pairs);
     const available = await this.availableItems(rankedIds);
     const availableIds = new Set(available.map((item) => item.id));
+    const outOfStock = await this.outOfStockCandidates([...availableIds]);
     return rankedIds
-      .filter((id) => availableIds.has(id))
+      .filter((id) => availableIds.has(id) && !outOfStock.has(id))
       .slice(0, MAX_RECOMMENDATIONS);
   }
 
@@ -354,13 +358,49 @@ export class RecommendationsService implements OnModuleInit, OnModuleDestroy {
       where: { ...PUBLIC_MENU_WHERE, id: { in: candidateIds } },
       select: PUBLIC_MENU_SELECT,
     });
+    const outOfStock = await this.outOfStockCandidates(
+      available.map((item) => item.id),
+    );
     const byId = new Map(available.map((item) => [item.id, item] as const));
     return candidateIds.flatMap((id) => {
       const item = byId.get(id);
-      return item
+      return item && !outOfStock.has(id)
         ? [{ ...item, menuItemId: id, price: item.price.toFixed(2) }]
         : [];
     });
+  }
+
+  private async outOfStockCandidates(ids: string[]) {
+    const unavailable = new Set<string>();
+    if (!ids.length) return unavailable;
+    // Base recipe only; the final basket quote validates selected options and concurrent reservations.
+    const ingredients = await this.prisma.menuItemIngredient.findMany({
+      where: { menuItemId: { in: ids } },
+      select: {
+        menuItemId: true,
+        quantity: true,
+        inventoryItem: {
+          select: {
+            stock: true,
+            reservedStock: true,
+            deletedAt: true,
+            category: { select: { deletedAt: true } },
+            unit: { select: { deletedAt: true } },
+          },
+        },
+      },
+    });
+    for (const { menuItemId, quantity, inventoryItem: item } of ingredients) {
+      if (
+        item.deletedAt ||
+        item.category.deletedAt ||
+        item.unit.deletedAt ||
+        !quantity.gt(0) ||
+        item.stock.minus(item.reservedStock).lt(quantity)
+      )
+        unavailable.add(menuItemId);
+    }
+    return unavailable;
   }
 
   private readCandidateIds(value: unknown): string[] {

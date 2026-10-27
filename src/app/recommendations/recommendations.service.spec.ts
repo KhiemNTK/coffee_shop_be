@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { Logger } from '@nestjs/common';
 import { RecommendationsService } from './recommendations.service';
 import {
   PUBLIC_MENU_SELECT,
@@ -6,6 +7,28 @@ import {
 } from '../menu/public-menu-query';
 
 describe('Recommendation public contract', () => {
+  it('preserves the stack of a background failure for the production logger', async () => {
+    jest.useFakeTimers();
+    const service = new RecommendationsService({} as never);
+    const error = new Error('Refresh unavailable');
+    const refresh = jest
+      .spyOn(service, 'refreshPairs')
+      .mockRejectedValue(error);
+    const log = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    try {
+      service.onModuleInit();
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(log).toHaveBeenCalledWith(
+        'Recommendation pair refresh failed.',
+        error.stack,
+      );
+    } finally {
+      service.onModuleDestroy();
+      refresh.mockRestore();
+      log.mockRestore();
+      jest.useRealTimers();
+    }
+  });
   it('returns current public options in candidate order without leaking recipes', async () => {
     const item = {
       id: 'candidate',
@@ -42,6 +65,7 @@ describe('Recommendation public contract', () => {
         ]),
       },
       menuItem: { findMany: jest.fn().mockResolvedValue([item]) },
+      menuItemIngredient: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new RecommendationsService(prisma as never);
     expect(await service.recommendPos('session')).toEqual({
@@ -61,6 +85,95 @@ describe('Recommendation public contract', () => {
     expect(
       PUBLIC_MENU_SELECT.optionGroups.select.options.select,
     ).not.toHaveProperty('ingredients');
+  });
+});
+
+describe('Recommendation available stock', () => {
+  const item = (id: string) => ({
+    id,
+    name: id,
+    price: new Prisma.Decimal(10000),
+  });
+  const ingredient = (
+    id: string,
+    stock: string,
+    reserved: string,
+    deletedAt: Date | null = null,
+  ) => ({
+    menuItemId: id,
+    quantity: new Prisma.Decimal('0.02'),
+    inventoryItem: {
+      stock: new Prisma.Decimal(stock),
+      reservedStock: new Prisma.Decimal(reserved),
+      deletedAt,
+      category: { deletedAt: null },
+      unit: { deletedAt: null },
+    },
+  });
+
+  it('filters before limiting, using available stock and active ingredients in bounded batches', async () => {
+    const ids = ['reserved', 'deleted', 'low', 'next', 'untracked'];
+    const ingredients = [
+      ingredient('reserved', '5', '5'),
+      ingredient('deleted', '5', '0', new Date()),
+      ingredient('low', '0.01', '0'),
+      ingredient('next', '0.02', '0'),
+    ];
+    const prisma = {
+      orderSession: {
+        findUnique: jest.fn().mockResolvedValue({
+          sessionStatus: 'ACTIVE',
+          orderItems: [{ menuItemId: 'anchor' }],
+        }),
+      },
+      menuItemRecommendationPair: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue(
+            ids.map((candidateId, i) => ({ candidateId, support: 10 - i })),
+          ),
+      },
+      menuItem: {
+        findMany: jest
+          .fn()
+          .mockImplementation(({ where }) =>
+            Promise.resolve(
+              ids.filter((id) => where.id.in.includes(id)).map(item),
+            ),
+          ),
+      },
+      menuItemIngredient: {
+        findMany: jest.fn().mockResolvedValue(ingredients),
+      },
+    };
+    const result = await new RecommendationsService(
+      prisma as never,
+    ).recommendPos('session');
+    expect(result.recommendations.map((value) => value.id)).toEqual([
+      'next',
+      'untracked',
+    ]);
+    expect(prisma.menuItemIngredient.findMany).toHaveBeenCalledTimes(2);
+    expect(result.recommendations[0]).not.toHaveProperty('inventoryItem');
+  });
+
+  it('rechecks stock for a previously recorded online exposure without changing its cohort', async () => {
+    const prisma = {
+      menuItem: { findMany: jest.fn().mockResolvedValue([item('anchor')]) },
+      recommendationExposure: {
+        findUnique: jest.fn().mockResolvedValue({
+          variant: 'TREATMENT',
+          candidateIds: ['anchor'],
+        }),
+      },
+      menuItemIngredient: {
+        findMany: jest.fn().mockResolvedValue([ingredient('anchor', '1', '1')]),
+      },
+    };
+    const result = await new RecommendationsService(
+      prisma as never,
+    ).recommendOnline({ clientRequestId: 'request', menuItemIds: ['anchor'] });
+    expect(result).toEqual({ variant: 'TREATMENT', recommendations: [] });
   });
 });
 

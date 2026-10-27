@@ -1,7 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
-import type { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
+import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
+import { Workbook } from 'exceljs';
 import { ReportsService } from './reports.service';
 
 describe('ReportsService', () => {
@@ -192,6 +193,52 @@ describe('ReportsService', () => {
         },
       ]);
   };
+
+  it('exports numeric report cells without changing the JSON contract', async () => {
+    mockDashboardRows();
+    const dashboard = await service.getDashboard(query);
+    const exporter = new ReportsService(
+      prisma as unknown as ExtendedPrismaClient,
+      new ExcelUtilService(),
+    );
+    jest.spyOn(exporter, 'getDashboard').mockResolvedValue(dashboard);
+    const workbook = await exporter.exportDashboard(query);
+    const parsed = new Workbook();
+    await parsed.xlsx.load(await workbook.xlsx.writeBuffer());
+    const column = workbook
+      .getWorksheet('Summary')!
+      .getColumn('grossSales').number;
+    expect(parsed.getWorksheet('Summary')!.getCell(2, column).value).toBe(
+      220000,
+    );
+    expect(parsed.getWorksheet('Summary')!.getCell(2, column).numFmt).toBe(
+      '#,##0.00',
+    );
+    expect(dashboard.summary.grossSales).toBe('220000.00');
+  });
+
+  it('keeps the same 13 sheet headers even when the report has no activity', async () => {
+    mockDashboardRows();
+    const populated = await service.getDashboard(query);
+    tx.$queryRaw.mockResolvedValue([]);
+    const empty = await service.getDashboard(query);
+    const exporter = new ReportsService(
+      prisma as unknown as ExtendedPrismaClient,
+      new ExcelUtilService(),
+    );
+    const report = jest.spyOn(exporter, 'getDashboard');
+    report.mockResolvedValue(populated);
+    const first = await exporter.exportDashboard(query);
+    report.mockResolvedValue(empty);
+    const second = await exporter.exportDashboard(query);
+    expect(second.worksheets).toHaveLength(13);
+    for (const sheet of second.worksheets) {
+      expect(sheet.columnCount).toBeGreaterThan(0);
+      expect(sheet.getRow(1).values).toEqual(
+        first.getWorksheet(sheet.name)!.getRow(1).values,
+      );
+    }
+  });
 
   it('returns stable money strings and zero-filled enum breakdowns', async () => {
     mockDashboardRows();
