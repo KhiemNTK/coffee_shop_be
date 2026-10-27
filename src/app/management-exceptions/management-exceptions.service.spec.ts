@@ -11,6 +11,7 @@ import {
 import { ManagementExceptionsController } from './management-exceptions.controller';
 import { REQUIRED_PERMISSIONS_KEY } from '../authorization/authorization.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
+import { fulfillmentWhere } from '../online-orders/fulfillment-where';
 
 describe('ManagementExceptionsService', () => {
   const prisma = {
@@ -23,6 +24,7 @@ describe('ManagementExceptionsService', () => {
     takeawayFeedback: { count: jest.fn(), findMany: jest.fn() },
     kitchenTicket: { count: jest.fn(), findMany: jest.fn() },
     onlineOrderRequest: { count: jest.fn(), findMany: jest.fn() },
+    printJob: { count: jest.fn(), findMany: jest.fn() },
     outboxEvent: {
       count: jest.fn(),
       findMany: jest.fn(),
@@ -54,6 +56,8 @@ describe('ManagementExceptionsService', () => {
     prisma.kitchenTicket.count.mockResolvedValue(6);
     prisma.onlineOrderRequest.count.mockResolvedValue(7);
     prisma.outboxEvent.count.mockResolvedValue(8);
+    prisma.printJob.count.mockResolvedValue(9);
+    prisma.printJob.findMany.mockResolvedValue([]);
     prisma.outboxEvent.findMany.mockResolvedValue([]);
     prisma.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
     prisma.outboxEvent.findUnique.mockResolvedValue({
@@ -84,8 +88,9 @@ describe('ManagementExceptionsService', () => {
         KITCHEN_OVERDUE: 6,
         ONLINE_PICKUP_LATE: 7,
         OUTBOX_DEAD_LETTER: 8,
+        PRINT_REVIEW: 9,
       },
-      total: 35,
+      total: 44,
     });
     expect(prisma.paymentReconciliationIncident.count).toHaveBeenCalledWith({
       where: { status: 'OPEN' },
@@ -112,8 +117,9 @@ describe('ManagementExceptionsService', () => {
     ['CASH_HANDOVER', prisma.cashHandover, 'createdAt', 4],
     ['FEEDBACK', prisma.takeawayFeedback, 'createdAt', 5],
     ['KITCHEN_OVERDUE', prisma.kitchenTicket, 'dueAt', 6],
-    ['ONLINE_PICKUP_LATE', prisma.onlineOrderRequest, 'pickupAt', 7],
+    ['ONLINE_PICKUP_LATE', prisma.onlineOrderRequest, 'createdAt', 7],
     ['OUTBOX_DEAD_LETTER', prisma.outboxEvent, 'occurredAt', 8],
+    ['PRINT_REVIEW', prisma.printJob, 'updatedAt', 9],
   ] as const)('paginates %s oldest first', async (kind, model, date, total) => {
     const result = await service.findAll({ kind, page: 2, itemPerPage: 2 });
 
@@ -175,6 +181,55 @@ describe('ManagementExceptionsService', () => {
           attempts: true,
           occurredAt: true,
           availableAt: true,
+          lastErrorCode: true,
+          lastFailedAt: true,
+          context: true,
+        },
+      }),
+    );
+  });
+
+  it('exposes only the original request ID from delivery context', async () => {
+    prisma.outboxEvent.findMany.mockResolvedValue([
+      {
+        id: 'event-id',
+        lastErrorCode: 'PERMANENT_REJECTION',
+        lastFailedAt: new Date(),
+        context: {
+          requestId: 'original-request-id',
+          employeeId: 'private-actor',
+          tracestate: 'private-state',
+        },
+      },
+    ]);
+    const result = await service.findAll({
+      kind: 'OUTBOX_DEAD_LETTER',
+      page: 1,
+      itemPerPage: 20,
+    });
+    expect(result.list).toEqual([
+      expect.objectContaining({ requestId: 'original-request-id' }),
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(
+      /context|private-actor|private-state/,
+    );
+  });
+
+  it('lists uncertain print delivery without exposing document payload or device keys', async () => {
+    await service.findAll({ kind: 'PRINT_REVIEW', page: 1, itemPerPage: 20 });
+    expect(prisma.printJob.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { status: 'REQUIRES_REVIEW' },
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          attempts: true,
+          createdAt: true,
+          updatedAt: true,
+          invoiceId: true,
+          kitchenTicketId: true,
+          device: { select: { name: true } },
         },
       }),
     );
@@ -306,20 +361,13 @@ describe('ManagementExceptionsService', () => {
 
   it('uses the fulfillment grace window without treating late orders as no-shows', async () => {
     await service.summary();
-    const where = {
-      status: 'ACCEPTED',
-      pickupAt: { lt: new Date('2026-10-11T09:45:00Z') },
-      orderSession: {
-        is: {
-          orderItems: {
-            some: {
-              replacementRemake: { is: null },
-              serveStatus: { in: ['PENDING', 'COOKING', 'READY'] },
-            },
-          },
-        },
-      },
-    };
+    const where = fulfillmentWhere(new Date());
+    expect(where.OR).toEqual(
+      expect.arrayContaining([
+        { pickupAt: { lt: new Date('2026-10-11T09:45:00Z') } },
+        expect.objectContaining({ pickupAt: null }),
+      ]),
+    );
     expect(prisma.onlineOrderRequest.count).toHaveBeenCalledWith({ where });
     await service.findAll({
       kind: 'ONLINE_PICKUP_LATE',

@@ -24,11 +24,13 @@ import {
 import type { ClaimedOutboxEvent } from '../../common/types';
 import { outboxDispatchTotal } from '../../common/observability/metrics';
 import { runWithRequestContext } from '../../common/request-context';
+import { redactLogValue } from '../logger/log-redaction';
 import { readOutboxContext } from './outbox-context';
 import { DomainEventBusService } from './domain-event-bus.service';
 import {
   OutboxDeferredError,
   OutboxPermanentError,
+  outboxFailureCode,
 } from './outbox-delivery.error';
 
 const QUEUE_NAME = 'domain-outbox';
@@ -145,6 +147,8 @@ export class OutboxDispatcherService
               lastError: this.stopping
                 ? 'Outbox dispatcher stopped before enqueue.'
                 : 'Outbox dispatch batch interrupted.',
+              lastErrorCode: 'DISPATCH_INTERRUPTED',
+              lastFailedAt: new Date(),
             },
           });
         } catch (error) {
@@ -482,6 +486,8 @@ export class OutboxDispatcherService
         lockedAt: null,
         lockedBy: null,
         lastError: null,
+        lastErrorCode: null,
+        lastFailedAt: null,
       },
     });
     if (result.count > 0) outboxDispatchTotal.inc({ outcome: 'published' });
@@ -506,6 +512,8 @@ export class OutboxDispatcherService
           : OutboxEventStatus.PENDING,
         attempts,
         lastError: this.errorMessage(error),
+        lastErrorCode: outboxFailureCode(error),
+        lastFailedAt: new Date(),
         lockedAt: null,
         lockedBy: null,
         ...(!deadLetter
@@ -524,6 +532,7 @@ export class OutboxDispatcherService
           eventName: event.eventName,
           aggregateId: event.aggregateId,
           attempts,
+          errorCode: outboxFailureCode(error),
           error: this.errorMessage(error),
         });
       }
@@ -545,6 +554,8 @@ export class OutboxDispatcherService
         lockedAt: null,
         lockedBy: null,
         lastError: this.errorMessage(error),
+        lastErrorCode: outboxFailureCode(error),
+        lastFailedAt: new Date(),
         availableAt: new Date(Date.now() + Math.max(1_000, delayMs)),
       },
     });
@@ -567,8 +578,14 @@ export class OutboxDispatcherService
   }
 
   private errorMessage(error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    return message.slice(0, 2_000);
+    // Prisma messages may contain complete query arguments, not just credentials.
+    const message =
+      error instanceof Error && error.name.startsWith('PrismaClient')
+        ? error.name
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    return String(redactLogValue(message)).slice(0, 2_000);
   }
 
   private async closeRedisResource(

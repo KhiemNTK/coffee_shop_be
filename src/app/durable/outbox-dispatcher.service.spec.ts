@@ -169,6 +169,8 @@ describe('OutboxDispatcherService', () => {
         attempts: 1,
         availableAt: expect.any(Date),
         lastError: 'temporary failure',
+        lastErrorCode: 'DELIVERY_FAILED',
+        lastFailedAt: expect.any(Date),
       }),
     });
   });
@@ -206,6 +208,7 @@ describe('OutboxDispatcherService', () => {
       aggregateId: event.aggregateId,
       attempts: 5,
       error: 'permanent failure',
+      errorCode: 'DELIVERY_FAILED',
     });
   });
 
@@ -337,6 +340,8 @@ describe('OutboxDispatcherService', () => {
           lockedAt: null,
           lockedBy: null,
           lastError: 'Delivery deferred by rate limit.',
+          lastErrorCode: 'RATE_LIMITED',
+          lastFailedAt: expect.any(Date),
           availableAt: expect.any(Date),
         },
       });
@@ -361,12 +366,33 @@ describe('OutboxDispatcherService', () => {
           data: expect.objectContaining({
             status: OutboxEventStatus.DEAD_LETTER,
             attempts: 1,
+            lastErrorCode: 'PERMANENT_REJECTION',
+            lastFailedAt: expect.any(Date),
           }),
         }),
       );
       expect(log).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('redacts credentials before persisting failed-delivery diagnostics', async () => {
+    eventBus.on(event.eventName, () => {
+      throw new Error('Authorization: Bearer fixture-credential');
+    });
+    await service.drainOnce();
+    const failure = prisma.outboxEvent.updateMany.mock.calls.find(
+      ([args]) => args.data.lastErrorCode === 'DELIVERY_FAILED',
+    );
+    expect(failure?.[0].data).toEqual(
+      expect.objectContaining({
+        lastError: 'Authorization: [REDACTED]',
+        lastFailedAt: expect.any(Date),
+      }),
+    );
+    expect(
+      JSON.stringify(prisma.outboxEvent.updateMany.mock.calls),
+    ).not.toContain('fixture-credential');
+  });
 
   it('preserves the database retry budget after a retained job is restarted', async () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation();
@@ -515,6 +541,8 @@ describe('OutboxDispatcherService', () => {
             lockedBy: null,
             availableAt: expect.any(Date),
             lastError: 'Outbox dispatch batch interrupted.',
+            lastErrorCode: 'DISPATCH_INTERRUPTED',
+            lastFailedAt: expect.any(Date),
           },
         });
         finishRead(undefined);
@@ -584,6 +612,8 @@ describe('OutboxDispatcherService', () => {
         data: expect.objectContaining({
           status: 'PENDING',
           lastError: 'Outbox dispatcher stopped before enqueue.',
+          lastErrorCode: 'DISPATCH_INTERRUPTED',
+          lastFailedAt: expect.any(Date),
         }),
       }),
     );

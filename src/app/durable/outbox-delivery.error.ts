@@ -5,3 +5,9 @@ export class OutboxDeferredError extends Error {
 }
 
 export class OutboxPermanentError extends Error {}
+
+export function outboxFailureCode(error: unknown) {
+  if (error instanceof OutboxPermanentError) return 'PERMANENT_REJECTION';
+  if (error instanceof OutboxDeferredError) return 'RATE_LIMITED';
+  return 'DELIVERY_FAILED';
+}

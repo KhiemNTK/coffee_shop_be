@@ -1,6 +1,7 @@
 import { CatchEverythingFilter } from './catch-everything.filter';
 import { AutoMockingModule } from '../../test/auto-mocking/auto-mocking.module';
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { HttpAdapterHost } from '@nestjs/core';
 import { ExecutionContextHost } from '@nestjs/core/helpers/execution-context-host';
 import { ExpressAdapter } from '@nestjs/platform-express';
@@ -23,6 +24,130 @@ describe('CatchEverythingFilter', () => {
   it('should be defined', () => {
     expect(filter).toBeDefined();
   });
+
+  it.each([
+    new Prisma.PrismaClientUnknownRequestError(
+      'query contains private customer data',
+      { clientVersion: 'test' },
+    ),
+    new Prisma.PrismaClientValidationError(
+      'query contains private customer data',
+      { clientVersion: 'test' },
+    ),
+    new Prisma.PrismaClientKnownRequestError(
+      'query contains private customer data',
+      { clientVersion: 'test', code: 'P2024' },
+    ),
+    new Prisma.PrismaClientInitializationError(
+      'query contains private customer data',
+      'test',
+    ),
+  ])('does not log raw Prisma query arguments: %s', (error) => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const logError = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    try {
+      const adapter = new HttpAdapterHost();
+      adapter.httpAdapter = new ExpressAdapter();
+      const reply = jest
+        .spyOn(adapter.httpAdapter, 'reply')
+        .mockImplementation();
+      const actualFilter = new CatchEverythingFilter(
+        adapter,
+        new ZodExceptionService(),
+      );
+      actualFilter.catch(
+        error,
+        new ExecutionContextHost([
+          {
+            method: 'GET',
+            path: '/test',
+            headers: {},
+            requestId: 'request-id',
+            acceptsLanguages: () => 'en',
+          },
+          { locals: {}, setHeader: jest.fn() },
+        ]),
+      );
+      expect(reply).toHaveBeenCalled();
+      expect(
+        JSON.stringify([...warn.mock.calls, ...logError.mock.calls]),
+      ).not.toContain('private customer data');
+      expect(
+        JSON.stringify([...warn.mock.calls, ...logError.mock.calls]),
+      ).toContain('/test');
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  it.each([
+    ['P2034', undefined, 409, 'TRANSACTION_CONFLICT'],
+    ['P2010', '40001', 409, 'TRANSACTION_CONFLICT'],
+    ['P2010', '40P01', 409, 'TRANSACTION_CONFLICT'],
+    ['P2024', undefined, 503, 'DATABASE_BUSY'],
+    ['P2028', undefined, 500, 'P2028'],
+    ['P2010', '23514', 500, 'P2010'],
+  ] as const)(
+    'maps %s/%s without suggesting unsafe retries',
+    async (prismaCode, sqlState, status, code) => {
+      const log = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      try {
+        const adapter = new HttpAdapterHost();
+        adapter.httpAdapter = new ExpressAdapter();
+        const actualFilter = new CatchEverythingFilter(
+          adapter,
+          new ZodExceptionService(),
+        );
+        const app = express().use(httpLocaleMiddleware);
+        let mutations = 0;
+        app.post('/db-error', (req, res) => {
+          mutations++;
+          Object.assign(req, { requestId: 'database-request-id' });
+          actualFilter.catch(
+            new Prisma.PrismaClientKnownRequestError(
+              'private-query-arguments',
+              {
+                code: prismaCode,
+                clientVersion: 'test',
+                meta: sqlState ? { code: sqlState } : undefined,
+              },
+            ),
+            new ExecutionContextHost([req, res]),
+          );
+        });
+        for (const locale of ['vi', 'en']) {
+          const result = await request(app)
+            .post('/db-error')
+            .set('Accept-Language', locale)
+            .expect(status);
+          expect(result.body).toMatchObject({
+            data: null,
+            code,
+            requestId: 'database-request-id',
+          });
+          expect(result.headers['retry-after']).toBe(
+            code === 'DATABASE_BUSY' ? '1' : undefined,
+          );
+          expect(JSON.stringify(result.body)).not.toContain(
+            'private-query-arguments',
+          );
+          if (code === 'TRANSACTION_CONFLICT')
+            expect(result.body.errors[0].message).toContain(
+              locale === 'vi' ? 'Tải lại' : 'Reload',
+            );
+          if (code === 'DATABASE_BUSY')
+            expect(result.body.errors[0].message).toContain(
+              locale === 'vi' ? 'đang bận' : 'busy',
+            );
+        }
+        expect(mutations).toBe(2);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
 
   it.each(['valid', 'malformed', 'unrelated'])(
     'only exposes validated daily-close counts: %s',

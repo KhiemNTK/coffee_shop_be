@@ -9,9 +9,9 @@ import {
   CashExpenseRequestStatus,
   CashHandoverSettlementStatus,
   CashHandoverStatus,
-  OnlineOrderStatus,
   OutboxEventStatus,
   PaymentReconciliationIncidentStatus,
+  PrintJobStatus,
   Prisma,
   ServeStatus,
 } from '@prisma/client';
@@ -21,7 +21,8 @@ import {
 } from '../../common/prisma/prisma.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { GetManagementExceptionsDto } from './dto/get-management-exceptions.dto';
-import { ONLINE_ORDER_NO_SHOW_GRACE_MS } from '../../common/consts/online-order-settings';
+import { fulfillmentWhere } from '../online-orders/fulfillment-where';
+import { readOutboxContext } from '../durable/outbox-context';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { RetryOutboxEventDto } from './dto/retry-outbox-event.dto';
 
@@ -55,25 +56,6 @@ function overdueKitchenWhere(asOf: Date): Prisma.KitchenTicketWhereInput {
   };
 }
 
-function latePickupWhere(asOf: Date): Prisma.OnlineOrderRequestWhereInput {
-  return {
-    status: OnlineOrderStatus.ACCEPTED,
-    pickupAt: { lt: new Date(asOf.getTime() - ONLINE_ORDER_NO_SHOW_GRACE_MS) },
-    orderSession: {
-      is: {
-        orderItems: {
-          some: {
-            replacementRemake: { is: null },
-            serveStatus: {
-              in: [ServeStatus.PENDING, ServeStatus.COOKING, ServeStatus.READY],
-            },
-          },
-        },
-      },
-    },
-  };
-}
-
 @Injectable()
 export class ManagementExceptionsService {
   constructor(
@@ -93,6 +75,7 @@ export class ManagementExceptionsService {
       kitchen,
       pickup,
       outbox,
+      print,
     ] = await Promise.all([
       this.prisma.paymentReconciliationIncident.count({
         where: { status: PaymentReconciliationIncidentStatus.OPEN },
@@ -103,9 +86,12 @@ export class ManagementExceptionsService {
       this.prisma.cashHandover.count({ where: handoverWhere }),
       this.prisma.takeawayFeedback.count({ where: feedbackWhere }),
       this.prisma.kitchenTicket.count({ where: overdueKitchenWhere(asOf) }),
-      this.prisma.onlineOrderRequest.count({ where: latePickupWhere(asOf) }),
+      this.prisma.onlineOrderRequest.count({ where: fulfillmentWhere(asOf) }),
       this.prisma.outboxEvent.count({
         where: { status: OutboxEventStatus.DEAD_LETTER },
+      }),
+      this.prisma.printJob.count({
+        where: { status: PrintJobStatus.REQUIRES_REVIEW },
       }),
     ]);
 
@@ -119,6 +105,7 @@ export class ManagementExceptionsService {
         KITCHEN_OVERDUE: kitchen,
         ONLINE_PICKUP_LATE: pickup,
         OUTBOX_DEAD_LETTER: outbox,
+        PRINT_REVIEW: print,
       },
       total:
         payment +
@@ -127,7 +114,8 @@ export class ManagementExceptionsService {
         feedback +
         kitchen +
         pickup +
-        outbox,
+        outbox +
+        print,
     };
   }
 
@@ -155,6 +143,41 @@ export class ManagementExceptionsService {
               attempts: true,
               occurredAt: true,
               availableAt: true,
+              lastErrorCode: true,
+              lastFailedAt: true,
+              context: true,
+            },
+          }),
+        ]);
+        return {
+          kind: query.kind,
+          ...this.pagination.paging({ ...query, totalItems }).format(
+            list.map(({ context, ...event }) => ({
+              ...event,
+              requestId: readOutboxContext(context).requestId ?? null,
+            })),
+          ),
+        };
+      }
+      case 'PRINT_REVIEW': {
+        const where = { status: PrintJobStatus.REQUIRES_REVIEW };
+        const [totalItems, list] = await Promise.all([
+          this.prisma.printJob.count({ where }),
+          this.prisma.printJob.findMany({
+            where,
+            skip,
+            take,
+            orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+            select: {
+              id: true,
+              type: true,
+              status: true,
+              attempts: true,
+              createdAt: true,
+              updatedAt: true,
+              invoiceId: true,
+              kitchenTicketId: true,
+              device: { select: { name: true } },
             },
           }),
         ]);
@@ -286,14 +309,14 @@ export class ManagementExceptionsService {
         };
       }
       case 'ONLINE_PICKUP_LATE': {
-        const where = latePickupWhere(new Date());
+        const where = fulfillmentWhere(new Date());
         const [totalItems, list] = await Promise.all([
           this.prisma.onlineOrderRequest.count({ where }),
           this.prisma.onlineOrderRequest.findMany({
             where,
             skip,
             take,
-            orderBy: [{ pickupAt: 'asc' }, { id: 'asc' }],
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
             select: {
               id: true,
               pickupAt: true,

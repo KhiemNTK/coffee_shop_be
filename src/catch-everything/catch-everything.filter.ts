@@ -27,6 +27,15 @@ const PRISMA_ERROR_MAP: Record<
   string,
   { status: HttpStatus; message: string }
 > = {
+  TRANSACTION_CONFLICT: {
+    status: HttpStatus.CONFLICT,
+    message:
+      'Data changed during this operation. Reload and review before trying again.',
+  },
+  DATABASE_BUSY: {
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    message: 'Database is busy. Please wait before trying again.',
+  },
   P2002: {
     status: HttpStatus.CONFLICT,
     message: 'Data already exists in the system.',
@@ -63,6 +72,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
 
     const { status, errors } = this.resolveException(exception, reqContext);
     const code = this.resolveErrorCode(exception, status);
+    if (code === 'DATABASE_BUSY') response.setHeader('Retry-After', '1');
     const payload =
       exception instanceof HttpException ? exception.getResponse() : null;
     const blockers =
@@ -94,6 +104,14 @@ export class CatchEverythingFilter implements ExceptionFilter {
 
   private resolveErrorCode(exception: unknown, status: HttpStatus) {
     if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+      if (
+        exception.code === 'P2034' ||
+        (exception.code === 'P2010' &&
+          (exception.meta?.code === '40001' ||
+            exception.meta?.code === '40P01'))
+      )
+        return 'TRANSACTION_CONFLICT';
+      if (exception.code === 'P2024') return 'DATABASE_BUSY';
       return exception.code;
     }
     if (exception instanceof ZodValidationException) {
@@ -130,10 +148,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
     }
 
     if (exception instanceof ZodSerializationException) {
-      this.logger.error(
-        `[ZodSerializationException] ${reqContext}`,
-        exception.getZodError(),
-      );
+      this.logger.error(`[ZodSerializationException] ${reqContext}`);
       return {
         status: HttpStatus.INTERNAL_SERVER_ERROR,
         errors: [{ message: 'Internal Server Error.' }],
@@ -145,12 +160,18 @@ export class CatchEverythingFilter implements ExceptionFilter {
     }
 
     if (exception instanceof Prisma.PrismaClientValidationError) {
-      this.logger.warn(
-        `[PrismaClientValidationError] ${reqContext}: ${exception.message}`,
-      );
+      this.logger.warn(`[PrismaClientValidationError] ${reqContext}`);
       return {
         status: HttpStatus.BAD_REQUEST,
         errors: [{ message: 'Invalid database query parameters.' }],
+      };
+    }
+
+    if (exception instanceof Prisma.PrismaClientUnknownRequestError) {
+      this.logger.error(`[PrismaClientUnknownRequestError] ${reqContext}`);
+      return {
+        status: HttpStatus.INTERNAL_SERVER_ERROR,
+        errors: [{ message: 'An unexpected database error occurred.' }],
       };
     }
 
@@ -158,10 +179,7 @@ export class CatchEverythingFilter implements ExceptionFilter {
       exception instanceof Prisma.PrismaClientInitializationError ||
       exception instanceof Prisma.PrismaClientRustPanicError
     ) {
-      this.logger.error(
-        `[Prisma DB Infrastructure Error] ${reqContext}`,
-        exception.message,
-      );
+      this.logger.error(`[Prisma DB Infrastructure Error] ${reqContext}`);
       return {
         status: HttpStatus.INTERNAL_SERVER_ERROR,
         errors: [{ message: 'Database connection error.' }],
@@ -195,11 +213,14 @@ export class CatchEverythingFilter implements ExceptionFilter {
     exception: Prisma.PrismaClientKnownRequestError,
     reqContext: string,
   ): { status: HttpStatus; errors: ErrorItem[] } {
-    const mapped = PRISMA_ERROR_MAP[exception.code];
+    const mapped =
+      PRISMA_ERROR_MAP[
+        this.resolveErrorCode(exception, HttpStatus.INTERNAL_SERVER_ERROR)
+      ];
 
     if (!mapped) {
-      this.logger.warn(
-        `Unhandled Prisma error [${exception.code}] at ${reqContext}: ${exception.message}`,
+      this.logger.error(
+        `Unhandled Prisma error [${exception.code}] at ${reqContext}`,
       );
       return {
         status: HttpStatus.INTERNAL_SERVER_ERROR,

@@ -45,6 +45,8 @@ export class HealthService implements OnModuleDestroy {
   }
 
   async readiness() {
+    if (this.stopping)
+      throw new ServiceUnavailableException({ code: 'SERVICE_NOT_READY' });
     const checks = await Promise.allSettled([
       this.withTimeout(this.prisma.$queryRaw`SELECT 1`, 1500),
       this.redisStatus().then((status) => {
@@ -55,7 +57,7 @@ export class HealthService implements OnModuleDestroy {
     const databaseReady = checks[0]?.status === 'fulfilled';
     const redisReady = checks[1]?.status === 'fulfilled';
 
-    if (!databaseReady || !redisReady) {
+    if (this.stopping || !databaseReady || !redisReady) {
       throw new ServiceUnavailableException({
         code: 'SERVICE_NOT_READY',
         dependencies: {
@@ -75,8 +77,12 @@ export class HealthService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
-    this.stopping = true;
+    this.beginShutdown();
     this.redis?.disconnect();
+  }
+
+  beginShutdown() {
+    this.stopping = true;
   }
 
   async redisStatus(): Promise<'up' | 'down' | 'disabled'> {

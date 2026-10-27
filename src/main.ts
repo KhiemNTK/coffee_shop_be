@@ -7,6 +7,9 @@ import { initApp } from './init';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { registerGracefulShutdown } from './common/lifecycle/graceful-shutdown';
 import { OutboxDispatcherService } from './app/durable/outbox-dispatcher.service';
+import { registerHttpDrain } from './common/lifecycle/http-drain';
+import { HealthService } from './app/health/health.service';
+import { KitchenRealtimeService } from './app/kitchen/kitchen-realtime.service';
 
 export async function bootstrap(cleanup?: () => Promise<void>) {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -15,6 +18,7 @@ export async function bootstrap(cleanup?: () => Promise<void>) {
   });
 
   initApp(app);
+  const drainHttp = registerHttpDrain(app);
   const config = app.get(ConfigService);
   const port = config.get<number>('PORT', 3000);
   const host = config.get<string>('HOST', '0.0.0.0');
@@ -25,8 +29,14 @@ export async function bootstrap(cleanup?: () => Promise<void>) {
   await app.listen(port, host);
   registerGracefulShutdown(app, {
     timeoutMs: shutdownTimeoutMs,
-    // Global module destroy hooks run after consumers have removed their listeners.
-    beforeClose: () => app.get(OutboxDispatcherService).onModuleDestroy(),
+    beforeClose: async () => {
+      app.get(HealthService).beginShutdown();
+      const drained = drainHttp();
+      app.get(KitchenRealtimeService).closeStreams();
+      await drained;
+      // Keep event consumers and their dependencies alive until the worker stops.
+      await app.get(OutboxDispatcherService).onModuleDestroy();
+    },
     cleanup,
   });
   const protocol = nodeEnvironment === 'production' ? 'https' : 'http';

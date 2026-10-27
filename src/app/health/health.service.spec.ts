@@ -30,6 +30,29 @@ describe('HealthService', () => {
     });
   });
 
+  it('fails readiness immediately when draining without disconnecting dependencies', async () => {
+    const service = createService('test');
+    const disconnect = jest.fn();
+    Reflect.set(service, 'redis', { disconnect });
+    service.beginShutdown();
+    await expect(service.readiness()).rejects.toMatchObject({
+      response: { code: 'SERVICE_NOT_READY' },
+    });
+    expect(disconnect).not.toHaveBeenCalled();
+    service.onModuleDestroy();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report ready when shutdown starts during a pending dependency check', async () => {
+    const pending = Promise.withResolvers<[]>();
+    const service = createService('test');
+    Reflect.set(service, 'prisma', { $queryRaw: () => pending.promise });
+    const check = service.readiness();
+    service.beginShutdown();
+    pending.resolve([]);
+    await expect(check).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
   it('fails readiness when production Redis is not configured', async () => {
     await expect(createService('production').readiness()).rejects.toThrow(
       ServiceUnavailableException,

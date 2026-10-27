@@ -3,6 +3,9 @@ import { ZodError } from 'zod';
 import type { ApiLocale } from '../types';
 
 const messages: Readonly<Record<string, string>> = {
+  PROMOTION_EXPIRED: 'Khuyến mãi đã hết hạn, không thể công bố trên website.',
+  PROMOTION_STOREFRONT_CHANGED:
+    'Khuyến mãi đã thay đổi. Tải lại trạng thái trước khi lưu công bố.',
   'Internal Server Error.': 'Dịch vụ gặp lỗi. Vui lòng thử lại sau.',
   'Internal Server Error': 'Dịch vụ gặp lỗi. Vui lòng thử lại sau.',
   'Database connection error.':
@@ -47,6 +50,21 @@ const messages: Readonly<Record<string, string>> = {
 };
 
 const codedMessages: Readonly<Record<string, string>> = {
+  KITCHEN_SPLIT_REQUIRES_UNPRINTED:
+    'Phiếu bếp đã được máy in nhận hoặc đang chờ đối soát. Chỉ chuyển cả dòng món, không tách một phần số lượng.',
+  EMPLOYEE_PROFILE_CHANGED:
+    'Hồ sơ nhân viên đã thay đổi. Đọc lại hồ sơ trước khi lưu.',
+  MENU_CONFIGURATION_CHANGED:
+    'Công thức hoặc tùy chọn món đã thay đổi. Đọc lại cấu hình trước khi lưu.',
+  AUTH_ORIGIN_NOT_ALLOWED:
+    'Không thể đăng nhập từ địa chỉ này. Vui lòng mở trang web chính thức hoặc liên hệ quản trị viên.',
+  AUTH_JSON_REQUIRED: 'Yêu cầu đăng nhập không đúng định dạng được hỗ trợ.',
+  SERVICE_DRAINING: 'Dịch vụ đang khởi động lại. Vui lòng thử lại sau ít giây.',
+  TRANSACTION_CONFLICT:
+    'Dữ liệu đã thay đổi trong lúc xử lý. Tải lại và kiểm tra trước khi thử lại.',
+  DATABASE_BUSY: 'Hệ thống dữ liệu đang bận. Vui lòng chờ trước khi thử lại.',
+  CASH_HANDOVER_FUND_BUSY:
+    'Quỹ nguồn hoặc quỹ nhận đang mở ca thu ngân. Đóng ca trước khi bàn giao.',
   DAILY_CLOSE_BLOCKED:
     'Cần xử lý các nghiệp vụ chưa hoàn tất trước khi chốt sổ ngày.',
   INVOICE_QUOTE_CHANGED:

@@ -20,6 +20,17 @@ export class AuditLogsService {
     const where: Prisma.ActionLogWhereInput = {
       ...(query.employeeId ? { employeeId: query.employeeId } : {}),
       ...(query.actionType ? { actionType: query.actionType } : {}),
+      ...(query.actionPrefix
+        ? { AND: [{ actionType: { startsWith: `${query.actionPrefix}_` } }] }
+        : {}),
+      ...(query.keyword
+        ? {
+            OR: [
+              { actionType: { contains: query.keyword, mode: 'insensitive' } },
+              { requestId: query.keyword },
+            ],
+          }
+        : {}),
       ...(query.requestId ? { requestId: query.requestId } : {}),
       ...(query.from || query.to
         ? {

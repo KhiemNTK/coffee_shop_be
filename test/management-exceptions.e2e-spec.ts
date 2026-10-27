@@ -5,6 +5,11 @@ import { ManagementExceptionsService } from '../src/app/management-exceptions/ma
 import type { ExtendedPrismaClient } from '../src/common/prisma/prisma.service';
 import { PaginationUtilService } from '../src/common/utils/pagination-util/pagination-util.service';
 import { IdempotencyService } from '../src/app/durable/idempotency.service';
+import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
+import { DomainEventBusService } from '../src/app/durable/domain-event-bus.service';
+import { OutboxDispatcherService } from '../src/app/durable/outbox-dispatcher.service';
+import { OutboxPermanentError } from '../src/app/durable/outbox-delivery.error';
 
 describe('Management exception inbox (e2e)', () => {
   const prisma = new PrismaClient();
@@ -27,6 +32,77 @@ describe('Management exception inbox (e2e)', () => {
 
   afterAll(() => prisma.$disconnect());
 
+  it('persists safe failure metadata and exposes the original request ID after real dispatch', async () => {
+    const rollback = new Error('Rollback dispatch fixture');
+    const log = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    try {
+      await expect(
+        prisma.$transaction(
+          async (tx) => {
+            const event = await tx.outboxEvent.create({
+              data: {
+                topic: 'order',
+                eventName: 'management.test',
+                aggregateType: 'Test',
+                aggregateId: randomUUID(),
+                payload: { token: 'private-payload' },
+                context: { requestId: 'original-dispatch-request' },
+                availableAt: new Date(Date.now() - 1_000),
+              },
+            });
+            const bus = new DomainEventBusService();
+            bus.on(event.eventName, () => {
+              throw new OutboxPermanentError(
+                'Authorization: Bearer private-credential',
+              );
+            });
+            const dispatcher = new OutboxDispatcherService(
+              tx as unknown as ExtendedPrismaClient,
+              new ConfigService(),
+              bus,
+            );
+            await dispatcher.drainOnce();
+            const failed = await tx.outboxEvent.findUniqueOrThrow({
+              where: { id: event.id },
+            });
+            expect(failed).toMatchObject({
+              status: 'DEAD_LETTER',
+              lastErrorCode: 'PERMANENT_REJECTION',
+              lastError: 'Authorization: [REDACTED]',
+              attempts: 1,
+            });
+            expect(failed.lastFailedAt).toBeInstanceOf(Date);
+            expect(failed.payload).toEqual(event.payload);
+            const inbox = new ManagementExceptionsService(
+              tx as unknown as ExtendedPrismaClient,
+              new PaginationUtilService(),
+              {} as never,
+            );
+            const result = await inbox.findAll({
+              kind: 'OUTBOX_DEAD_LETTER',
+              page: 1,
+              itemPerPage: 10,
+            });
+            expect(result.list).toEqual([
+              expect.objectContaining({
+                id: event.id,
+                requestId: 'original-dispatch-request',
+                lastErrorCode: 'PERMANENT_REJECTION',
+              }),
+            ]);
+            expect(JSON.stringify(result)).not.toMatch(
+              /private-|lastError"|context/,
+            );
+            throw rollback;
+          },
+          { timeout: 15_000 },
+        ),
+      ).rejects.toBe(rollback);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('reads live PostgreSQL source tables without mutating them', async () => {
     const [
       summary,
@@ -36,6 +112,8 @@ describe('Management exception inbox (e2e)', () => {
       feedback,
       kitchen,
       pickup,
+      print,
+      outbox,
     ] = await Promise.all([
       service.summary(),
       service.findAll({ kind: 'PAYMENT', page: 1, itemPerPage: 10 }),
@@ -44,6 +122,8 @@ describe('Management exception inbox (e2e)', () => {
       service.findAll({ kind: 'FEEDBACK', page: 1, itemPerPage: 10 }),
       service.findAll({ kind: 'KITCHEN_OVERDUE', page: 1, itemPerPage: 10 }),
       service.findAll({ kind: 'ONLINE_PICKUP_LATE', page: 1, itemPerPage: 10 }),
+      service.findAll({ kind: 'PRINT_REVIEW', page: 1, itemPerPage: 10 }),
+      service.findAll({ kind: 'OUTBOX_DEAD_LETTER', page: 1, itemPerPage: 10 }),
     ]);
 
     expect(summary.total).toBe(
@@ -60,6 +140,8 @@ describe('Management exception inbox (e2e)', () => {
       feedback,
       kitchen,
       pickup,
+      print,
+      outbox,
     ]) {
       expect(page.list.length).toBeLessThanOrEqual(10);
       expect(page.list.every((item) => Boolean(item.id))).toBe(true);
@@ -94,7 +176,7 @@ describe('Management exception inbox (e2e)', () => {
           const station = await tx.kitchenStation.create({
             data: { code: suffix, name: suffix },
           });
-          const fixture = async (serveStatus: ServeStatus) =>
+          const fixture = async (serveStatus: ServeStatus, readyAt?: Date) =>
             tx.orderSession.create({
               data: {
                 employeeId: employee.id,
@@ -104,6 +186,7 @@ describe('Management exception inbox (e2e)', () => {
                     quantity: 1,
                     priceAtTime: 100,
                     serveStatus,
+                    readyAt,
                   },
                 },
               },
@@ -136,13 +219,16 @@ describe('Management exception inbox (e2e)', () => {
             tickets.push(ticket.id);
           }
           const requests: string[] = [];
-          for (const [status, pickupAt] of [
-            [ServeStatus.READY, past],
-            [ServeStatus.SERVED, past],
-            [ServeStatus.CANCELLED, past],
-            [ServeStatus.READY, future],
+          for (const [status, pickupAt, readyAt] of [
+            [ServeStatus.READY, past, past],
+            [ServeStatus.SERVED, past, past],
+            [ServeStatus.CANCELLED, past, past],
+            [ServeStatus.READY, future, past],
+            [ServeStatus.READY, null, now],
+            [ServeStatus.COOKING, null, past],
+            [ServeStatus.READY, null, null],
           ] as const) {
-            const session = await fixture(status);
+            const session = await fixture(status, readyAt ?? undefined);
             const request = await tx.onlineOrderRequest.create({
               data: {
                 clientRequestId: randomUUID(),
@@ -161,6 +247,66 @@ describe('Management exception inbox (e2e)', () => {
             });
             requests.push(request.id);
           }
+          const asap = await fixture(ServeStatus.READY, past);
+          await tx.onlineOrderRequest.create({
+            data: {
+              clientRequestId: randomUUID(),
+              requestHash: 'a'.repeat(64),
+              pickupName: 'ASAP customer',
+              phoneNumber: '0900000000',
+              quotedSubtotal: 100,
+              expiresAt: future,
+              status: 'ACCEPTED',
+              orderSessionId: asap.id,
+              reviewedAt: now,
+              reviewedById: employee.id,
+            },
+          });
+          const printer = await tx.printDevice.create({
+            data: {
+              name: suffix,
+              type: 'RECEIPT',
+              paperSize: '80mm',
+              apiKeyHash: 'f'.repeat(64),
+            },
+          });
+          const printReview = await tx.printJob.create({
+            data: {
+              type: 'PRECHECK',
+              orderSessionId: asap.id,
+              deviceId: printer.id,
+              status: 'REQUIRES_REVIEW',
+              payload: { token: 'private-fixture' },
+            },
+          });
+          const printed = await tx.printJob.create({
+            data: {
+              type: 'PRECHECK',
+              orderSessionId: asap.id,
+              deviceId: printer.id,
+              printedAt: now,
+              status: 'PRINTED',
+              payload: {},
+            },
+          });
+          const event = await tx.outboxEvent.create({
+            data: {
+              topic: 'order',
+              eventName: 'order.test',
+              aggregateType: 'Invoice',
+              aggregateId: suffix,
+              payload: { token: 'private-fixture' },
+              status: 'DEAD_LETTER',
+              attempts: 5,
+              lastError: 'private-fixture',
+              lastErrorCode: 'PERMANENT_REJECTION',
+              lastFailedAt: now,
+              context: {
+                requestId: 'original-request-fixture',
+                employeeId: employee.id,
+              },
+            },
+          });
           const source = await tx.fund.create({
             data: { name: suffix, type: 'CASH', balance: 0 },
           });
@@ -241,6 +387,45 @@ describe('Management exception inbox (e2e)', () => {
             page: 1,
             itemPerPage: 50,
           });
+          expect(pickup.list).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ orderSessionId: asap.id }),
+            ]),
+          );
+          const prints = await inbox.findAll({
+            kind: 'PRINT_REVIEW',
+            page: 1,
+            itemPerPage: 50,
+          });
+          expect(prints.list).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ id: printReview.id }),
+            ]),
+          );
+          expect(prints.list).not.toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ id: printed.id }),
+            ]),
+          );
+          const events = await inbox.findAll({
+            kind: 'OUTBOX_DEAD_LETTER',
+            page: 1,
+            itemPerPage: 50,
+          });
+          expect(events.list).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                id: event.id,
+                lastErrorCode: 'PERMANENT_REJECTION',
+                lastFailedAt: now,
+                requestId: 'original-request-fixture',
+              }),
+            ]),
+          );
+          expect(JSON.stringify([prints, events])).not.toContain(
+            'private-fixture',
+          );
+          expect(JSON.stringify(events.list)).not.toContain('context');
           for (const [page, ids] of [
             [kitchen, tickets],
             [pickup, requests],
@@ -256,6 +441,8 @@ describe('Management exception inbox (e2e)', () => {
             }
           }
           const caseSummary = await inbox.summary();
+          expect(caseSummary.counts.ONLINE_PICKUP_LATE).toBe(2);
+          expect(caseSummary.counts.PRINT_REVIEW).toBe(1);
           expect(caseSummary.total).toBe(
             Object.values(caseSummary.counts).reduce(
               (sum, count) => sum + count,

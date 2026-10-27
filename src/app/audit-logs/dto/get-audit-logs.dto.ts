@@ -13,6 +13,13 @@ export class GetAuditLogsDto extends createZodDto(
       itemPerPage: z.coerce.number().int().min(1).max(50).default(20),
       employeeId: z.uuid().optional(),
       actionType: z.string().trim().min(1).max(100).optional(),
+      actionPrefix: z
+        .string()
+        .trim()
+        .regex(/^[A-Z][A-Z0-9_]*$/)
+        .max(100)
+        .optional(),
+      keyword: z.string().trim().min(1).max(100).optional(),
       requestId: z.string().trim().min(1).max(100).optional(),
       from: DateSchema.optional(),
       to: DateSchema.optional(),
