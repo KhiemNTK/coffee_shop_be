@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DiscountType } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
@@ -7,6 +11,7 @@ import {
   GetActivePromotionsDto,
   SearchPromotionsDto,
   UpdatePromotionDto,
+  UpdatePromotionStorefrontDto,
 } from './dto';
 import { PromotionPolicyService } from './policies/promotion-policy.service';
 import { PromotionsRepository } from './repositories/promotions.repository';
@@ -63,6 +68,89 @@ export class PromotionsService {
 
   findOne(id: string) {
     return this.promotionQueryService.findOne(id);
+  }
+
+  async findStorefrontPromotion() {
+    const now = new Date();
+    const promotion =
+      await this.promotionsRepository.client.promotion.findFirst({
+        where: {
+          showOnStorefront: true,
+          deletedAt: null,
+          startDate: { lte: now },
+          endDate: { gt: now },
+        },
+        select: {
+          id: true,
+          name: true,
+          startDate: true,
+          endDate: true,
+          discountType: true,
+          discountValue: true,
+          maxDiscount: true,
+          storefrontDescription: true,
+        },
+        orderBy: [{ startDate: 'desc' }, { id: 'asc' }],
+      });
+    return {
+      promotion: promotion
+        ? {
+            ...promotion,
+            discountValue: promotion.discountValue.toString(),
+            maxDiscount: promotion.maxDiscount?.toString() ?? null,
+          }
+        : null,
+    };
+  }
+
+  updateStorefront(
+    id: string,
+    employeeId: string,
+    dto: UpdatePromotionStorefrontDto,
+  ) {
+    return this.promotionTransactionService.runSerializable(async (tx) => {
+      await this.assertActiveEmployee(tx, employeeId);
+      const existing = await this.promotionsRepository.findActiveById(id, tx);
+      if (!existing) throw new NotFoundException('Promotion not found.');
+      if (dto.showOnStorefront && existing.endDate <= new Date()) {
+        throw new ConflictException({
+          code: 'PROMOTION_EXPIRED',
+          message: 'Expired promotions cannot be published.',
+        });
+      }
+      const changed = await tx.promotion.updateMany({
+        where: { id, deletedAt: null, updatedAt: dto.expectedUpdatedAt },
+        data: {
+          showOnStorefront: dto.showOnStorefront,
+          storefrontDescription: dto.storefrontDescription,
+          updatedAt: new Date(
+            Math.max(Date.now(), dto.expectedUpdatedAt.getTime() + 1),
+          ),
+        },
+      });
+      if (changed.count !== 1) {
+        throw new ConflictException({
+          code: 'PROMOTION_STOREFRONT_CHANGED',
+          message: 'Promotion changed. Reload before publishing.',
+        });
+      }
+      await this.promotionAuditService.log(tx, {
+        employeeId,
+        actionType: 'PROMOTION_STOREFRONT_UPDATED',
+        details: {
+          promotionId: id,
+          before: {
+            showOnStorefront: existing.showOnStorefront,
+            storefrontDescription: existing.storefrontDescription,
+          },
+          after: {
+            showOnStorefront: dto.showOnStorefront,
+            storefrontDescription: dto.storefrontDescription,
+          },
+        },
+      });
+      return { success: true };
+    });
   }
 
   async update(id: string, employeeId: string, dto: UpdatePromotionDto) {
@@ -125,7 +213,7 @@ export class PromotionsService {
 
         const deleted = await tx.promotion.update({
           where: { id },
-          data: { deletedAt: new Date() },
+          data: { deletedAt: new Date(), showOnStorefront: false },
         });
         await this.promotionAuditService.log(tx, {
           employeeId,

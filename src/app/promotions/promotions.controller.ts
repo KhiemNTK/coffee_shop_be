@@ -3,9 +3,11 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
@@ -13,11 +15,13 @@ import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
+import { SkipAuth } from '../auth/auth.decorator';
 import {
   CreatePromotionDto,
   GetActivePromotionsDto,
   SearchPromotionsDto,
   UpdatePromotionDto,
+  UpdatePromotionStorefrontDto,
 } from './dto';
 import { PromotionsService } from './promotions.service';
 
@@ -25,6 +29,23 @@ import { PromotionsService } from './promotions.service';
 @Controller('promotions')
 export class PromotionsController {
   constructor(private readonly promotionsService: PromotionsService) {}
+
+  @Get('public/featured')
+  @SkipAuth()
+  @Header('Cache-Control', 'no-store')
+  featured() {
+    return this.promotionsService.findStorefrontPromotion();
+  }
+
+  @Put(':id/storefront')
+  @RequirePermissions(PermissionKeys.PROMOTIONS_UPDATE)
+  updateStorefront(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: UpdatePromotionStorefrontDto,
+  ) {
+    return this.promotionsService.updateStorefront(id, employeeId, dto);
+  }
 
   @Post()
   @RequirePermissions(PermissionKeys.PROMOTIONS_CREATE)

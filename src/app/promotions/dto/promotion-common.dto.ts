@@ -38,8 +38,8 @@ export const PromotionBaseSchema = z.object({
 });
 
 export const SearchPromotionsSchema = z.object({
-  itemPerPage: z.coerce.number().min(1).max(100).default(20),
-  page: z.coerce.number().min(1).default(1),
+  itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
   select: z.string().optional(),
   keyword: z.string().trim().min(1).max(100).optional(),
   discountType: z.enum(DiscountType).optional(),

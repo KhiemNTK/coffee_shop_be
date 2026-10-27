@@ -111,6 +111,8 @@ export class PromotionQueryService {
   }
 
   private readonly promotionSelect = {
+    showOnStorefront: true,
+    storefrontDescription: true,
     id: true,
     name: true,
     startDate: true,
@@ -198,6 +200,8 @@ export class PromotionQueryService {
       createdAt: Date;
       updatedAt: Date;
       deletedAt: Date | null;
+      showOnStorefront: boolean;
+      storefrontDescription: string | null;
       _count: { invoices: number };
     },
     now: Date,
@@ -215,6 +219,8 @@ export class PromotionQueryService {
       createdAt: promotion.createdAt,
       updatedAt: promotion.updatedAt,
       deletedAt: promotion.deletedAt,
+      showOnStorefront: promotion.showOnStorefront,
+      storefrontDescription: promotion.storefrontDescription,
     };
   }
 
