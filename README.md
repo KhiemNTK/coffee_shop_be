@@ -1,5 +1,8 @@
 # Coffee Shop Backend
 
+Position assignment and access policy: [Permissions And Positions](docs/authorization-delegation.md).
+Print-agent acknowledgement and recovery: [POS Printing](docs/pos-precheck-payment-feedback.md).
+
 Customer-owned order history and ingredient reservations are documented in
 [Customer Orders And Ingredient Commitments](docs/customer-orders-stock.md).
 Deploy the migration before the new API, with old inventory writers stopped.
@@ -122,6 +125,43 @@ a shared database without reviewing the target URL and backup first.
 
 ## Audit hardening rollout
 
+- Cookie-creating login routes accept JSON only and reject untrusted browser
+  origins (including customer Google login). Header-less JSON API clients remain
+  supported; `FE_URL` must list the actual frontend origins, including scheme/port.
+- Staff CSRF cookies last as long as refresh cookies; authenticated `/auth/me`
+  restores a missing CSRF cookie without rotating an existing one. A legacy
+  browser missing both a valid access token and CSRF must sign in again once.
+- Invalid reset tokens are rejected before bcrypt; token consumption, password
+  changes and session revocation still commit atomically. Reset has its own throttle.
+- Refresh conflicts retry bounded serializable transactions, not a replay grace
+  window. Only invalid/reused token state triggers family revocation. Transient
+  refresh errors do not clear frontend identity or automatically replay commands.
+
+- Shutdown rejects new HTTP work, closes kitchen SSE, and waits for in-flight
+  requests before stopping the outbox worker and database/Redis dependencies.
+  The existing shutdown deadline still bounds the whole operation.
+- Production SMTP uses implicit TLS on port 465 and requires STARTTLS on other
+  ports. Certificate verification is not disabled. Test mail stays in memory.
+- Excel report numeric columns are explicit; money/quantities within Excel's
+  15-significant-digit precision are numeric, while wider values stay exact text.
+  Empty report sheets keep their headers. JSON response contracts are unchanged.
+
+- Exhausted database write conflicts return `409 TRANSACTION_CONFLICT`;
+  pool acquisition timeouts return `503 DATABASE_BUSY` with `Retry-After`.
+  Reload and review before retrying; preserve existing idempotency keys for
+  uncertain commands. Transaction API errors such as `P2028` are not reclassified
+  as safe rejections, and the client never automatically replays a mutation.
+- Role Excel export selects scalar metadata only. Permission and employee
+  assignments cannot be requested as export fields. No new schema migration is
+  required for these query and error-handling changes.
+- Employee `PATCH /api/v1/employees/:id` requires `expectedUpdatedAt` from a
+  profile/list read. A stale edit returns `409 EMPLOYEE_PROFILE_CHANGED`.
+  Omitted `isActive` never changes account status; clients send changed fields only.
+- `POST /api/v1/orders/sessions` requires a UUID `idempotencyKey` per opening.
+  Keep the same key, table and guest count after a lost reply. Session creation,
+  response snapshot and outbox commit together; a different payload with the same
+  key is rejected. Deploy matching POS clients; no new migration is required.
+
 - List/export `select` accepts scalar fields of the requested model only. Relations,
   unknown fields and credential fields return HTTP 400 rather than expanding private
   records. Shared pagination requires integer pages and at most 100 items per page.
@@ -186,6 +226,29 @@ a shared database without reviewing the target URL and backup first.
   Legacy recovery commands without a shift ID remain blocked for reconciliation.
   Fund type/deletion and cashier/handover retries use the shared serializable
   transaction helper, including retry metrics. No new schema migration is needed.
+- Cash handovers cannot debit or credit a cash fund with an open shift. Check
+  `409 CASH_HANDOVER_FUND_BUSY` and reload before trying again. Bank reconciliation
+  commits each credit, handover settlement, statement match and audit atomically;
+  ignoring an entry cannot overwrite a concurrent match.
+- Bank statement imports replay by their existing fund/content checksum. Retrying
+  the exact statement returns its original ID with `replayed: true`, without
+  rerunning reconciliation. Overlapping bank transaction IDs with changed content
+  still return 409. After a lost response, `POST /bank-reconciliation/imports/recover`
+  accepts the original import body and only reads its result; it requires the import
+  permission. `404 BANK_IMPORT_RECOVERY_NOT_FOUND` allows an explicit resend of the
+  unchanged body. The frontend keeps this pending body in actor-scoped session
+  storage until confirmed; do not clear browser data to bypass recovery.
+- Payment incident `keyword` searches title, merchant reference, invoice number,
+  incident type and exact UUIDs on the server. Its paged `totalItems` always uses
+  the same filters. Read errors are not zero incidents; refresh before retrying
+  an uncertain incident command. Ignoring a statement mismatch is an audited
+  exception decision, not proof of payment or a handover settlement.
+- `GET /cashier-shifts/mine/closed` requires `/cash-handovers_create` and scopes
+  history to the authenticated cashier, regardless of supplied employee/status
+  filters. The frontend uses this list to recover handover after a page reload.
+- Audit reads keep exact `actionType` and `requestId` filters. `actionPrefix`
+  filters a group such as `PAYMENT`; `keyword` searches action names or an exact
+  request ID. Group and keyword filters apply together, not instead of each other.
 
 ## payOS Integration
 
@@ -313,11 +376,8 @@ replicas. Redis outage delays background/realtime delivery, not callback storage
 
 ## Operations
 
-- [Single VPS deployment](deploy/README.md): production Compose, runtime
-  configuration and controlled migration/permission seeding.
-- [Release and recovery runbook](deploy/release/README.md): migration rehearsal,
-  backup/restore, incident response, secret rotation and remaining go-live
-  blockers.
+- [Single VPS deployment and recovery](deploy/README.md): configuration, release
+  gates, controlled migration/permission seeding, backup/restore and incidents.
 - [Observability](deploy/observability/README.md): metrics, alerts and tracing.
 - [Load testing](test/load/README.md): read-only staging profile and limits.
 
@@ -331,7 +391,10 @@ separate staging rehearsal before go-live.
   controlled; this is not a promise that ingredients are reserved.
 - Staff configure size/topping groups with `GET/PUT /api/v1/menu/items/:id/options`
   (`/menu_read` or `/menu_update`). `PUT` replaces all groups with
-  `{groups:[{name,minSelected,maxSelected,options:[{name,priceDelta,ingredients:[{inventoryItemId,quantity}]}]}]}`.
+  `{expectedRevision,groups:[{name,minSelected,maxSelected,options:[{name,priceDelta,ingredients:[{inventoryItemId,quantity}]}]}]}`.
+  Recipe and option GET responses include `revision`; both PUT endpoints require
+  that value as `expectedRevision`. A stale configuration returns
+  `409 MENU_CONFIGURATION_CHANGED` without replacing it. Read again before saving.
   Changing groups gives choices new IDs, so pending online requests with old
   choices must be resubmitted; accepted orders retain their price, choice and
   recipe snapshots. Ingredients are additive to the base recipe, not substitutes.
@@ -421,7 +484,11 @@ separate staging rehearsal before go-live.
   prices. The client must never auto-add them. Pairs come from paid or partially
   refunded invoices in the past 90 days (not fully refunded invoices), require at least three distinct invoices, and
   refresh in the background every six hours. Availability is still checked on
-  each response; stock is not reserved. The public endpoint is rate-limited
+  each response, including replay. Base recipes exclude deleted ingredients and
+  insufficient available stock (`stock - reservedStock`) in bounded batches.
+  Untracked items without a base recipe remain eligible. This is advisory: stock
+  is not reserved, and the final basket quote validates options and concurrent
+  changes. The public endpoint is rate-limited
   and stores only the checkout UUID, basket hash, cohort and suggested IDs,
   never customer contact details. Repeating the same ID and basket is safe;
   changing the basket with that ID returns 409. Staff with `/reports_read` use
@@ -436,19 +503,10 @@ separate staging rehearsal before go-live.
   POS staff with `/orders_sessions_read` can call
   `GET /api/v1/recommendations/pos/:id` for an active order session. This uses
   the same current-menu filter but is not part of the online A/B experiment.
-- Optional Telegram order updates: create a bot with BotFather, set
-  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` and a random 32+ character
-  `TELEGRAM_WEBHOOK_SECRET`, then register the HTTPS webhook at
-  `/api/v1/online-orders/telegram/webhook` with Telegram's `secret_token` and
-  `allowed_updates=["message"]`. The client calls
-  `POST /api/v1/online-orders/requests/telegram-link` with
-  `{requestId,accessToken}` and opens the returned deep link. The customer must
-  press Start in a private bot chat to opt in; `/stop` unsubscribes that chat.
-  Links expire after 30 minutes and can be used once. The bot sends only order
-  status, never name, phone, total or access token. Notifications are advisory;
-  the status endpoint remains authoritative. Telegram delivery may repeat after
-  an outbox retry and requires a public HTTPS endpoint; no real message is sent
-  until the bot settings are configured.
+- Optional Telegram updates use explicit customer opt-in and the durable order
+  outbox. See [activation](deploy/README.md#optional-telegram) and
+  [subscription/delivery contract](docs/online-order-preparation.md#telegram-delivery).
+  API state remains authoritative; notification retries can repeat messages.
 - `GET /api/v1/reports/online-orders?from=...&to=...&timeZone=...` requires
   `/reports_read` and returns a daily request-cohort funnel: submitted,
   reviewed/accepted, rejected, expired, cancelled, ready, paid and collected,
@@ -614,6 +672,16 @@ before enabling frontend actions.
 - Invoice void, session cancellation and table clear now require a trimmed
   `reason` (3-500 characters). Transfer, merge, split, clear and cancellation
   write the authenticated actor to `ActionLog` in the same transaction.
+- `POST /api/v1/orders/sessions/:id/items` requires an `idempotencyKey`
+  (8-120 characters). Keep the same key, session and basket after a lost reply.
+  Missing keys are rejected; existing POS clients already supply them.
+- Table clear and accepted online-order cancellation reconcile kitchen printing
+  in the business transaction. Unclaimed jobs lose cancelled lines; claimed,
+  printed or uncertain jobs get a separate cancellation notice.
+- Partial line splits update unclaimed print quantities and queue a separate
+  ticket for the destination table. A claimed, printed or uncertain original
+  returns `409 KITCHEN_SPLIT_REQUIRES_UNPRINTED`; move the whole line instead.
+  Previously printed paper is never silently rewritten.
 - Money accepts at most 16 integer digits and 2 decimal places; tax accepts
   0-100 with at most 2 decimal places. Send large amounts as decimal strings.
 - POS cash/card recovery preserves the original command and idempotency key

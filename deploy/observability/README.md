@@ -1,5 +1,7 @@
 # Production Observability
 
+Use the [single-VPS runbook](../README.md) for release, backup and recovery.
+
 ## Prometheus
 
 Scrape `GET /metrics` with the production `METRICS_TOKEN` as a bearer token.
@@ -48,6 +50,25 @@ docker run --rm --entrypoint /bin/promtool --mount "type=bind,source=$((Resolve-
 `coffee_shop_postgres_connections` measures PostgreSQL server connections. It
 does not claim to expose Prisma's private pool occupancy. Correlate connection
 pressure with request latency, transaction retries and PostgreSQL monitoring.
+
+## Log And Exception Diagnosis
+
+Production logs use JSON stdout and request correlation, without request bodies
+or full responses. Credential redaction covers nested objects, JSON strings,
+authorization headers, device/API keys and URL credentials. It is a safety net:
+never intentionally log provider payloads or Prisma query arguments.
+
+The operations inbox includes uncertain print deliveries and overdue ASAP pickup
+orders. Print review links require print-read permission; confirming paper delivery
+still requires print-manage permission in the printing workflow. Do not blindly
+retry an uncertain print: paper may already have been delivered.
+
+Dead-letter details expose only `lastErrorCode`, `lastFailedAt` and the original
+`requestId`, not payloads or raw errors. Search logs by that request ID or event ID,
+fix the cause, then retry with a reason. Requeued means waiting for a worker, not
+published. Historical failures keep null diagnostics until another delivery fails.
+Apply migration `20261025010000_outbox_failure_diagnostics` before deploying this
+backend, and deploy the backend before the matching frontend contract.
 
 ## OpenTelemetry
 

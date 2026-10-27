@@ -1,5 +1,8 @@
 # AI Activation And Evaluation
 
+Use the [single-VPS runbook](../README.md) for deployment/recovery. This guide
+covers optional AI activation and evaluation, not another release procedure.
+
 Scope: one shop, occasional manager analyses, not autonomous decisions. Checkout
 and public recommendations never depend on Gemini. Apply the history migration
 `20261022020000_add_business_insight_history` before deploying this version;
@@ -120,7 +123,7 @@ not just `GEMINI_DATA_POLICY_ACKNOWLEDGED=true`. Review the official
 [Gemini data terms](https://ai.google.dev/gemini-api/terms).
 
 Results/snapshots and private seven-day history live in PostgreSQL; BullMQ delivery
-and daily call budgets use Redis. See `docs/business-insights.md` for the list API,
+and daily call budgets use Redis. See the [insight contract](../../docs/business-insights.md) for the list API,
 outbox recovery and `AI_OUTCOME_UNKNOWN`. Keep persistence, `noeviction` and
 provider-side budget controls. Redis data loss can lose pending work/reset counters;
 the implementation does not promise a hard currency spending cap. PostgreSQL

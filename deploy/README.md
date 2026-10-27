@@ -2,7 +2,9 @@
 
 Run from the backend repository on a Linux VPS. Keep `coffee_shop_be` and
 `coffee_shop_fe` as sibling repositories and record both Git SHAs for each release.
-This setup is one server, not high availability. It does not migrate or seed on startup.
+This is one server with a maintenance window, not high availability or a canary
+deployment. Nothing migrates or seeds on startup. This is the release/recovery
+procedure; module documents describe their API contracts, not another release path.
 
 Redis memory is configurable through `REDIS_MAXMEMORY` (dataset limit, default
 `128mb`) and `REDIS_CONTAINER_MEMORY_LIMIT` (container limit, default `384m`).
@@ -28,44 +30,116 @@ Set `APP_DOMAIN` to the real hostname, point DNS to the VPS, and permit only SSH
 - Set `DATABASE_URL=postgresql://USER:PASSWORD@postgres:5432/DB?schema=public&connection_limit=10`.
 - Set `REDIS_URL=redis://:PASSWORD@redis:6379`. URL-encode credentials where necessary.
 - Use the actual Coffee Homes `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`.
-- Leave all VNPay/MoMo credentials blank for cash-only operation. Otherwise use
+- Leave VNPay/MoMo/payOS credentials blank for cash-only operation. Otherwise use
   credentials and production URLs supplied by the provider, never sandbox URLs.
 - Disable Swagger. Either disable metrics or configure a strong metrics token.
 - Never put secrets in `VITE_*`; those values are embedded in the public bundle.
-- Optional Telegram customer updates and private staff alerts: see [setup and delivery limits](telegram/README.md). Leave bot settings blank when unused.
+- Optional services: [Telegram](#optional-telegram), [AI](ai/README.md),
+  [menu images](../docs/supabase-images.md), and [monitoring](observability/README.md).
 
 The Compose file overrides HTTPS cookie, CSRF, public signup, API prefix and
 proxy settings. Only the frontend reverse proxy publishes ports. PostgreSQL and
 Redis are private; Redis also requires authentication. Logs rotate at 3 x 10 MiB.
 
-## Release
+## Release Gate
 
-First rehearse migrations against staging data and take a restorable database
-snapshot outside the VPS. Do not create a second production stack over the same DB.
+1. Record both Git SHAs and image digests; keep compatible previous images.
+   Require green backend `verify` and `container` jobs and the frontend CI gate.
+   Pin frontend integration `BACKEND_REF` to the committed backend revision.
+2. Rehearse migrations and read-only preflight on a restored staging copy. CI's
+   empty database does not prove upgrades work on existing shop data. Run
+   `pnpm audit --prod --audit-level high` on the release lockfile and resolve
+   high/critical findings. Keep evidence privately, not secrets in CI output.
+3. Pause new shop operations and reconcile uncertain payments. Take an encrypted
+   off-host backup and verify restoration into a new database, including counts,
+   recent invoices and migration history. Agree how to reconcile callbacks during
+   maintenance. A dump alone is not a restore test; VPS volumes are not backups.
+4. Review pending migrations. Do not mix old/new inventory reservation writers,
+   outbox lease owners or printer recovery. See the [stock](../docs/customer-orders-stock.md),
+   [outbox](observability/README.md#outbox-delivery) and
+   [printing](../docs/pos-precheck-payment-feedback.md#migration) contracts.
+
+## Release Commands
+
+Run each step only after the previous succeeds. The backend also owns workers;
+stop it before migration, even when updating an existing stack. Stop separately
+launched workers/agents too. The frontend may remain up, but API calls/webhooks
+can return 503 until recovery. Do not retry uncertain writes with new keys or
+create a second stack over the same database.
 
 ```sh
+set -eu
 docker compose --env-file .env.production -f deploy/compose.production.yml config --quiet
 docker compose --env-file .env.production -f deploy/compose.production.yml build backend frontend tooling
+
+docker compose --env-file .env.production -f deploy/compose.production.yml stop backend
 docker compose --env-file .env.production -f deploy/compose.production.yml up -d postgres redis
 docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling
 docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/ts-node/dist/bin.js prisma/seed.ts --permissions-only
 docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/ts-node/dist/bin.js prisma/preflight/permissions.ts
 
+docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/ts-node/dist/bin.js prisma/preflight/production-baseline.ts
+
+docker compose --env-file .env.production -f deploy/compose.production.yml run --rm tooling node node_modules/prisma/build/index.js migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code
+
 docker compose --env-file .env.production -f deploy/compose.production.yml up -d backend frontend
 ```
 
-The tooling service is opt-in and runs `prisma migrate deploy`; seeding permissions
-is a separate explicit command. Bootstrap OWNER using the controlled seed workflow
-with `OWNER_*` configured privately, never public signup.
+The opt-in tooling image runs `prisma migrate deploy`; the non-root runtime image
+does not contain the Prisma CLI. The shown permission seed is an explicit release
+step, not the full catalog/activity seed. Bootstrap OWNER separately with the
+controlled seed and private `OWNER_*` values, never public signup.
+
+First installation: before acceptance/opening intake, configure `OWNER_EMAIL`,
+`OWNER_USERNAME`, `OWNER_FULL_NAME` and `OWNER_PASSWORD` (12+ characters) privately.
+Run the tooling seed command without `--permissions-only` only for that reviewed
+bootstrap, then rerun the checks. This also replaces system-role grants and seeds
+cash-control settings; do not use it as a routine update on an existing shop.
 
 The read-only permission catalog check must pass before release. See the
-[catalog and concurrent-edit contract](authorization/README.md) for legacy API
+[catalog and concurrent-edit contract](../docs/authorization-delegation.md) for legacy API
 compatibility and backend-first frontend rollout.
+
+Stop on any failed migration/preflight or schema diff (exit code 2). Do not bypass
+checks, edit `_prisma_migrations`, run `migrate reset`, or run `migrate dev` against
+a shared database. Review unknown permission keys instead of auto-deleting grants.
+
+## Acceptance
 
 Check `/api/v1/health/live` and `/api/v1/health/ready` through the real HTTPS hostname,
 then verify login/refresh/CSRF, menu, a cash sale, explicit table completion and
 scheduled pickup. Check kitchen SSE remains live through the proxy and that the
 browser never calls an internal hostname. Google/Turnstile domains must match.
+
+Use fixtures/sandbox first; a real acceptance payment needs merchant approval
+and normal accounting/reconciliation. Review uncertain paper output before
+resuming print agents, and reconcile delayed/missed callbacks before reopening
+intake. Watch 5xx, p95 latency, DB connections, Redis, outbox lag/dead letters and
+payment mismatches for a business cycle. See [metrics and alerts](observability/README.md).
+The k6 profile is not proof of 250/500 RPS until measured on sized staging;
+never run mutation load against live orders, stock or payments.
+
+## Optional Telegram
+
+Leave bot settings blank when unused; credentials are backend-only. Staff alerts
+need `TELEGRAM_BOT_TOKEN` and `TELEGRAM_STAFF_CHAT_ID` for a private group where the
+bot can send. Keep bot privacy enabled. A migrated supergroup requires explicitly
+updating the chat ID and restarting, not trusting a destination from an error.
+
+Customer subscriptions also need `TELEGRAM_BOT_USERNAME` (without `@`) and a random
+32+ character `TELEGRAM_WEBHOOK_SECRET`. Register the public HTTPS
+`POST /api/v1/online-orders/telegram/webhook` with Telegram `setWebhook`, using
+that secret as `secret_token` and `allowed_updates: ["message"]`. Staff-only sending
+needs no webhook. Optional `TELEGRAM_WEB_APP_URL` must be an HTTPS frontend origin
+without path/query/credentials. Never put bot tokens in logs or `VITE_*`.
+
+Activation: create a test request and replay its key; expect one outbox alert.
+Check staff links require sign-in, customer `/start` and `/stop` work, COD/current
+state is correct, and guest links contain no credentials. Block the bot or remove
+it from the group to verify unsubscribe/dead-letter handling; restore access and
+replay only non-stale events. See [delivery and privacy](../docs/online-order-preparation.md#telegram-delivery).
+Telegram is at-least-once: a timeout can duplicate a message. It is not payment
+evidence or an instruction to prepare an unapproved order; API state is authoritative.
 
 ## Optional Cloudflare Proxy
 
@@ -106,10 +180,39 @@ Monitor `coffee_shop_turnstile_verifications_total{action,outcome}` and
 IP, request ID or token. Check `turnstile.unavailable` logs for safe provider
 error codes when secret configuration or Siteverify fails.
 
-## Recovery
+## Recovery And Backup
 
-Do not run `down -v`, `prisma migrate reset`, or drop the new metadata columns.
-Restore the previous FE/BE images together only when their contracts are compatible
-with the expanded schema. Fix failed migrations forward; investigate an unhealthy
-backend before restarting it repeatedly. Keep a tested off-server backup and verify
-restore before taking payments. Named volumes on the same VPS are not backups.
+- Failed rollout: keep API writes stopped until schema compatibility is known.
+  Restore previous FE/BE images only if compatible with the expanded schema.
+  Preserve logs/migration evidence; prefer a reviewed forward fix. Never run
+  `down -v`, drop metadata, or restart repeatedly without diagnosis.
+- Restore drill: use a new destination database; refuse an existing destination.
+  Verify the backup checksum, restore with fail-on-error/no-owner/no-ACL options,
+  compare key business counts/recent invoices, then rehearse migration/preflight
+  and schema diff there. Never restore over the source. Remove temporary plaintext
+  dumps only after verifying the encrypted off-host copy and drill.
+- PostgreSQL outage: stop writes, restore into a new database if needed, then
+  reconcile payments. Redis outage: readiness fails; fix Redis and inspect
+  outbox/queue recovery. Do not erase replay keys or enable eviction. Signed payment
+  callbacks have their own limiter and may still persist events during Redis outage;
+  check DB state before replaying. Health routes bypass the ordinary Redis limiter.
+- Payment mismatch: compare signed provider events and settlement through the
+  reconciliation workflow; never mark paid from a return URL or edit financial
+  tables by hand. Confirm per-IP callback limits fit clients sharing a public IP;
+  coordinate edge abuse protection before scaling replicas.
+- Agree RPO (acceptable data loss) and RTO (restore time) with the shop. Logical
+  backups are not PITR. Add tested WAL archiving/managed PITR when the recovery
+  target needs it; do not claim a guarantee without a timed restore drill.
+
+## Secret Rotation
+
+Use a secret manager or restricted host configuration, not image/Git artifacts.
+On a leak, revoke at the issuer, rotate one integration at a time and inspect
+logs without copying secrets. JWT access/refresh each has one verification key:
+rotation invalidates old signed tokens, not stored session rows. Announce
+re-authentication and restart in a controlled window; dual-key rotation is not
+implemented. Keep reorder secrets stable for valid old orders.
+
+Coordinate payment keys with providers and reconcile in-flight attempts. Rotate
+`METRICS_TOKEN` in API and scraper; change DB/Redis credentials in the backing
+service before updating the app. Verify readiness and rejection of old credentials.
