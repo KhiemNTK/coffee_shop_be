@@ -81,7 +81,7 @@ export class InventoryCategoryService {
         where,
         skip: paging.skip,
         take: paging.itemPerPage,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
       });
 
     return paging.format(list);
@@ -112,15 +112,18 @@ export class InventoryCategoryService {
     employeeId: string,
     dto: UpdateInventoryCategoryDto,
   ) {
-    await this.inventoryRepository.ensureActiveCategoryExists(id);
-    if (dto.name) {
-      await this.inventoryRepository.ensureCategoryNameAvailable(dto.name, id);
-    }
-
     return this.inventoryTransactionService.runSerializable(async (tx) => {
       await this.assertActiveEmployee(tx, employeeId);
+      await this.inventoryRepository.ensureActiveCategoryExists(id, tx);
+      if (dto.name) {
+        await this.inventoryRepository.ensureCategoryNameAvailable(
+          dto.name,
+          id,
+          tx,
+        );
+      }
       const category = await tx.inventoryCategory.update({
-        where: { id },
+        where: { id, deletedAt: null },
         data: dto,
       });
       await this.inventoryAuditService.log(tx, {

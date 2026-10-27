@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, ServeStatus, SessionStatus } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import {
   PRISMA_SERVICE_TOKEN,
   type ExtendedPrismaClient,
@@ -61,6 +62,35 @@ function optionConfigSnapshot(groups: MenuOptionGroupConfig[]) {
         ),
     })),
   }));
+}
+
+function recipeConfigSnapshot(
+  ingredients: Array<{
+    inventoryItemId: string;
+    quantity: string | number | Prisma.Decimal;
+  }>,
+) {
+  return ingredients
+    .map(({ inventoryItemId, quantity }) => ({
+      inventoryItemId,
+      quantity: new Prisma.Decimal(quantity).toFixed(4),
+    }))
+    .sort((left, right) =>
+      left.inventoryItemId.localeCompare(right.inventoryItemId),
+    );
+}
+
+function configurationRevision(config: unknown) {
+  return createHash('sha256').update(JSON.stringify(config)).digest('hex');
+}
+
+function assertConfigurationRevision(expected: string, config: unknown) {
+  if (expected !== configurationRevision(config)) {
+    throw new ConflictException({
+      code: 'MENU_CONFIGURATION_CHANGED',
+      message: 'Menu configuration changed. Reload before saving.',
+    });
+  }
 }
 
 @Injectable()
@@ -492,7 +522,6 @@ export class MenuService {
         id: true,
         name: true,
         ingredients: {
-          where: { inventoryItem: { deletedAt: null } },
           orderBy: { inventoryItemId: 'asc' },
           select: this.recipeIngredientSelect,
         },
@@ -502,7 +531,13 @@ export class MenuService {
     if (!item) {
       throw new NotFoundException(`Menu item with ID ${id} not found.`);
     }
-    return item;
+    return {
+      ...item,
+      revision: configurationRevision(recipeConfigSnapshot(item.ingredients)),
+      ingredients: item.ingredients.filter(
+        ({ inventoryItem }) => !inventoryItem.deletedAt,
+      ),
+    };
   }
 
   async replaceItemRecipe(
@@ -544,6 +579,11 @@ export class MenuService {
         orderBy: { inventoryItemId: 'asc' },
         select: { inventoryItemId: true, quantity: true },
       });
+
+      assertConfigurationRevision(
+        dto.expectedRevision,
+        recipeConfigSnapshot(currentIngredients),
+      );
 
       const isUnchanged =
         currentIngredients.length === nextIngredients.length &&
@@ -589,8 +629,13 @@ export class MenuService {
         select: this.recipeIngredientSelect,
       });
 
-      return { id: item.id, name: item.name, ingredients };
-    });
+      return {
+        id: item.id,
+        name: item.name,
+        ingredients,
+        revision: configurationRevision(recipeConfigSnapshot(ingredients)),
+      };
+    }, true);
   }
 
   async getItemOptions(id: string) {
@@ -612,7 +657,10 @@ export class MenuService {
     });
     if (!item)
       throw new NotFoundException(`Menu item with ID ${id} not found.`);
-    return item;
+    return {
+      ...item,
+      revision: configurationRevision(optionConfigSnapshot(item.optionGroups)),
+    };
   }
 
   async replaceItemOptions(
@@ -646,27 +694,28 @@ export class MenuService {
 
       const previousGroups = await tx.menuItemOptionGroup.findMany({
         where: { menuItemId: id },
-        orderBy: { sortOrder: 'asc' },
+        orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
         include: {
           options: {
-            orderBy: { sortOrder: 'asc' },
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
             include: { ingredients: true },
           },
         },
       });
       const before = optionConfigSnapshot(previousGroups);
       const after = optionConfigSnapshot(dto.groups);
-      const getOptions = () =>
-        tx.menuItem.findFirstOrThrow({
+      assertConfigurationRevision(dto.expectedRevision, before);
+      const getOptions = async () => {
+        const updated = await tx.menuItem.findFirstOrThrow({
           where: { id },
           select: {
             id: true,
             name: true,
             optionGroups: {
-              orderBy: { sortOrder: 'asc' },
+              orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
               include: {
                 options: {
-                  orderBy: { sortOrder: 'asc' },
+                  orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
                   include: {
                     ingredients: { select: this.recipeIngredientSelect },
                   },
@@ -675,6 +724,13 @@ export class MenuService {
             },
           },
         });
+        return {
+          ...updated,
+          revision: configurationRevision(
+            optionConfigSnapshot(updated.optionGroups),
+          ),
+        };
+      };
       if (JSON.stringify(before) === JSON.stringify(after)) {
         return getOptions();
       }
@@ -709,7 +765,7 @@ export class MenuService {
         after,
       });
       return getOptions();
-    });
+    }, true);
   }
 
   async deleteItem(id: string, employeeId: string) {
@@ -771,6 +827,7 @@ export class MenuService {
         id: true,
         name: true,
         stock: true,
+        deletedAt: true,
         unit: { select: { id: true, name: true } },
         category: { select: { id: true, name: true } },
       },
@@ -856,9 +913,11 @@ export class MenuService {
 
   private async runSerializable<T>(
     callback: (tx: ExtendedPrismaTransactionClient) => Promise<T>,
+    retryUniqueViolations = false,
   ): Promise<T> {
     return runSerializableTransaction(this.prisma, callback, {
       loggerContext: MenuService.name,
+      retryUniqueViolations,
     });
   }
 }

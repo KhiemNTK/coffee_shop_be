@@ -41,6 +41,7 @@ export class CreateEquipmentDto extends createZodDto(
 export class UpdateEquipmentDto extends createZodDto(
   z
     .object({
+      expectedUpdatedAt: EquipmentDateTimeSchema,
       serialNumber: EquipmentFields.serialNumber,
       name: EquipmentFields.name.optional(),
       quantity: EquipmentFields.quantity.optional(),
@@ -51,9 +52,12 @@ export class UpdateEquipmentDto extends createZodDto(
       location: EquipmentFields.location,
       notes: EquipmentFields.notes,
     })
-    .refine((value) => Object.keys(value).length > 0, {
-      message: 'At least one field must be provided',
-    }),
+    .refine(
+      (value) => Object.keys(value).some((key) => key !== 'expectedUpdatedAt'),
+      {
+        message: 'At least one field must be provided',
+      },
+    ),
 ) {}
 
 export class GetEquipmentDto extends createZodDto(

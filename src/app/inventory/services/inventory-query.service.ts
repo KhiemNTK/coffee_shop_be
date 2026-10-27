@@ -67,7 +67,7 @@ export class InventoryQueryService {
       where,
       skip: paging.skip,
       take: paging.itemPerPage,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     return paging.format(list);
@@ -185,7 +185,7 @@ export class InventoryQueryService {
       WHERE ${where}
       ORDER BY
         (item."stock" / NULLIF(item."reorderPoint", 0)) ASC,
-        item."name" ASC
+        item."name" ASC, item."id" ASC
       LIMIT ${paging.itemPerPage}
       OFFSET ${paging.skip}
     `);

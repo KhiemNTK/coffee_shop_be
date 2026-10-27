@@ -1,6 +1,9 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { MenuQuantityInputSchema } from './menu-common.dto';
+import {
+  MenuConfigurationRevisionSchema,
+  MenuQuantityInputSchema,
+} from './menu-common.dto';
 
 const MenuRecipeIngredientSchema = z.object({
   inventoryItemId: z.uuid('Invalid UUID for inventory item'),
@@ -10,6 +13,7 @@ const MenuRecipeIngredientSchema = z.object({
 export class ReplaceMenuRecipeDto extends createZodDto(
   z
     .object({
+      expectedRevision: MenuConfigurationRevisionSchema,
       ingredients: z.array(MenuRecipeIngredientSchema).max(100),
     })
     .superRefine(({ ingredients }, context) => {

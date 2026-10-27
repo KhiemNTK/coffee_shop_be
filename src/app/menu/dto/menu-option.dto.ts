@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
+  MenuConfigurationRevisionSchema,
   MenuMoneyInputSchema,
   MenuQuantityInputSchema,
 } from './menu-common.dto';
@@ -61,7 +62,10 @@ const OptionGroupSchema = z
 
 export class ReplaceMenuOptionsDto extends createZodDto(
   z
-    .object({ groups: z.array(OptionGroupSchema).max(5) })
+    .object({
+      expectedRevision: MenuConfigurationRevisionSchema,
+      groups: z.array(OptionGroupSchema).max(5),
+    })
     .superRefine(({ groups }, context) => {
       if (groups.reduce((total, group) => total + group.minSelected, 0) > 20) {
         context.addIssue({

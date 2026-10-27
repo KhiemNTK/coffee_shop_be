@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { EquipmentStatus, Prisma } from '@prisma/client';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { EquipmentService } from './equipment.service';
+import { UpdateEquipmentDto } from './dto';
 
 describe('EquipmentService', () => {
   const purchaseDate = new Date('2026-01-01T00:00:00.000Z');
@@ -14,6 +15,7 @@ describe('EquipmentService', () => {
     unitPrice: new Prisma.Decimal('1000'),
     totalAmount: new Prisma.Decimal('2000'),
     purchaseDate,
+    updatedAt: purchaseDate,
     warrantyExpiresAt: null,
     status: EquipmentStatus.IN_USE,
   };
@@ -93,6 +95,84 @@ describe('EquipmentService', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('updates exact totals using serializable isolation and an active-state predicate', async () => {
+    tx.equipment.findFirst.mockResolvedValue(equipment);
+    tx.equipment.update.mockResolvedValue({
+      ...equipment,
+      quantity: 3,
+      totalAmount: new Prisma.Decimal(3000),
+    });
+    await service.update(equipment.id, 'employee-id', {
+      quantity: 3,
+      expectedUpdatedAt: purchaseDate,
+    });
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(tx.equipment.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: equipment.id,
+          deletedAt: null,
+          status: EquipmentStatus.IN_USE,
+          updatedAt: purchaseDate,
+        },
+        data: expect.objectContaining({
+          quantity: 3,
+          totalAmount: new Prisma.Decimal(3000),
+        }),
+      }),
+    );
+    expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses metadata updates after liquidation without writing an audit', async () => {
+    tx.equipment.findFirst.mockResolvedValue({
+      ...equipment,
+      status: EquipmentStatus.LIQUIDATED,
+    });
+    await expect(
+      service.update(equipment.id, 'employee-id', {
+        name: 'Changed',
+        expectedUpdatedAt: purchaseDate,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.equipment.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects stale form snapshots without overwriting or auditing', async () => {
+    tx.equipment.findFirst.mockResolvedValue({
+      ...equipment,
+      updatedAt: new Date(purchaseDate.getTime() + 1),
+    });
+    await expect(
+      service.update(equipment.id, 'employee-id', {
+        name: 'Stale name',
+        expectedUpdatedAt: purchaseDate,
+      }),
+    ).rejects.toMatchObject({ response: { code: 'EQUIPMENT_CHANGED' } });
+    expect(tx.equipment.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('requires both a reviewed timestamp and an editable field', () => {
+    expect(
+      UpdateEquipmentDto.schema.safeParse({ name: 'Machine' }).success,
+    ).toBe(false);
+    expect(
+      UpdateEquipmentDto.schema.safeParse({
+        expectedUpdatedAt: purchaseDate.toISOString(),
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateEquipmentDto.schema.safeParse({
+        expectedUpdatedAt: purchaseDate.toISOString(),
+        serialNumber: null,
+      }).success,
+    ).toBe(true);
   });
 
   it('rejects lifecycle transitions that bypass maintenance', async () => {

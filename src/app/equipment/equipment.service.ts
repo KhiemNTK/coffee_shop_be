@@ -11,6 +11,7 @@ import {
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
 import { assertActiveEmployee } from '../../common/prisma/employee.util';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
@@ -163,8 +164,9 @@ export class EquipmentService {
   }
 
   async update(id: string, employeeId: string, dto: UpdateEquipmentDto) {
+    const { expectedUpdatedAt, ...changes } = dto;
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      return await runSerializableTransaction(this.prisma, async (tx) => {
         await assertActiveEmployee(tx, employeeId);
         const existing = await tx.equipment.findFirst({
           where: { id, deletedAt: null },
@@ -174,6 +176,13 @@ export class EquipmentService {
         }
         if (existing.status === EquipmentStatus.LIQUIDATED) {
           throw new ConflictException('Liquidated equipment is immutable.');
+        }
+        if (existing.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+          throw new ConflictException({
+            code: 'EQUIPMENT_CHANGED',
+            message:
+              'Equipment changed. Reload its details before editing again.',
+          });
         }
 
         const purchaseDate = dto.purchaseDate ?? existing.purchaseDate;
@@ -189,9 +198,17 @@ export class EquipmentService {
             ? existing.unitPrice
             : new Prisma.Decimal(dto.unitPrice);
         const equipment = await tx.equipment.update({
-          where: { id },
+          where: {
+            id,
+            deletedAt: null,
+            status: existing.status,
+            updatedAt: expectedUpdatedAt,
+          },
           data: {
-            ...dto,
+            ...changes,
+            updatedAt: new Date(
+              Math.max(Date.now(), expectedUpdatedAt.getTime() + 1),
+            ),
             unitPrice,
             totalAmount: this.calculateTotal(unitPrice, quantity),
           },
@@ -199,11 +216,20 @@ export class EquipmentService {
         });
         await this.logAction(tx, employeeId, 'EQUIPMENT_UPDATED', {
           equipmentId: id,
-          changes: this.toAuditChanges(dto),
+          changes: this.toAuditChanges(changes),
         });
         return equipment;
       });
     } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new ConflictException({
+          code: 'EQUIPMENT_CHANGED',
+          message: 'Equipment changed. Reload before editing again.',
+        });
+      }
       this.rethrowUniqueConflict(error);
     }
   }
@@ -326,7 +352,7 @@ export class EquipmentService {
     });
   }
 
-  private toAuditChanges(dto: UpdateEquipmentDto) {
+  private toAuditChanges(dto: Omit<UpdateEquipmentDto, 'expectedUpdatedAt'>) {
     return Object.fromEntries(
       Object.entries(dto).map(([key, value]) => [
         key,

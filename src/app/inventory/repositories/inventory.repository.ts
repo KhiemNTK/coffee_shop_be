@@ -82,8 +82,12 @@ export class InventoryRepository {
     return item;
   }
 
-  async ensureCategoryNameAvailable(name: string, excludeId?: string) {
-    const existing = await this.prisma.inventoryCategory.findFirst({
+  async ensureCategoryNameAvailable(
+    name: string,
+    excludeId?: string,
+    tx: ExtendedPrismaTransactionClient = this.prisma,
+  ) {
+    const existing = await tx.inventoryCategory.findFirst({
       where: {
         name: { equals: name, mode: Prisma.QueryMode.insensitive },
         ...(excludeId ? { id: { not: excludeId } } : {}),

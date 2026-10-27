@@ -67,7 +67,7 @@ export class UnitService {
       where,
       skip: paging.skip,
       take: paging.itemPerPage,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     return paging.format(list);
