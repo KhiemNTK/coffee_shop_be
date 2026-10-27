@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import {
@@ -98,76 +97,76 @@ export class AuthSessionService {
       sessionId: nextSessionId,
       familyId: payload.familyId,
     });
-    const now = new Date();
-
-    let outcome: { rotated: boolean };
-    try {
-      outcome = await this.prisma.$transaction(
-        async (tx) => {
-          const current = await tx.authSession.findUnique({
-            where: { id: payload.sid },
-            include: {
-              employee: {
-                select: { id: true, email: true, isActive: true },
+    const outcome = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const now = new Date();
+        const current = await tx.authSession.findUnique({
+          where: { id: payload.sid },
+          include: {
+            employee: {
+              select: {
+                id: true,
+                email: true,
+                isActive: true,
+                deletedAt: true,
               },
             },
-          });
+          },
+        });
 
-          const isValid =
-            current?.employeeId === payload.sub &&
-            current.familyId === payload.familyId &&
-            current.employee.isActive &&
-            current.employee.email === payload.email &&
-            !current.revokedAt &&
-            current.expiresAt > now &&
-            this.authTokenService.tokenHashMatches(
-              refreshToken,
-              current.refreshTokenHash,
-            );
+        const isValid =
+          current?.employeeId === payload.sub &&
+          current.familyId === payload.familyId &&
+          current.employee.isActive &&
+          !current.employee.deletedAt &&
+          current.employee.email === payload.email &&
+          !current.revokedAt &&
+          current.expiresAt > now &&
+          this.authTokenService.tokenHashMatches(
+            refreshToken,
+            current.refreshTokenHash,
+          );
 
-          if (!isValid) {
-            return { rotated: false as const };
-          }
+        if (!isValid) {
+          return { rotated: false as const };
+        }
 
-          const consumed = await tx.authSession.updateMany({
-            where: {
-              id: current.id,
-              revokedAt: null,
-              expiresAt: { gt: now },
-              refreshTokenHash: current.refreshTokenHash,
-            },
-            data: {
-              revokedAt: now,
-              lastUsedAt: now,
-              revokeReason: SESSION_REVOKE_REASONS.REFRESH_ROTATED,
-            },
-          });
+        const consumed = await tx.authSession.updateMany({
+          where: {
+            id: current.id,
+            revokedAt: null,
+            expiresAt: { gt: now },
+            refreshTokenHash: current.refreshTokenHash,
+          },
+          data: {
+            revokedAt: now,
+            lastUsedAt: now,
+            revokeReason: SESSION_REVOKE_REASONS.REFRESH_ROTATED,
+          },
+        });
 
-          if (consumed.count !== 1) {
-            return { rotated: false as const };
-          }
+        if (consumed.count !== 1) {
+          return { rotated: false as const };
+        }
 
-          await tx.authSession.create({
-            data: {
-              id: nextSessionId,
-              familyId: payload.familyId,
-              employeeId: payload.sub,
-              refreshTokenHash: this.authTokenService.hashToken(
-                nextTokens.refreshToken,
-              ),
-              expiresAt: this.getRefreshExpiry(),
-              ...this.normalizeMetadata(metadata),
-            },
-          });
+        await tx.authSession.create({
+          data: {
+            id: nextSessionId,
+            familyId: payload.familyId,
+            employeeId: payload.sub,
+            refreshTokenHash: this.authTokenService.hashToken(
+              nextTokens.refreshToken,
+            ),
+            expiresAt: this.getRefreshExpiry(),
+            ...this.normalizeMetadata(metadata),
+          },
+        });
 
-          return { rotated: true as const };
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-      );
-    } catch (error) {
-      if (!this.isTransactionConflict(error)) throw error;
-      outcome = { rotated: false };
-    }
+        return { rotated: true as const };
+      },
+      { loggerContext: 'AuthSession.refresh' },
+    );
 
     if (!outcome.rotated) {
       await this.revokeFamily(
@@ -237,10 +236,15 @@ export class AuthSessionService {
   }
 
   private revokeFamily(employeeId: string, familyId: string, reason: string) {
-    return this.prisma.authSession.updateMany({
-      where: { employeeId, familyId, revokedAt: null },
-      data: { revokedAt: new Date(), revokeReason: reason },
-    });
+    return runSerializableTransaction(
+      this.prisma,
+      (tx) =>
+        tx.authSession.updateMany({
+          where: { employeeId, familyId, revokedAt: null },
+          data: { revokedAt: new Date(), revokeReason: reason },
+        }),
+      { loggerContext: 'AuthSession.reuse' },
+    );
   }
 
   private getRefreshExpiry() {
@@ -252,15 +256,6 @@ export class AuthSessionService {
       ipAddress: ipAddress?.slice(0, 64),
       userAgent: userAgent?.slice(0, 512),
     };
-  }
-
-  private isTransactionConflict(error: unknown) {
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'P2034'
-    );
   }
 }
 

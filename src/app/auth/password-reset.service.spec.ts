@@ -25,7 +25,10 @@ describe('PasswordResetService', () => {
     };
     const prisma = {
       employee: { findFirst: jest.fn() },
-      passwordResetToken: { findUnique: jest.fn() },
+      passwordResetToken: {
+        findUnique: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue({ id: 'reset-1' }),
+      },
       $transaction: jest.fn(
         (callback: (client: typeof tx) => Promise<unknown>) => callback(tx),
       ),
@@ -251,6 +254,54 @@ describe('PasswordResetService', () => {
       data: expect.objectContaining({ revokeReason: 'PASSWORD_RESET' }),
     });
   });
+
+  it('rejects unusable tokens before hashing a password or opening a write transaction', async () => {
+    const { service, prisma, passwordHash } = createFixture();
+    prisma.passwordResetToken.findFirst.mockResolvedValue(null);
+    await expect(
+      service.resetPassword({
+        token: 'unknown-token',
+        password: 'new-password',
+      }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(passwordHash.hash).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.passwordResetToken.findFirst).toHaveBeenCalledWith({
+      where: {
+        tokenHash: expect.any(String),
+        usedAt: null,
+        expiresAt: { gt: expect.any(Date) },
+        employee: { isActive: true, deletedAt: null },
+      },
+      select: { id: true },
+    });
+  });
+
+  it.each(['expired', 'inactive', 'deleted'] as const)(
+    'rejects a token whose account or expiry becomes %s after the precheck',
+    async (state) => {
+      const { service, passwordHash, tx } = createFixture();
+      tx.passwordResetToken.findUnique.mockResolvedValue({
+        id: 'reset-1',
+        employeeId: 'employee-1',
+        usedAt: null,
+        expiresAt: new Date(
+          Date.now() + (state === 'expired' ? -1000 : 60_000),
+        ),
+        employee: {
+          id: 'employee-1',
+          isActive: state !== 'inactive',
+          deletedAt: state === 'deleted' ? new Date() : null,
+        },
+      });
+      await expect(
+        service.resetPassword({ token: 'raw-token', password: 'new-password' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(passwordHash.hash).toHaveBeenCalledTimes(1);
+      expect(tx.passwordResetToken.updateMany).not.toHaveBeenCalled();
+      expect(tx.employee.update).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects a reset token that lost a concurrent consume race', async () => {
     const { service, tx } = createFixture();

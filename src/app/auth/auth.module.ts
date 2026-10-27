@@ -13,6 +13,7 @@ import { AuthSessionService } from './auth-session.service';
 import { PasswordResetService } from './password-reset.service';
 import { GoogleIdentityService } from './google-identity.service';
 import { TurnstileModule } from './turnstile.module';
+import { LoginRequestGuard } from './login-request.guard';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { TurnstileModule } from './turnstile.module';
   ],
   providers: [
     AuthService,
+    LoginRequestGuard,
     AuthTokenService,
     AuthSessionService,
     PasswordResetService,

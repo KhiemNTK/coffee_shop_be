@@ -33,6 +33,7 @@ import { IDDto } from '../../common/dto/param.dto';
 import type { CustomerRequest } from '../../common/types';
 import { SkipAuth } from '../auth/auth.decorator';
 import { SkipCsrf } from '../auth/csrf.decorator';
+import { LoginRequestGuard } from '../auth/login-request.guard';
 import { GoogleSignInDto } from '../auth/dto';
 import { CustomerGuard } from './customer.guard';
 import { CustomersService } from './customers.service';
@@ -47,6 +48,7 @@ export class CustomersController {
   constructor(private readonly customers: CustomersService) {}
 
   @Post('auth/google')
+  @UseGuards(LoginRequestGuard)
   @SetMetadata(CUSTOMER_PUBLIC_ROUTE, true)
   @Header('Cache-Control', 'no-store')
   @SkipCsrf()

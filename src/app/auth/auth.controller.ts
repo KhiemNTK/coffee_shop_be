@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Post, Req, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiCookieAuth, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
@@ -12,11 +21,16 @@ import {
   getAuthCookieOptions,
   getCsrfCookieOptions,
 } from '../../common/decorators/cookie/cookie.const';
-import type { AuthRequestMetadata, AuthTokenPair } from '../../common/types';
+import type {
+  AuthenticatedStaffRequest,
+  AuthRequestMetadata,
+  AuthTokenPair,
+} from '../../common/types';
 import { AuthService } from './auth.service';
 import { SkipAuth } from './auth.decorator';
 import { SkipCsrf } from './csrf.decorator';
 import { TokenKeys } from './consts/jwt.const';
+import { LoginRequestGuard } from './login-request.guard';
 import {
   ForgotPasswordDto,
   GoogleLinkDto,
@@ -34,6 +48,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('sign-up')
+  @UseGuards(LoginRequestGuard)
   @SkipAuth()
   @SkipCsrf()
   async signUp(
@@ -50,6 +65,7 @@ export class AuthController {
   }
 
   @Post('sign-in')
+  @UseGuards(LoginRequestGuard)
   @SkipAuth()
   @SkipCsrf()
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
@@ -68,6 +84,7 @@ export class AuthController {
   }
 
   @Post('google')
+  @UseGuards(LoginRequestGuard)
   @SkipAuth()
   @SkipCsrf()
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
@@ -109,12 +126,24 @@ export class AuthController {
   }
 
   @Get('me')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions()
-  getMe(@Employee('employeeId') employeeId: string) {
+  getMe(
+    @Employee('employeeId') employeeId: string,
+    @Req() request: AuthenticatedStaffRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const csrf: unknown = request.cookies?.[TokenKeys.CSRF_TOKEN_KEY];
+    if (
+      request.authMethod === 'cookie' &&
+      (typeof csrf !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(csrf))
+    )
+      this.setCsrfCookie(response);
     return this.authService.getMe(employeeId);
   }
 
   @Get('me/permissions')
+  @Header('Cache-Control', 'no-store')
   @RequirePermissions()
   getMyPermissions(@Employee('employeeId') employeeId: string) {
     return this.authService.getMyPermissions(employeeId);
@@ -157,6 +186,7 @@ export class AuthController {
   }
 
   @Post('reset-password')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @SkipAuth()
   @SkipCsrf()
   resetPassword(@Body() dto: ResetPasswordDto) {
@@ -173,11 +203,14 @@ export class AuthController {
       ...authCookieOptions,
       maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
     });
-    res.cookie(
-      TokenKeys.CSRF_TOKEN_KEY,
-      createCsrfToken(),
-      getCsrfCookieOptions(),
-    );
+    this.setCsrfCookie(res);
+  }
+
+  private setCsrfCookie(res: Response) {
+    res.cookie(TokenKeys.CSRF_TOKEN_KEY, createCsrfToken(), {
+      ...getCsrfCookieOptions(),
+      maxAge: ms(CookiesToken.REFRESH_TOKEN_EXPIRES_IN),
+    });
   }
 
   private clearAuthCookies(res: Response) {

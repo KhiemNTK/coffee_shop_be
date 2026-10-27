@@ -35,6 +35,7 @@ import {
 import { PasswordResetService } from './password-reset.service';
 import { GoogleIdentityService } from './google-identity.service';
 import { TurnstileService } from './turnstile.service';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 
 @Injectable()
 export class AuthService {
@@ -103,40 +104,42 @@ export class AuthService {
       throw new BadRequestException(AUTH_ERRORS.USERNAME_ALREADY_EXISTS);
     }
 
-    const defaultPosition = await this.prisma.position.findFirst({
-      where: { name: 'Staff' },
-    });
-    if (!defaultPosition) {
-      throw new InternalServerErrorException(
-        SYSTEM_ERRORS.INVALID_DEFAULT_POSITION,
-      );
-    }
-
     const passwordHashed = await this.passwordHashService.hash(password);
-    const employee = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.employee.create({
-        data: {
-          email,
-          username,
-          password: passwordHashed,
-          positionId: defaultPosition.id,
-          fullName,
-          address,
-          phoneNumber,
-          isActive: true,
-        },
-      });
-      const defaultRole = await tx.role.findFirst({
-        where: { name: DEFAULT_EMPLOYEE_ROLE_NAME },
-        select: { id: true },
-      });
-      if (defaultRole) {
-        await tx.employeeRole.create({
-          data: { employeeId: created.id, roleId: defaultRole.id },
+    const employee = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const defaultPosition = await tx.position.findFirst({
+          where: { name: 'Staff', deletedAt: null },
         });
-      }
-      return created;
-    });
+        if (!defaultPosition) {
+          throw new InternalServerErrorException(
+            SYSTEM_ERRORS.INVALID_DEFAULT_POSITION,
+          );
+        }
+        const created = await tx.employee.create({
+          data: {
+            email,
+            username,
+            password: passwordHashed,
+            positionId: defaultPosition.id,
+            fullName,
+            address,
+            phoneNumber,
+            isActive: true,
+          },
+        });
+        const defaultRole = await tx.role.findFirst({
+          where: { name: DEFAULT_EMPLOYEE_ROLE_NAME },
+          select: { id: true },
+        });
+        if (defaultRole) {
+          await tx.employeeRole.create({
+            data: { employeeId: created.id, roleId: defaultRole.id },
+          });
+        }
+        return created;
+      },
+    );
     return this.authSessionService.createSession(employee, metadata);
   }
 

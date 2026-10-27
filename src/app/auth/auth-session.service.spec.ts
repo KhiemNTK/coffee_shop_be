@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { Logger, UnauthorizedException } from '@nestjs/common';
 import { AUTH_ERRORS } from '../../common/consts/message';
 import type { ExtendedPrismaClient } from '../../common/prisma/prisma.service';
 import { AuthSessionService } from './auth-session.service';
@@ -6,6 +6,7 @@ import { AuthTokenService } from './auth-token.service';
 import { Prisma } from '@prisma/client';
 
 describe('AuthSessionService', () => {
+  afterEach(() => jest.restoreAllMocks());
   const payload = {
     sub: 'employee-1',
     email: 'owner@example.com',
@@ -200,7 +201,7 @@ describe('AuthSessionService', () => {
     await expect(service.rotate('current-refresh-token', {})).rejects.toThrow(
       UnauthorizedException,
     );
-    expect(prisma.authSession.updateMany).toHaveBeenCalledWith({
+    expect(tx.authSession.updateMany).toHaveBeenCalledWith({
       where: {
         employeeId: payload.sub,
         familyId: payload.familyId,
@@ -210,18 +211,50 @@ describe('AuthSessionService', () => {
     });
   });
 
-  it('fails closed on a concurrent refresh transaction conflict', async () => {
-    const { prisma, service } = createFixture();
-    prisma.$transaction.mockRejectedValue({ code: 'P2034' });
-
-    await expect(service.rotate('current-refresh-token', {})).rejects.toThrow(
-      UnauthorizedException,
+  it('retries an unrelated refresh conflict without revoking a valid family', async () => {
+    const { prisma, service, tx } = createFixture();
+    const conflict = new Prisma.PrismaClientKnownRequestError('conflict', {
+      code: 'P2034',
+      clientVersion: 'test',
+    });
+    prisma.$transaction.mockRejectedValueOnce(conflict);
+    tx.authSession.findUnique.mockResolvedValue({
+      id: payload.sid,
+      employeeId: payload.sub,
+      familyId: payload.familyId,
+      refreshTokenHash: 'hash:current-refresh-token',
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null,
+      employee: { id: payload.sub, email: payload.email, isActive: true },
+    });
+    tx.authSession.updateMany.mockResolvedValue({ count: 1 });
+    jest.spyOn(Logger, 'warn').mockImplementation();
+    await expect(service.rotate('current-refresh-token', {})).resolves.toEqual(
+      nextTokens,
     );
-    expect(prisma.authSession.updateMany).toHaveBeenCalledWith(
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(tx.authSession.create).toHaveBeenCalledTimes(1);
+    expect(tx.authSession.updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ revokeReason: 'REFRESH_REUSE' }),
       }),
     );
+  });
+
+  it('propagates exhausted conflicts instead of inventing a replay or revoking sessions', async () => {
+    const { prisma, service, tx } = createFixture();
+    const conflict = new Prisma.PrismaClientKnownRequestError('conflict', {
+      code: 'P2034',
+      clientVersion: 'test',
+    });
+    prisma.$transaction.mockRejectedValue(conflict);
+    jest.spyOn(Logger, 'warn').mockImplementation();
+    await expect(service.rotate('current-refresh-token', {})).rejects.toBe(
+      conflict,
+    );
+    expect(prisma.$transaction).toHaveBeenCalledTimes(3);
+    expect(prisma.authSession.updateMany).not.toHaveBeenCalled();
+    expect(tx.authSession.updateMany).not.toHaveBeenCalled();
   });
 
   it('revokes the whole browser family even when logout carries a rotated token', async () => {

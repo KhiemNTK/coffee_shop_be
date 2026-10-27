@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { UnauthorizedException } from '@nestjs/common';
+import { Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { Employee } from '@prisma/client';
@@ -271,6 +271,120 @@ describe('Password sign-in races (PostgreSQL)', () => {
     const otherDevice = await tokens.verifyAccessToken(other.accessToken);
     await expect(
       auth.getAuthenticatedEmployee(employee.id, otherDevice.sid),
+    ).resolves.toMatchObject({ employeeId: employee.id });
+  }, 15_000);
+
+  it('consumes a reset token only once when two new passwords are submitted concurrently', async () => {
+    const token = randomUUID();
+    await base.passwordResetToken.create({
+      data: {
+        employeeId: employee.id,
+        tokenHash: tokens.hashToken(token),
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    });
+    await sessions.createSession(employee, {}, undefined, employee.password);
+    const passwords = ['FirstNewPassword123!', 'SecondNewPassword123!'];
+    const results = await Promise.allSettled(
+      passwords.map((password) => auth.resetPassword({ token, password })),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    assert(rejected?.status === 'rejected');
+    expect(rejected.reason).toBeInstanceOf(UnauthorizedException);
+    const winner = results.findIndex((result) => result.status === 'fulfilled');
+    const saved = await base.employee.findUniqueOrThrow({
+      where: { id: employee.id },
+    });
+    expect(await bcrypt.compare(passwords[winner], saved.password)).toBe(true);
+    expect(
+      await base.authSession.count({
+        where: { employeeId: employee.id, revokedAt: null },
+      }),
+    ).toBe(0);
+  }, 15_000);
+
+  it('revokes a concurrently rotated descendant on replay without affecting another device', async () => {
+    const parent = await sessions.createSession(
+      employee,
+      {},
+      undefined,
+      employee.password,
+    );
+    const child = await sessions.rotate(parent.refreshToken, {});
+    const other = await sessions.createSession(
+      employee,
+      {},
+      undefined,
+      employee.password,
+    );
+    const reached = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let paused = false;
+    const client = base.getExtendedClient().$extends({
+      query: {
+        authSession: {
+          async create({ args, query }) {
+            if (!paused) {
+              paused = true;
+              reached.resolve();
+              await resume.promise;
+            }
+            return query(args);
+          },
+        },
+      },
+    });
+    const warning = jest.spyOn(Logger, 'warn').mockImplementation();
+    const descendant = Promise.allSettled([
+      new AuthSessionService(client, tokens).rotate(child.refreshToken, {}),
+    ]);
+    let replay: Promise<PromiseSettledResult<AuthTokenPair>[]> | undefined;
+    try {
+      await Promise.race([
+        reached.promise,
+        descendant.then(() => {
+          throw new Error('Rotation did not reach the insert barrier.');
+        }),
+      ]);
+      replay = Promise.allSettled([sessions.rotate(parent.refreshToken, {})]);
+      let blocked = false;
+      const until = Date.now() + 3000;
+      while (!blocked && Date.now() < until) {
+        const [state] = await base.$queryRaw<Array<{ blocked: boolean }>>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+          ) AS blocked
+        `;
+        blocked = state.blocked;
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(blocked).toBe(true);
+    } finally {
+      resume.resolve();
+      await descendant;
+      await replay;
+      warning.mockRestore();
+    }
+    const outcome = (await replay)[0];
+    assert(outcome.status === 'rejected');
+    expect(outcome.reason).toBeInstanceOf(UnauthorizedException);
+    const payload = await tokens.verifyRefreshToken(parent.refreshToken);
+    expect(
+      await base.authSession.count({
+        where: {
+          employeeId: employee.id,
+          familyId: payload.familyId,
+          revokedAt: null,
+        },
+      }),
+    ).toBe(0);
+    const otherPayload = await tokens.verifyAccessToken(other.accessToken);
+    await expect(
+      auth.getAuthenticatedEmployee(employee.id, otherPayload.sid),
     ).resolves.toMatchObject({ employeeId: employee.id });
   }, 15_000);
 

@@ -152,19 +152,32 @@ export class PasswordResetService
 
   async resetPassword({ token, password }: ResetPasswordDto) {
     const tokenHash = this.authTokenService.hashToken(token);
+    const usable = await this.prisma.passwordResetToken.findFirst({
+      where: {
+        tokenHash,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+        employee: { isActive: true, deletedAt: null },
+      },
+      select: { id: true },
+    });
+    if (!usable) throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
     const passwordHash = await this.passwordHashService.hash(password);
-    const now = new Date();
 
     const reset = await this.prisma.$transaction(async (tx) => {
       const record = await tx.passwordResetToken.findUnique({
         where: { tokenHash },
-        include: { employee: { select: { id: true, isActive: true } } },
+        include: {
+          employee: { select: { id: true, isActive: true, deletedAt: true } },
+        },
       });
+      const now = new Date();
       if (
         !record ||
         record.usedAt ||
         record.expiresAt <= now ||
-        !record.employee.isActive
+        !record.employee.isActive ||
+        record.employee.deletedAt
       ) {
         return false;
       }
