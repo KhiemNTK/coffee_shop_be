@@ -39,6 +39,7 @@ export class GetPaymentRefundsDto extends createZodDto(
 export class GetPaymentIncidentsDto extends createZodDto(
   z.object({
     ...PaginationSchema,
+    keyword: z.string().trim().max(120).optional(),
     status: z.enum(PaymentReconciliationIncidentStatus).optional(),
     type: z.enum(PaymentReconciliationIncidentType).optional(),
   }),

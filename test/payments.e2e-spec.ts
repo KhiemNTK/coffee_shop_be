@@ -415,7 +415,7 @@ describe('VNPay payment lifecycle (e2e)', () => {
         });
       }
       const reconciliation = new PaymentReconciliationService(
-        gatedPrisma as unknown as ExtendedPrismaClient,
+        gatedPrisma,
         pagination,
         invoices,
         outbox,

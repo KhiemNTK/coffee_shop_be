@@ -8,18 +8,30 @@ const OptionalDateSchema = z
   .optional()
   .transform((value) => (value ? new Date(value) : undefined));
 
-export const GetInvoicesPaginationSchema = z.object({
-  itemPerPage: z.coerce.number().min(1).max(100).default(10),
-  page: z.coerce.number().min(1).default(1),
-  select: z.string().optional(),
-  paymentStatus: z.enum(PaymentStatus).optional(),
-  paymentMethod: z.enum(PaymentMethod).optional(),
-  orderSessionId: z.uuid('Invalid UUID for order session').optional(),
-  employeeId: z.uuid('Invalid UUID for employee').optional(),
-  shiftId: z.uuid('Invalid UUID for cashier shift').optional(),
-  createdFrom: OptionalDateSchema,
-  createdTo: OptionalDateSchema,
-});
+export const GetInvoicesPaginationSchema = z
+  .object({
+    itemPerPage: z.coerce.number().int().min(1).max(100).default(10),
+    page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+    keyword: z.string().trim().min(1).max(120).optional(),
+    select: z.string().optional(),
+    paymentStatus: z.enum(PaymentStatus).optional(),
+    paymentMethod: z.enum(PaymentMethod).optional(),
+    orderSessionId: z.uuid('Invalid UUID for order session').optional(),
+    employeeId: z.uuid('Invalid UUID for employee').optional(),
+    shiftId: z.uuid('Invalid UUID for cashier shift').optional(),
+    createdFrom: OptionalDateSchema,
+    createdTo: OptionalDateSchema,
+  })
+  .refine(
+    (value) =>
+      !value.createdFrom ||
+      !value.createdTo ||
+      value.createdFrom <= value.createdTo,
+    {
+      path: ['createdFrom'],
+      message: 'Start date must not be after end date.',
+    },
+  );
 
 export class GetInvoicesPaginationDto extends createZodDto(
   GetInvoicesPaginationSchema,

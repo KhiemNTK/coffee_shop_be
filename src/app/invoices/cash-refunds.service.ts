@@ -52,7 +52,7 @@ export class CashRefundsService {
         employeeId,
         operation: 'invoice.cash-refund',
         key: dto.idempotencyKey,
-        request,
+        request: { ...request, expectedShiftId: dto.expectedShiftId },
       },
       async (tx) => {
         const employee = await tx.employee.findFirst({
@@ -72,7 +72,10 @@ export class CashRefundsService {
           include: REFUND_INCLUDE,
         });
         if (replay) {
-          if (replay.requestHash !== requestHash)
+          if (
+            replay.requestHash !== requestHash ||
+            replay.cashTransaction.shiftId !== dto.expectedShiftId
+          )
             throw new ConflictException(
               'Idempotency key was used for a different cash refund.',
             );
@@ -127,6 +130,13 @@ export class CashRefundsService {
             'Refund exceeds the remaining paid amount.',
           );
         const shift = await this.ledger.requireOpenShift(tx, employeeId);
+        if (shift.id !== dto.expectedShiftId) {
+          throw new ConflictException({
+            code: 'CASHIER_SHIFT_CHANGED',
+            message:
+              'The reviewed cashier shift changed. Review the refund again.',
+          });
+        }
         const debited = await tx.fund.updateMany({
           where: {
             id: shift.fundId,

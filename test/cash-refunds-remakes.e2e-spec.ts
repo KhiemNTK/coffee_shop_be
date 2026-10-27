@@ -60,6 +60,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       }),
     ),
     idempotency,
+    new PrintingService(db, pagination, idempotency, {} as never),
   );
   const menuIds: string[] = [];
   const ingredientIds: string[] = [];
@@ -249,13 +250,25 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     };
   }
 
-  const refundDto = (amount: string) => ({
+  const refundDto = (
+    amount: string,
+    expectedShiftId: string = randomUUID(),
+  ) => ({
+    expectedShiftId,
     amount,
     reason: 'Customer refund requested',
     idempotencyKey: randomUUID(),
   });
 
   it('rejects malformed money and unknown fields at the API boundary', () => {
+    const valid = refundDto('25');
+    expect(CreateCashRefundDto.schema.safeParse(valid).success).toBe(true);
+    expect(
+      CreateCashRefundDto.schema.safeParse({
+        ...valid,
+        expectedShiftId: undefined,
+      }).success,
+    ).toBe(false);
     for (const amount of ['0', '-1', '1.001', 'NaN', '1e3']) {
       expect(
         CreateCashRefundDto.schema.safeParse(refundDto(amount)).success,
@@ -271,7 +284,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
 
   it('posts partial/full refunds once and retains replay protection after idempotency cleanup', async () => {
     const f = await fixture();
-    const dto = refundDto('25');
+    const dto = refundDto('25', f.shift.id);
     const first = await refunds.create(f.invoice.id, f.employee.id, dto);
     expect(
       (
@@ -294,7 +307,11 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       (await prisma.invoice.findUniqueOrThrow({ where: { id: f.invoice.id } }))
         .paymentStatus,
     ).toBe(PaymentStatus.PARTIALLY_REFUNDED);
-    await refunds.create(f.invoice.id, f.employee.id, refundDto('75'));
+    await refunds.create(
+      f.invoice.id,
+      f.employee.id,
+      refundDto('75', f.shift.id),
+    );
     expect(
       (await prisma.invoice.findUniqueOrThrow({ where: { id: f.invoice.id } }))
         .paymentStatus,
@@ -326,6 +343,17 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     });
     const shift = await shifts.getCurrent(f.employee.id);
     expect(shift?.reconciliation.cashRefundAmount.toFixed(2)).toBe('100.00');
+    await shifts.close(f.employee.id, {
+      expectedShiftId: f.shift.id,
+      idempotencyKey: randomUUID(),
+      reportedEndingCash: '1000',
+    });
+    await prisma.idempotencyRequest.deleteMany({
+      where: { employeeId: f.employee.id, operation: 'invoice.cash-refund' },
+    });
+    expect((await refunds.create(f.invoice.id, f.employee.id, dto)).id).toBe(
+      first.id,
+    );
     expect(shift?.reconciliation.manualExpense.toFixed(2)).toBe('0.00');
     expect(shift?.reconciliation.actualEndingCash.toFixed(2)).toBe('1000.00');
   });
@@ -333,8 +361,8 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
   it('prevents concurrent refunds from exceeding the paid amount', async () => {
     const f = await fixture();
     const results = await Promise.allSettled([
-      refunds.create(f.invoice.id, f.employee.id, refundDto('60')),
-      refunds.create(f.invoice.id, f.employee.id, refundDto('60')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('60', f.shift.id)),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('60', f.shift.id)),
     ]);
     expect(
       results.filter((result) => result.status === 'fulfilled'),
@@ -360,7 +388,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       .spyOn(outbox, 'enqueue')
       .mockRejectedValueOnce(new Error('outbox unavailable'));
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('50')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('50', f.shift.id)),
     ).rejects.toThrow('outbox unavailable');
     expect(
       await prisma.cashRefund.count({ where: { invoiceId: f.invoice.id } }),
@@ -386,7 +414,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       data: { isActive: false },
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     await prisma.employee.update({
       where: { id: f.employee.id },
@@ -397,7 +425,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       data: { serveStatus: ServeStatus.READY },
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toThrow('handed off');
     await prisma.orderItem.update({
       where: { id: f.item.id },
@@ -408,13 +436,13 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       data: { balance: 10 },
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toThrow('Insufficient');
     await prisma.cashTransaction.deleteMany({
       where: { invoiceId: f.invoice.id },
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toThrow('ledger');
     expect(
       await prisma.cashRefund.count({ where: { invoiceId: f.invoice.id } }),
@@ -428,7 +456,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       data: { paymentMethod: PaymentMethod.TRANSFER },
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toThrow('cash invoice');
     await prisma.invoice.update({
       where: { id: f.invoice.id },
@@ -440,7 +468,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       reportedEndingCash: '1100',
     });
     await expect(
-      refunds.create(f.invoice.id, f.employee.id, refundDto('25')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('25', f.shift.id)),
     ).rejects.toThrow('open cashier shift');
   });
 
@@ -459,10 +487,16 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
         expectedStartingCash: 1100,
       },
     });
+    await expect(
+      refunds.create(f.invoice.id, f.employee.id, refundDto('50', f.shift.id)),
+    ).rejects.toMatchObject({ response: { code: 'CASHIER_SHIFT_CHANGED' } });
+    expect(
+      await prisma.cashRefund.count({ where: { invoiceId: f.invoice.id } }),
+    ).toBe(0);
     const refund = await refunds.create(
       f.invoice.id,
       f.employee.id,
-      refundDto('50'),
+      refundDto('50', current.id),
     );
     expect(refund.cashTransaction.shiftId).toBe(current.id);
     const shift = await shifts.getCurrent(f.employee.id);
@@ -477,7 +511,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
   it('serializes refund against shift closing without posting into a closed shift', async () => {
     const f = await fixture();
     const results = await Promise.allSettled([
-      refunds.create(f.invoice.id, f.employee.id, refundDto('50')),
+      refunds.create(f.invoice.id, f.employee.id, refundDto('50', f.shift.id)),
       shifts.close(f.employee.id, {
         expectedShiftId: f.shift.id,
         idempotencyKey: randomUUID(),
@@ -719,7 +753,11 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       where: { id: f.station.id },
       data: { isActive: true },
     });
-    await refunds.create(f.invoice.id, f.employee.id, refundDto('100'));
+    await refunds.create(
+      f.invoice.id,
+      f.employee.id,
+      refundDto('100', f.shift.id),
+    );
     await expect(
       orders.remakeItem(f.item.id, f.employee.id, {
         reason: 'Incorrect drink',
@@ -775,7 +813,11 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
       reason: 'Incorrect drink',
       idempotencyKey: randomUUID(),
     });
-    await refunds.create(f.invoice.id, f.employee.id, refundDto('25'));
+    await refunds.create(
+      f.invoice.id,
+      f.employee.id,
+      refundDto('25', f.shift.id),
+    );
     const [journey] = await queryOnlineOrderJourney(
       db,
       { ...f, timeZone: 'UTC', granularity: 'day' },

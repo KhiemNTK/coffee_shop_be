@@ -99,26 +99,20 @@ export class CashHandoversService {
           );
         }
 
-        const [destinationFund, openShift] = await Promise.all([
-          tx.fund.findFirst({
-            where: { id: dto.destinationFundId, deletedAt: null },
-            select: { id: true },
-          }),
-          tx.cashierShift.findFirst({
-            where: { fundId: shift.fundId, status: ShiftStatus.OPEN },
-            select: { id: true },
-          }),
-        ]);
+        const destinationFund = await tx.fund.findFirst({
+          where: { id: dto.destinationFundId, deletedAt: null },
+          select: { id: true, type: true },
+        });
         if (!destinationFund) {
           throw new NotFoundException(
             `Destination fund with ID ${dto.destinationFundId} not found.`,
           );
         }
-        if (openShift) {
-          throw new ConflictException(
-            'Cannot request a handover while the source fund has an open shift.',
-          );
-        }
+        await this.assertFundsHaveNoOpenShift(
+          tx,
+          shift.fundId,
+          destinationFund,
+        );
         if (!shift.fund.balance.equals(shift.actualEndingCash)) {
           throw new ConflictException(
             'The source fund balance changed after the shift closed.',
@@ -245,18 +239,11 @@ export class CashHandoversService {
         );
       }
 
-      const openShift = await tx.cashierShift.findFirst({
-        where: {
-          fundId: handover.sourceFundId,
-          status: ShiftStatus.OPEN,
-        },
-        select: { id: true },
-      });
-      if (openShift) {
-        throw new ConflictException(
-          'Cannot approve a handover while the source fund has an open shift.',
-        );
-      }
+      await this.assertFundsHaveNoOpenShift(
+        tx,
+        handover.sourceFundId,
+        handover.destinationFund,
+      );
 
       const sourceUpdate = await tx.fund.updateMany({
         where: {
@@ -348,73 +335,9 @@ export class CashHandoversService {
 
   async settle(id: string, employeeId: string, dto: SettleCashHandoverDto) {
     try {
-      return await runSerializableTransaction(this.prisma, async (tx) => {
-        await assertActiveEmployee(tx, employeeId);
-        const handover = await this.findOrThrow(tx, id);
-        if (
-          handover.status !== CashHandoverStatus.APPROVED ||
-          handover.settlementStatus !== CashHandoverSettlementStatus.PENDING
-        ) {
-          throw new ConflictException(
-            'The cash handover is not awaiting bank settlement.',
-          );
-        }
-        if (handover.requestedById === employeeId) {
-          throw new ForbiddenException(
-            'Employees cannot settle their own cash handovers.',
-          );
-        }
-        if (
-          handover.destinationFund.deletedAt ||
-          handover.destinationFund.type !== FundType.BANK
-        ) {
-          throw new ConflictException(
-            'Settlement requires an active BANK destination fund.',
-          );
-        }
-
-        const bankReference = dto.bankReference.toUpperCase();
-        if (
-          (handover.bankReference &&
-            handover.bankReference !== bankReference) ||
-          (handover.evidenceReference &&
-            handover.evidenceReference !== dto.evidenceReference)
-        ) {
-          throw new ConflictException(
-            'Settlement details do not match the registered bank deposit.',
-          );
-        }
-
-        const settledAt = new Date();
-        const destinationTransaction = await this.postDestinationEntry(
-          tx,
-          handover,
-          employeeId,
-          settledAt,
-          FundType.BANK,
-        );
-        const settled = await tx.cashHandover.update({
-          where: { id: handover.id },
-          data: {
-            settlementStatus: CashHandoverSettlementStatus.SETTLED,
-            settledAt,
-            settledById: employeeId,
-            bankReference,
-            evidenceReference: dto.evidenceReference,
-            destinationTransactionId: destinationTransaction.id,
-          },
-          include: this.handoverInclude,
-        });
-        await this.log(tx, employeeId, 'CASH_HANDOVER_SETTLED', {
-          handoverId: handover.id,
-          destinationFundId: handover.destinationFundId,
-          destinationTransactionId: destinationTransaction.id,
-          bankReference: settled.bankReference,
-          evidenceReference: settled.evidenceReference,
-          transferAmount: handover.transferAmount.toString(),
-        });
-        return settled;
-      });
+      return await runSerializableTransaction(this.prisma, (tx) =>
+        this.settleInTransaction(tx, id, employeeId, dto),
+      );
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -426,6 +349,78 @@ export class CashHandoversService {
       }
       throw error;
     }
+  }
+
+  async settleInTransaction(
+    tx: ExtendedPrismaTransactionClient,
+    id: string,
+    employeeId: string,
+    dto: SettleCashHandoverDto,
+  ) {
+    await assertActiveEmployee(tx, employeeId);
+    const handover = await this.findOrThrow(tx, id);
+    if (
+      handover.status !== CashHandoverStatus.APPROVED ||
+      handover.settlementStatus !== CashHandoverSettlementStatus.PENDING
+    ) {
+      throw new ConflictException(
+        'The cash handover is not awaiting bank settlement.',
+      );
+    }
+    if (handover.requestedById === employeeId) {
+      throw new ForbiddenException(
+        'Employees cannot settle their own cash handovers.',
+      );
+    }
+    if (
+      handover.destinationFund.deletedAt ||
+      handover.destinationFund.type !== FundType.BANK
+    ) {
+      throw new ConflictException(
+        'Settlement requires an active BANK destination fund.',
+      );
+    }
+
+    const bankReference = dto.bankReference.toUpperCase();
+    if (
+      (handover.bankReference && handover.bankReference !== bankReference) ||
+      (handover.evidenceReference &&
+        handover.evidenceReference !== dto.evidenceReference)
+    ) {
+      throw new ConflictException(
+        'Settlement details do not match the registered bank deposit.',
+      );
+    }
+
+    const settledAt = new Date();
+    const destinationTransaction = await this.postDestinationEntry(
+      tx,
+      handover,
+      employeeId,
+      settledAt,
+      FundType.BANK,
+    );
+    const settled = await tx.cashHandover.update({
+      where: { id: handover.id },
+      data: {
+        settlementStatus: CashHandoverSettlementStatus.SETTLED,
+        settledAt,
+        settledById: employeeId,
+        bankReference,
+        evidenceReference: dto.evidenceReference,
+        destinationTransactionId: destinationTransaction.id,
+      },
+      include: this.handoverInclude,
+    });
+    await this.log(tx, employeeId, 'CASH_HANDOVER_SETTLED', {
+      handoverId: handover.id,
+      destinationFundId: handover.destinationFundId,
+      destinationTransactionId: destinationTransaction.id,
+      bankReference: settled.bankReference,
+      evidenceReference: settled.evidenceReference,
+      transferAmount: handover.transferAmount.toString(),
+    });
+    return settled;
   }
 
   async registerDeposit(
@@ -620,6 +615,31 @@ export class CashHandoversService {
       include: this.handoverInclude,
     });
     return paging.format(handovers);
+  }
+
+  private async assertFundsHaveNoOpenShift(
+    tx: ExtendedPrismaTransactionClient,
+    sourceFundId: string,
+    destination: { id: string; type: FundType },
+  ) {
+    const openShift = await tx.cashierShift.findFirst({
+      where: {
+        fundId: {
+          in:
+            destination.type === FundType.CASH
+              ? [sourceFundId, destination.id]
+              : [sourceFundId],
+        },
+        status: ShiftStatus.OPEN,
+      },
+      select: { id: true },
+    });
+    if (openShift) {
+      throw new ConflictException({
+        code: 'CASH_HANDOVER_FUND_BUSY',
+        message: 'Cash handover funds must not have an open cashier shift.',
+      });
+    }
   }
 
   private async postDestinationEntry(

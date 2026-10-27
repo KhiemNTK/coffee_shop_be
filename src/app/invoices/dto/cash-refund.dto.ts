@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export class CreateCashRefundDto extends createZodDto(
   z.strictObject({
+    expectedShiftId: z.uuid(),
     amount: z
       .string()
       .trim()

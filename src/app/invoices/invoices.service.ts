@@ -240,6 +240,7 @@ export class InvoicesService {
   async getInvoices({
     page,
     itemPerPage,
+    keyword,
     select,
     createdFrom,
     createdTo,
@@ -254,6 +255,48 @@ export class InvoicesService {
       'Invoice',
     );
     const where: Prisma.InvoiceWhereInput = {
+      ...(keyword
+        ? {
+            OR: [
+              { invoiceNumber: { contains: keyword, mode: 'insensitive' } },
+              {
+                documentSnapshot: {
+                  path: ['tableName'],
+                  string_contains: keyword,
+                  mode: 'insensitive',
+                },
+              },
+              {
+                documentSnapshot: {
+                  path: ['issuedByName'],
+                  string_contains: keyword,
+                  mode: 'insensitive',
+                },
+              },
+              {
+                AND: [
+                  { documentSnapshot: { equals: Prisma.AnyNull } },
+                  {
+                    OR: [
+                      {
+                        orderSession: {
+                          table: {
+                            name: { contains: keyword, mode: 'insensitive' },
+                          },
+                        },
+                      },
+                      {
+                        employee: {
+                          fullName: { contains: keyword, mode: 'insensitive' },
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }
+        : {}),
       ...(paymentStatus ? { paymentStatus } : {}),
       ...(paymentMethod ? { paymentMethod } : {}),
       ...(orderSessionId ? { orderSessionId } : {}),
@@ -283,7 +326,7 @@ export class InvoicesService {
       where,
       skip: paging.skip,
       take: paging.itemPerPage,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     return paging.format(list);

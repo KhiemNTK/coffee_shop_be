@@ -187,6 +187,41 @@ describe('CashHandoversService', () => {
     expect(tx.cashTransaction.create).not.toHaveBeenCalled();
   });
 
+  it('does not credit a cash destination with an open shift', async () => {
+    tx.cashHandover.findUnique.mockResolvedValue({
+      id: 'handover-id',
+      status: CashHandoverStatus.PENDING,
+      requestedById: 'requester-id',
+      sourceFundId: 'source-fund-id',
+      destinationFundId: 'destination-fund-id',
+      sourceFund: {
+        id: 'source-fund-id',
+        type: FundType.CASH,
+        deletedAt: null,
+      },
+      destinationFund: {
+        id: 'destination-fund-id',
+        type: FundType.CASH,
+        deletedAt: null,
+      },
+    });
+    tx.cashierShift.findFirst.mockResolvedValue({ id: 'destination-shift-id' });
+    await expect(
+      service.approve('handover-id', 'reviewer-id', {}),
+    ).rejects.toMatchObject({
+      response: { code: 'CASH_HANDOVER_FUND_BUSY' },
+    });
+    expect(tx.cashierShift.findFirst).toHaveBeenCalledWith({
+      where: {
+        fundId: { in: ['source-fund-id', 'destination-fund-id'] },
+        status: ShiftStatus.OPEN,
+      },
+      select: { id: true },
+    });
+    expect(tx.fund.updateMany).not.toHaveBeenCalled();
+    expect(tx.cashTransaction.create).not.toHaveBeenCalled();
+  });
+
   it('keeps a bank transfer pending until settlement confirmation', async () => {
     tx.cashHandover.findUnique.mockResolvedValue({
       id: 'handover-id',

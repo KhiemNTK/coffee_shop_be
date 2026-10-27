@@ -34,6 +34,15 @@ export class BankReconciliationController {
     return this.bankReconciliationService.findImports(query);
   }
 
+  @Post('imports/recover')
+  @RequirePermissions(PermissionKeys.BANK_RECONCILIATION_IMPORT)
+  recoverImport(
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: CreateBankStatementImportDto,
+  ) {
+    return this.bankReconciliationService.recoverImport(employeeId, dto);
+  }
+
   @Get('imports/:id')
   @RequirePermissions(PermissionKeys.BANK_RECONCILIATION_READ)
   findImport(@Param() { id }: IDDto) {

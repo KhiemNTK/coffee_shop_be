@@ -224,10 +224,7 @@ describe('Cashier command safety (PostgreSQL)', () => {
           },
         },
       });
-      const funds = new FundsService(
-        controlled as unknown as ExtendedPrismaClient,
-        new PaginationUtilService(),
-      );
+      const funds = new FundsService(controlled, new PaginationUtilService());
       const retry = jest.spyOn(transactionRetriesTotal, 'inc');
       jest.spyOn(Logger, 'warn').mockImplementation();
       const editing = (

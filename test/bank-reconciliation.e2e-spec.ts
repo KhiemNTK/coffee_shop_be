@@ -198,7 +198,175 @@ describe('Bank statement reconciliation (e2e)', () => {
     expect(bankAfterRetry.balance.toString()).toBe('400');
   });
 
-  it('queues amount mismatches and rejects a duplicate statement import', async () => {
+  it('rolls settlement back when ignore wins after the reconciliation snapshot', async () => {
+    const reference = `race-${randomUUID()}`;
+    const handover = await createPendingBankDeposit('120');
+    await handovers.registerDeposit(handover.id, requesterId, {
+      bankReference: reference,
+      evidenceReference: 'receipts/race.pdf',
+    });
+    const statement = await prisma.bankStatementImport.create({
+      data: {
+        fundId: bankFundId,
+        importedById: reviewerId,
+        sourceFileName: 'race.csv',
+        checksum: randomUUID(),
+        statementFrom: new Date(Date.now() - 60_000),
+        statementTo: new Date(Date.now() + 60_000),
+        entries: {
+          create: {
+            fundId: bankFundId,
+            externalId: randomUUID(),
+            amount: 120,
+            direction: BankStatementEntryDirection.CREDIT,
+            transactionDate: new Date(),
+            bankReference: reference.toUpperCase(),
+          },
+        },
+      },
+      include: { entries: true },
+    });
+    const before = await prisma.fund.findUniqueOrThrow({
+      where: { id: bankFundId },
+    });
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedSettlement = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const settle = handovers.settleInTransaction.bind(handovers);
+    const spy = jest
+      .spyOn(handovers, 'settleInTransaction')
+      .mockImplementationOnce(async (...args) => {
+        reached();
+        await resume;
+        return settle(...args);
+      });
+    const pending = reconciliation.reconcile(statement.id, reviewerId);
+    try {
+      await Promise.race([
+        reachedSettlement,
+        new Promise<never>((_, reject) => {
+          setTimeout(
+            () => reject(new Error('Settlement barrier was not reached')),
+            3000,
+          ).unref();
+        }),
+      ]);
+      await reconciliation.ignoreEntry(statement.entries[0].id, reviewerId, {
+        reason: 'Not a shop deposit',
+      });
+      release();
+      await pending;
+      expect(
+        (
+          await prisma.fund.findUniqueOrThrow({ where: { id: bankFundId } })
+        ).balance.equals(before.balance),
+      ).toBe(true);
+      expect(
+        (
+          await prisma.cashHandover.findUniqueOrThrow({
+            where: { id: handover.id },
+          })
+        ).settlementStatus,
+      ).toBe(CashHandoverSettlementStatus.PENDING);
+      expect(
+        (
+          await prisma.bankStatementEntry.findUniqueOrThrow({
+            where: { id: statement.entries[0].id },
+          })
+        ).matchStatus,
+      ).toBe(BankStatementMatchStatus.IGNORED);
+    } finally {
+      release();
+      await pending.catch(() => undefined);
+      spy.mockRestore();
+    }
+  });
+
+  it('rolls money and settlement audit back if linking the statement fails', async () => {
+    const reference = `rollback-${randomUUID()}`;
+    const handover = await createPendingBankDeposit('180');
+    await handovers.registerDeposit(handover.id, requesterId, {
+      bankReference: reference,
+      evidenceReference: 'receipts/rollback.pdf',
+    });
+    const statement = await prisma.bankStatementImport.create({
+      data: {
+        fundId: bankFundId,
+        importedById: reviewerId,
+        sourceFileName: 'rollback.csv',
+        checksum: randomUUID(),
+        statementFrom: new Date(Date.now() - 60_000),
+        statementTo: new Date(Date.now() + 60_000),
+        entries: {
+          create: {
+            fundId: bankFundId,
+            externalId: randomUUID(),
+            amount: 180,
+            direction: BankStatementEntryDirection.CREDIT,
+            transactionDate: new Date(),
+            bankReference: reference.toUpperCase(),
+          },
+        },
+      },
+      include: { entries: true },
+    });
+    const before = await prisma.fund.findUniqueOrThrow({
+      where: { id: bankFundId },
+    });
+    const failing = prisma.$extends({
+      query: {
+        bankStatementEntry: {
+          updateMany({ args, query }) {
+            if (args.data.matchStatus === BankStatementMatchStatus.MATCHED)
+              throw new Error('Fixture link failure');
+            return query(args);
+          },
+        },
+      },
+    });
+    const service = new BankReconciliationService(
+      failing,
+      pagination,
+      handovers,
+    );
+    await expect(service.reconcile(statement.id, reviewerId)).rejects.toThrow(
+      'Fixture link failure',
+    );
+    expect(
+      (
+        await prisma.fund.findUniqueOrThrow({ where: { id: bankFundId } })
+      ).balance.equals(before.balance),
+    ).toBe(true);
+    expect(
+      (
+        await prisma.cashHandover.findUniqueOrThrow({
+          where: { id: handover.id },
+        })
+      ).settlementStatus,
+    ).toBe(CashHandoverSettlementStatus.PENDING);
+    expect(
+      await prisma.actionLog.count({
+        where: {
+          actionType: 'CASH_HANDOVER_SETTLED',
+          details: { path: ['handoverId'], equals: handover.id },
+        },
+      }),
+    ).toBe(0);
+    expect(
+      (
+        await prisma.bankStatementEntry.findUniqueOrThrow({
+          where: { id: statement.entries[0].id },
+        })
+      ).matchStatus,
+    ).toBe(BankStatementMatchStatus.UNMATCHED);
+  });
+
+  it('queues amount mismatches and replays the exact statement without importing twice', async () => {
     const handover = await createPendingBankDeposit('300');
     await handovers.registerDeposit(handover.id, requesterId, {
       bankReference: 'bank-auto-match-002',
@@ -233,8 +401,16 @@ describe('Bank statement reconciliation (e2e)', () => {
     expect(pending.settlementStatus).toBe(CashHandoverSettlementStatus.PENDING);
     expect(bankAfter.balance.toString()).toBe('400');
 
+    const replay = await reconciliation.createImport(reviewerId, dto);
+    expect(replay).toMatchObject({
+      statementImport: { id: result.statementImport.id },
+      replayed: true,
+    });
     await expect(
-      reconciliation.createImport(reviewerId, dto),
+      reconciliation.createImport(reviewerId, {
+        ...dto,
+        entries: [{ ...dto.entries[0], amount: '298' }],
+      }),
     ).rejects.toBeInstanceOf(ConflictException);
   });
 });

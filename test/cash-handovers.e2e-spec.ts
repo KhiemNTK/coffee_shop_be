@@ -175,6 +175,65 @@ describe('Cash handover ledger (e2e)', () => {
     expect(destinationAfter.balance.toString()).toBe('70');
   });
 
+  it('rejects a cash destination opened after the request without moving money', async () => {
+    const { shift, sourceFund, destinationFund } = await createClosedShift({
+      sourceBalance: '100',
+      countedCash: '100',
+    });
+    const request = await service.create(requesterId, {
+      shiftId: shift.id,
+      destinationFundId: destinationFund.id,
+      retainedCash: '20',
+    });
+    const destinationShift = await prisma.cashierShift.create({
+      data: { employeeId: reviewerId, fundId: destinationFund.id },
+    });
+    shiftIds.push(destinationShift.id);
+    try {
+      await expect(
+        service.approve(request.id, reviewerId, {}),
+      ).rejects.toMatchObject({
+        response: { code: 'CASH_HANDOVER_FUND_BUSY' },
+      });
+      const funds = await prisma.fund.findMany({
+        where: { id: { in: [sourceFund.id, destinationFund.id] } },
+        orderBy: { id: 'asc' },
+      });
+      expect(
+        funds.find((fund) => fund.id === sourceFund.id)!.balance.toString(),
+      ).toBe('100');
+      expect(
+        funds
+          .find((fund) => fund.id === destinationFund.id)!
+          .balance.toString(),
+      ).toBe('0');
+      expect(
+        await prisma.cashTransaction.count({
+          where: { fundId: { in: [sourceFund.id, destinationFund.id] } },
+        }),
+      ).toBe(0);
+      await expect(
+        service.create(requesterId, {
+          shiftId: shift.id,
+          destinationFundId: destinationFund.id,
+          retainedCash: '20',
+        }),
+      ).rejects.toMatchObject({
+        response: { code: 'CASH_HANDOVER_FUND_BUSY' },
+      });
+    } finally {
+      await prisma.cashierShift.update({
+        where: { id: destinationShift.id },
+        data: {
+          status: ShiftStatus.CLOSED,
+          closedAt: new Date(),
+          actualEndingCash: 0,
+          reportedEndingCash: 0,
+        },
+      });
+    }
+  });
+
   it('posts one transfer when two approvals race', async () => {
     const { shift, sourceFund, destinationFund } = await createClosedShift({
       sourceBalance: '200',

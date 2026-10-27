@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { ShiftStatus } from '@prisma/client';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
@@ -101,6 +102,19 @@ export class CashierShiftsController {
   @RequirePermissions(PermissionKeys.CASHIER_SHIFTS_READ)
   findAll(@Query() query: GetCashierShiftsDto) {
     return this.cashierShiftsService.findAll(query);
+  }
+
+  @Get('mine/closed')
+  @RequirePermissions(PermissionKeys.CASH_HANDOVERS_CREATE)
+  findMyClosedShifts(
+    @Employee('employeeId') employeeId: string,
+    @Query() query: GetCashierShiftsDto,
+  ) {
+    return this.cashierShiftsService.findAll({
+      ...query,
+      employeeId,
+      status: ShiftStatus.CLOSED,
+    });
   }
 
   @Get(':id')

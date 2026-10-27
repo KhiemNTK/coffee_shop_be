@@ -191,9 +191,45 @@ export class PaymentReconciliationService
   }
 
   async findIncidents(query: GetPaymentIncidentsDto) {
+    const keyword = query.keyword?.trim();
+    const matchingTypes = keyword
+      ? Object.values(PaymentReconciliationIncidentType).filter((type) =>
+          type.includes(keyword.toUpperCase()),
+        )
+      : [];
     const where: Prisma.PaymentReconciliationIncidentWhereInput = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.type ? { type: query.type } : {}),
+      ...(keyword
+        ? {
+            OR: [
+              { title: { contains: keyword, mode: 'insensitive' } },
+              {
+                paymentAttempt: {
+                  merchantReference: { contains: keyword, mode: 'insensitive' },
+                },
+              },
+              {
+                paymentAttempt: {
+                  invoice: {
+                    invoiceNumber: { contains: keyword, mode: 'insensitive' },
+                  },
+                },
+              },
+              ...(matchingTypes.length
+                ? [{ type: { in: matchingTypes } }]
+                : []),
+              ...(z.uuid().safeParse(keyword).success
+                ? [
+                    { id: keyword },
+                    { paymentAttemptId: keyword },
+                    { paymentRefundId: keyword },
+                    { paymentAttempt: { invoiceId: keyword } },
+                  ]
+                : []),
+            ],
+          }
+        : {}),
     };
     const totalItems = await this.prisma.paymentReconciliationIncident.count({
       where,

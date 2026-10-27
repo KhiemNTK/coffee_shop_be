@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -19,6 +20,7 @@ import {
   type ExtendedPrismaClient,
 } from '../../common/prisma/prisma.service';
 import { assertActiveEmployee } from '../../common/prisma/employee.util';
+import { runSerializableTransaction } from '../../common/prisma/transaction.util';
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { CashHandoversService } from './cash-handovers.service';
@@ -45,6 +47,9 @@ export class BankReconciliationService {
 
   async createImport(employeeId: string, dto: CreateBankStatementImportDto) {
     await assertActiveEmployee(this.prisma, employeeId);
+    const { entries, checksum } = this.importIdentity(dto);
+    const existing = await this.findByChecksum(dto.fundId, checksum);
+    if (existing) return { statementImport: existing, replayed: true };
     const fund = await this.prisma.fund.findFirst({
       where: { id: dto.fundId, type: FundType.BANK, deletedAt: null },
       select: { id: true },
@@ -55,22 +60,8 @@ export class BankReconciliationService {
       );
     }
 
-    const entries = dto.entries.map((entry) => ({
-      ...entry,
-      externalId: entry.externalId.toUpperCase(),
-      bankReference: entry.bankReference?.toUpperCase(),
-    }));
-    if (
-      new Set(entries.map(({ externalId }) => externalId)).size !==
-      entries.length
-    ) {
-      throw new ConflictException(
-        'Statement entries must have unique external IDs.',
-      );
-    }
-
-    const checksum = this.createChecksum({ ...dto, entries });
     const importedAt = new Date();
+    let replayed = false;
     const statementImport = await this.prisma
       .$transaction(async (tx) => {
         const created = await tx.bankStatementImport.create({
@@ -113,14 +104,21 @@ export class BankReconciliationService {
         });
         return created;
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (this.isUniqueViolation(error)) {
+          const existing = await this.findByChecksum(dto.fundId, checksum);
+          if (existing) {
+            replayed = true;
+            return existing;
+          }
           throw new ConflictException(
             'This statement or one of its bank transaction IDs was already imported.',
           );
         }
         throw error;
       });
+
+    if (replayed) return { statementImport, replayed: true };
 
     try {
       const reconciliation = await this.reconcile(
@@ -139,6 +137,43 @@ export class BankReconciliationService {
         reconciliationPending: true,
       };
     }
+  }
+
+  async recoverImport(employeeId: string, dto: CreateBankStatementImportDto) {
+    await assertActiveEmployee(this.prisma, employeeId);
+    const { checksum } = this.importIdentity(dto);
+    const statementImport = await this.findByChecksum(dto.fundId, checksum);
+    if (!statementImport) {
+      throw new NotFoundException({
+        code: 'BANK_IMPORT_RECOVERY_NOT_FOUND',
+        message: 'No statement matching this exact content was found.',
+      });
+    }
+    return { statementImport, replayed: true };
+  }
+
+  private findByChecksum(fundId: string, checksum: string) {
+    return this.prisma.bankStatementImport.findUnique({
+      where: { fundId_checksum: { fundId, checksum } },
+      include: this.importInclude,
+    });
+  }
+
+  private importIdentity(dto: CreateBankStatementImportDto) {
+    const entries = dto.entries.map((entry) => ({
+      ...entry,
+      externalId: entry.externalId.toUpperCase(),
+      bankReference: entry.bankReference?.toUpperCase(),
+    }));
+    if (
+      new Set(entries.map(({ externalId }) => externalId)).size !==
+      entries.length
+    ) {
+      throw new ConflictException(
+        'Statement entries must have unique external IDs.',
+      );
+    }
+    return { entries, checksum: this.createChecksum({ ...dto, entries }) };
   }
 
   async findImports(query: GetBankStatementImportsDto) {
@@ -279,125 +314,15 @@ export class BankReconciliationService {
         );
       }
 
-      const ignored = await tx.bankStatementEntry.update({
-        where: { id },
-        data: {
-          matchStatus: BankStatementMatchStatus.IGNORED,
-          mismatchReason: dto.reason,
-          ignoredAt: new Date(),
-          matchedAt: null,
-          matchedHandoverId: null,
-        },
-        include: this.entryRelations,
-      });
-      await this.log(tx, employeeId, 'BANK_STATEMENT_ENTRY_IGNORED', {
-        entryId: id,
-        importId: entry.importId,
-        fundId: entry.fundId,
-        reason: dto.reason,
-      });
-      return ignored;
-    });
-  }
-
-  private async reconcileEntry(
-    entry: {
-      id: string;
-      fundId: string;
-      amount: Prisma.Decimal;
-      bankReference: string | null;
-    },
-    employeeId: string,
-  ) {
-    if (!entry.bankReference) {
-      await this.markUnmatched(entry.id);
-      return;
-    }
-
-    let handover = await this.findHandover(entry.fundId, entry.bankReference);
-    if (!handover) {
-      await this.markUnmatched(entry.id);
-      return;
-    }
-    if (!handover.transferAmount.equals(entry.amount)) {
-      await this.markMismatch(
-        entry.id,
-        `Amount does not match handover ${handover.id}.`,
-      );
-      return;
-    }
-    if (
-      handover.status !== CashHandoverStatus.APPROVED ||
-      (handover.settlementStatus !== CashHandoverSettlementStatus.PENDING &&
-        handover.settlementStatus !== CashHandoverSettlementStatus.SETTLED)
-    ) {
-      await this.markMismatch(
-        entry.id,
-        `Handover ${handover.id} is not eligible for bank settlement.`,
-      );
-      return;
-    }
-    if (
-      handover.bankStatementEntry &&
-      handover.bankStatementEntry.id !== entry.id
-    ) {
-      await this.markMismatch(
-        entry.id,
-        `Handover ${handover.id} is already matched to another statement entry.`,
-      );
-      return;
-    }
-    if (!handover.evidenceReference) {
-      await this.markMismatch(
-        entry.id,
-        `Handover ${handover.id} has no registered deposit evidence.`,
-      );
-      return;
-    }
-
-    if (handover.settlementStatus === CashHandoverSettlementStatus.PENDING) {
-      try {
-        await this.cashHandoversService.settle(handover.id, employeeId, {
-          bankReference: entry.bankReference,
-          evidenceReference: handover.evidenceReference,
+      if (entry.matchStatus === BankStatementMatchStatus.IGNORED) {
+        return tx.bankStatementEntry.findUniqueOrThrow({
+          where: { id },
+          include: this.entryRelations,
         });
-      } catch {
-        handover = await this.findHandover(entry.fundId, entry.bankReference);
-        if (
-          !handover ||
-          handover.settlementStatus !== CashHandoverSettlementStatus.SETTLED
-        ) {
-          await this.markMismatch(
-            entry.id,
-            'Automatic settlement could not be confirmed; manual review is required.',
-          );
-          return;
-        }
       }
-    }
-
-    await this.linkEntry(entry.id, handover.id);
-  }
-
-  private findHandover(fundId: string, bankReference: string) {
-    return this.prisma.cashHandover.findFirst({
-      where: { destinationFundId: fundId, bankReference },
-      select: {
-        id: true,
-        status: true,
-        settlementStatus: true,
-        transferAmount: true,
-        evidenceReference: true,
-        bankStatementEntry: { select: { id: true } },
-      },
-    });
-  }
-
-  private async linkEntry(entryId: string, handoverId: string) {
-    try {
-      const update = await this.prisma.bankStatementEntry.updateMany({
+      const ignored = await tx.bankStatementEntry.updateMany({
         where: {
-          id: entryId,
+          id,
           matchStatus: {
             in: [
               BankStatementMatchStatus.UNMATCHED,
@@ -406,28 +331,164 @@ export class BankReconciliationService {
           },
         },
         data: {
-          matchStatus: BankStatementMatchStatus.MATCHED,
-          mismatchReason: null,
-          matchedAt: new Date(),
-          ignoredAt: null,
-          matchedHandoverId: handoverId,
+          matchStatus: BankStatementMatchStatus.IGNORED,
+          mismatchReason: dto.reason,
+          ignoredAt: new Date(),
+          matchedAt: null,
+          matchedHandoverId: null,
         },
       });
-      return update.count === 1;
-    } catch (error) {
-      if (this.isUniqueViolation(error)) {
-        await this.markMismatch(
-          entryId,
-          `Handover ${handoverId} is already matched to another statement entry.`,
+      if (ignored.count !== 1)
+        throw new ConflictException(
+          'The statement entry changed. Reload before ignoring it.',
         );
-        return false;
+      await this.log(tx, employeeId, 'BANK_STATEMENT_ENTRY_IGNORED', {
+        entryId: id,
+        importId: entry.importId,
+        fundId: entry.fundId,
+        reason: dto.reason,
+      });
+      return tx.bankStatementEntry.findUniqueOrThrow({
+        where: { id },
+        include: this.entryRelations,
+      });
+    });
+  }
+
+  private async reconcileEntry(candidate: { id: string }, employeeId: string) {
+    try {
+      await runSerializableTransaction(this.prisma, async (tx) => {
+        const entry = await tx.bankStatementEntry.findUniqueOrThrow({
+          where: { id: candidate.id },
+        });
+        if (
+          entry.matchStatus !== BankStatementMatchStatus.UNMATCHED &&
+          entry.matchStatus !== BankStatementMatchStatus.MISMATCH
+        )
+          return;
+        if (!entry.bankReference) {
+          await this.markUnmatched(tx, entry.id);
+          return;
+        }
+        const handover = await tx.cashHandover.findFirst({
+          where: {
+            destinationFundId: entry.fundId,
+            bankReference: entry.bankReference,
+          },
+          select: {
+            id: true,
+            status: true,
+            settlementStatus: true,
+            transferAmount: true,
+            evidenceReference: true,
+            bankStatementEntry: { select: { id: true } },
+          },
+        });
+        if (!handover) {
+          await this.markUnmatched(tx, entry.id);
+          return;
+        }
+        if (!handover.transferAmount.equals(entry.amount)) {
+          await this.markMismatch(
+            tx,
+            entry.id,
+            `Amount does not match handover ${handover.id}.`,
+          );
+          return;
+        }
+        if (
+          handover.status !== CashHandoverStatus.APPROVED ||
+          (handover.settlementStatus !== CashHandoverSettlementStatus.PENDING &&
+            handover.settlementStatus !== CashHandoverSettlementStatus.SETTLED)
+        ) {
+          await this.markMismatch(
+            tx,
+            entry.id,
+            `Handover ${handover.id} is not eligible for bank settlement.`,
+          );
+          return;
+        }
+        if (
+          handover.bankStatementEntry &&
+          handover.bankStatementEntry.id !== entry.id
+        ) {
+          await this.markMismatch(
+            tx,
+            entry.id,
+            `Handover ${handover.id} is already matched to another statement entry.`,
+          );
+          return;
+        }
+        if (!handover.evidenceReference) {
+          await this.markMismatch(
+            tx,
+            entry.id,
+            `Handover ${handover.id} has no registered deposit evidence.`,
+          );
+          return;
+        }
+        // Settlement, the statement link and audit must commit or roll back together.
+        if (
+          handover.settlementStatus === CashHandoverSettlementStatus.PENDING
+        ) {
+          await this.cashHandoversService.settleInTransaction(
+            tx,
+            handover.id,
+            employeeId,
+            {
+              bankReference: entry.bankReference,
+              evidenceReference: handover.evidenceReference,
+            },
+          );
+        }
+        const linked = await tx.bankStatementEntry.updateMany({
+          where: {
+            id: entry.id,
+            matchStatus: {
+              in: [
+                BankStatementMatchStatus.UNMATCHED,
+                BankStatementMatchStatus.MISMATCH,
+              ],
+            },
+          },
+          data: {
+            matchStatus: BankStatementMatchStatus.MATCHED,
+            mismatchReason: null,
+            matchedAt: new Date(),
+            ignoredAt: null,
+            matchedHandoverId: handover.id,
+          },
+        });
+        if (linked.count !== 1)
+          throw new ConflictException(
+            'The statement entry changed during reconciliation.',
+          );
+        await this.log(tx, employeeId, 'BANK_STATEMENT_ENTRY_MATCHED', {
+          entryId: entry.id,
+          importId: entry.importId,
+          handoverId: handover.id,
+          fundId: entry.fundId,
+        });
+      });
+    } catch (error) {
+      if (
+        error instanceof ConflictException ||
+        error instanceof ForbiddenException ||
+        this.isUniqueViolation(error)
+      ) {
+        await this.markMismatch(
+          this.prisma,
+          candidate.id,
+          'Automatic settlement could not be confirmed; manual review is required.',
+        );
+        return;
       }
       throw error;
     }
   }
 
-  private markUnmatched(entryId: string) {
-    return this.prisma.bankStatementEntry.updateMany({
+  private markUnmatched(tx: ExtendedPrismaTransactionClient, entryId: string) {
+    return tx.bankStatementEntry.updateMany({
       where: {
         id: entryId,
         matchStatus: BankStatementMatchStatus.MISMATCH,
@@ -439,8 +500,12 @@ export class BankReconciliationService {
     });
   }
 
-  private markMismatch(entryId: string, reason: string) {
-    return this.prisma.bankStatementEntry.updateMany({
+  private markMismatch(
+    tx: ExtendedPrismaTransactionClient,
+    entryId: string,
+    reason: string,
+  ) {
+    return tx.bankStatementEntry.updateMany({
       where: {
         id: entryId,
         matchStatus: {
