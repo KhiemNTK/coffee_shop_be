@@ -142,14 +142,18 @@ export class KitchenRealtimeService
   }
 
   onModuleDestroy() {
-    this.shutdown.next();
-    this.shutdown.complete();
+    this.closeStreams();
     for (const unsubscribe of this.unsubscribe) unsubscribe();
     this.publisher?.disconnect();
     this.subscriber?.disconnect();
     this.relayReady.complete();
     this.seenEvents.clear();
     this.events.complete();
+  }
+
+  closeStreams() {
+    this.shutdown.next();
+    this.shutdown.complete();
   }
 
   stream(): Observable<MessageEvent> {

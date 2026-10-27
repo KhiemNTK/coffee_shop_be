@@ -36,6 +36,7 @@ import { ORDER_EVENTS } from './events/order.events';
 import { OrderPolicyService } from './order-policy.service';
 import type {
   ExtendedPrismaTransactionClient,
+  KitchenPrintSplit,
   OpenSessionInput,
   OrderEventBase,
   OrderEventPayloadMap,
@@ -51,6 +52,7 @@ import { OutboxService } from '../durable/outbox.service';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { runSerializableTransaction as executeSerializableTransaction } from '../../common/prisma/transaction.util';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
+import { PrintingService } from '../printing/printing.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import {
   ORDER_MENU_ITEM_SELECT,
@@ -74,6 +76,7 @@ export class OrdersService {
     private readonly pagination: PaginationUtilService,
     private readonly takeaway: TakeawayService,
     private readonly idempotency: IdempotencyService,
+    private readonly printing: PrintingService,
   ) {}
 
   private readonly orderSessionInclude = {
@@ -159,13 +162,18 @@ export class OrdersService {
     });
   }
 
-  async openSession({ tableId, employeeId, guestCount }: OpenSessionInput) {
-    return this.runSerializableTransaction((tx) =>
-      this.createOrderSession(tx, {
-        tableId,
+  async openSession(
+    { tableId, employeeId, guestCount }: OpenSessionInput,
+    idempotencyKey: string,
+  ) {
+    return this.idempotency.execute(
+      {
         employeeId,
-        guestCount,
-      }),
+        operation: 'orders.sessions.open',
+        key: idempotencyKey,
+        request: { tableId: tableId ?? null, guestCount: guestCount ?? null },
+      },
+      (tx) => this.createOrderSession(tx, { tableId, employeeId, guestCount }),
     );
   }
 
@@ -401,33 +409,30 @@ export class OrdersService {
   async addOrderItems(
     orderSessionId: string,
     { items, idempotencyKey }: AddOrderItemsDto,
-    employeeId?: string,
+    employeeId: string,
   ) {
-    if (idempotencyKey && !employeeId) {
+    if (!idempotencyKey || !employeeId) {
       throw new BadRequestException(
-        'Idempotent order submission requires an authenticated employee.',
+        'Order submission requires an idempotency key and an authenticated employee.',
       );
     }
-    const add = async (tx: ExtendedPrismaTransactionClient) => {
-      if (employeeId) await assertActiveEmployee(tx, employeeId);
-      const result = await this.addOrderItemsInTransaction(
-        tx,
-        orderSessionId,
-        items,
-      );
-      return result.session;
-    };
-    return idempotencyKey && employeeId
-      ? this.idempotency.execute(
-          {
-            employeeId,
-            operation: 'orders.add-items',
-            key: idempotencyKey,
-            request: { orderSessionId, items },
-          },
-          add,
-        )
-      : this.runSerializableTransaction(add);
+    return this.idempotency.execute(
+      {
+        employeeId,
+        operation: 'orders.add-items',
+        key: idempotencyKey,
+        request: { orderSessionId, items },
+      },
+      async (tx) => {
+        await assertActiveEmployee(tx, employeeId);
+        const result = await this.addOrderItemsInTransaction(
+          tx,
+          orderSessionId,
+          items,
+        );
+        return result.session;
+      },
+    );
   }
 
   async createOnlineTakeawaySession(
@@ -1078,6 +1083,12 @@ export class OrdersService {
       }
 
       await this.inventoryConsumption.releaseReservations(tx, [id]);
+      await this.printing.cancelKitchenItems(
+        tx,
+        [id],
+        employeeId,
+        reason ?? 'Order item cancelled.',
+      );
       const wasteRecords =
         wasPrepared && reason
           ? await this.inventoryConsumption.recordWaste(tx, {
@@ -1195,6 +1206,12 @@ export class OrdersService {
           'Order session was changed by another operation. Please refresh and try again.',
         );
       }
+
+      const itemIds = session.orderItems
+        .filter((item) => item.serveStatus !== ServeStatus.CANCELLED)
+        .map((item) => item.id);
+      await this.inventoryConsumption.releaseReservations(tx, itemIds);
+      await this.printing.cancelKitchenItems(tx, itemIds, employeeId, reason);
 
       if (session.tableId) {
         await tx.diningTable.updateMany({
@@ -1646,6 +1663,7 @@ export class OrdersService {
         },
       });
 
+      const printMoves: KitchenPrintSplit['moves'] = [];
       for (const payloadItem of itemsToMove) {
         const dbItem = dbItemsById.get(payloadItem.orderItemId);
 
@@ -1701,6 +1719,12 @@ export class OrdersService {
             },
             select: { id: true },
           });
+          printMoves.push({
+            orderItemId: dbItem.id,
+            movedOrderItemId: movedItem.id,
+            originalQuantity: dbItem.quantity,
+            quantityToMove: payloadItem.quantityToMove,
+          });
 
           if (dbItem.recipeSnapshottedAt) {
             const recipe = await tx.orderItemRecipeIngredient.findMany({
@@ -1743,6 +1767,12 @@ export class OrdersService {
         }
       }
 
+      await this.printing.splitKitchenItems(tx, {
+        employeeId,
+        destinationSessionId: newDestSession.id,
+        destinationTableName: destTable.name,
+        moves: printMoves,
+      });
       await tx.actionLog.create({
         data: {
           employeeId,
@@ -1915,6 +1945,11 @@ export class OrdersService {
             'Order session was changed by another operation. Please refresh and try again.',
           );
         }
+        const itemIds = activeSession.orderItems
+          .filter((item) => item.serveStatus !== ServeStatus.CANCELLED)
+          .map((item) => item.id);
+        await this.inventoryConsumption.releaseReservations(tx, itemIds);
+        await this.printing.cancelKitchenItems(tx, itemIds, employeeId, reason);
       }
 
       await tx.diningTable.updateMany({

@@ -11,6 +11,8 @@ import {
 import { ORDER_EVENTS } from '../orders/events/order.events';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 import { KitchenRealtimeService } from './kitchen-realtime.service';
+import { registerHttpDrain } from '../../common/lifecycle/http-drain';
+import { createGracefulShutdownHandler } from '../../common/lifecycle/graceful-shutdown';
 
 @Controller('test-kitchen')
 class StreamController {
@@ -24,10 +26,10 @@ class StreamController {
 
 describe('KitchenRealtimeService shutdown', () => {
   beforeEach(() => kitchenSseActiveConnections.set(0));
-  const createService = () =>
+  const createService = (bus = new DomainEventBusService()) =>
     new KitchenRealtimeService(
       { get: () => undefined } as unknown as ConfigService,
-      new DomainEventBusService(),
+      bus,
     );
 
   it('ends active and late streams, including their heartbeat timers', () => {
@@ -38,7 +40,7 @@ describe('KitchenRealtimeService shutdown', () => {
       service.stream().subscribe({ complete });
       service.stream().subscribe({ complete });
       expect(jest.getTimerCount()).toBe(4);
-      service.onModuleDestroy();
+      service.closeStreams();
       expect(complete).toHaveBeenCalledTimes(2);
       expect(jest.getTimerCount()).toBe(0);
       service.stream().subscribe({ complete });
@@ -62,6 +64,7 @@ describe('KitchenRealtimeService shutdown', () => {
         ],
       }).compile();
       app = module.createNestApplication();
+      const drain = registerHttpDrain(app);
       await app.listen(0, '127.0.0.1');
       const url = `${await app.getUrl()}/test-kitchen/events`;
       await new Promise<void>((resolve, reject) => {
@@ -78,7 +81,18 @@ describe('KitchenRealtimeService shutdown', () => {
       });
       expect((await kitchenSseActiveConnections.get()).values[0].value).toBe(1);
       await Promise.race([
-        app.close(),
+        createGracefulShutdownHandler(app, {
+          timeoutMs: 7000,
+          beforeClose: async () => {
+            const pending = drain();
+            app!.get(KitchenRealtimeService).closeStreams();
+            await pending;
+          },
+          exit(code) {
+            throw new Error(`Unexpected shutdown exit: ${code}`);
+          },
+          logger: { log() {}, error() {} },
+        })('SIGTERM'),
         new Promise<never>((_, reject) => {
           deadline = setTimeout(
             () => reject(new Error('SSE prevented graceful shutdown')),
@@ -115,7 +129,7 @@ describe('KitchenRealtimeService shutdown', () => {
 
   it('carries only validated station release snapshots and keeps legacy refreshes usable', async () => {
     const bus = new DomainEventBusService();
-    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    const service = createService(bus);
     const receive = jest.fn();
     service.onModuleInit();
     const subscription = service.stream().subscribe((message) => {
@@ -152,7 +166,7 @@ describe('KitchenRealtimeService shutdown', () => {
   it('renews every stream within one minute and stops forwarding events until guards run again', async () => {
     jest.useFakeTimers();
     const bus = new DomainEventBusService();
-    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    const service = createService(bus);
     service.onModuleInit();
     const receive = jest.fn();
     const complete = jest.fn();
@@ -198,7 +212,7 @@ describe('KitchenRealtimeService shutdown', () => {
 
   it('delivers local refreshes while the subscriber is down and deduplicates its Redis echo', async () => {
     const bus = new DomainEventBusService();
-    const service = new KitchenRealtimeService(new ConfigService(), bus);
+    const service = createService(bus);
     const publisher = {
       status: 'ready',
       publish: jest.fn().mockResolvedValue(0),
@@ -208,7 +222,7 @@ describe('KitchenRealtimeService shutdown', () => {
     };
     const handlers = new Map<string, (...args: unknown[]) => void>();
     const subscriber = {
-      status: 'ready',
+      status: 'reconnecting',
       subscribe: jest.fn().mockResolvedValue(1),
       connect: jest.fn().mockResolvedValue(undefined),
       disconnect: jest.fn(),
@@ -221,29 +235,40 @@ describe('KitchenRealtimeService shutdown', () => {
     const receive = jest.fn();
     service.onModuleInit();
     await service.onApplicationBootstrap();
+    handlers.get('close')!();
     const subscription = service.stream().subscribe(receive);
     try {
+      expect(receive.mock.lastCall?.[0]).toMatchObject({
+        type: 'kitchen.connection',
+        data: { realtime: false },
+      });
       await bus.publish(ORDER_EVENTS.ITEMS_ADDED, {});
       const message = receive.mock.calls.find(
         ([message]) => message.type === 'kitchen.refresh',
       )![0];
       expect(message).toBeDefined();
-      expect(receive.mock.lastCall?.[0]).toMatchObject({
-        type: 'kitchen.connection',
-        data: { realtime: false },
-      });
-      handlers.get('message')!('channel', JSON.stringify(message.data));
-      expect(
-        receive.mock.calls.filter(
-          ([message]) => message.type === 'kitchen.refresh',
-        ),
-      ).toHaveLength(1);
+      expect(receive.mock.lastCall?.[0]).toBe(message);
+      expect(publisher.publish).toHaveBeenCalledWith(
+        'coffee-shop:kitchen-events',
+        JSON.stringify(message.data),
+      );
+      subscriber.status = 'ready';
       handlers.get('ready')!();
       await Promise.resolve();
       expect(receive.mock.lastCall?.[0]).toMatchObject({
         type: 'kitchen.connection',
         data: { realtime: true },
       });
+      handlers.get('message')!(
+        'coffee-shop:kitchen-events',
+        JSON.stringify(message.data),
+      );
+      expect(
+        receive.mock.calls.filter(
+          ([message]) => message.type === 'kitchen.refresh',
+        ),
+      ).toHaveLength(1);
+      subscriber.status = 'reconnecting';
       handlers.get('close')!();
       expect(receive.mock.lastCall?.[0]).toMatchObject({
         type: 'kitchen.connection',

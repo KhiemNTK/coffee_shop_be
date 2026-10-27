@@ -119,6 +119,7 @@ describe('Remote takeaway orders (e2e)', () => {
       }),
       turnstile,
       module.get(OnlineOrderIntakeService),
+      module.get(PrintingService),
     );
 
     const position = await prisma.position.create({
@@ -1007,10 +1008,13 @@ describe('Remote takeaway orders (e2e)', () => {
       data: { name: `Completion ${suffix}` },
     });
     ids.diningTable = table.id;
-    const session = await orders.openSession({
-      employeeId: ids.employee,
-      tableId: table.id,
-    });
+    const session = await orders.openSession(
+      {
+        employeeId: ids.employee,
+        tableId: table.id,
+      },
+      randomUUID(),
+    );
     posSessionIds.push(session.id);
     await orders.addOrderItems(
       session.id,
@@ -1060,10 +1064,13 @@ describe('Remote takeaway orders (e2e)', () => {
         },
       }),
     ).toBe(1);
-    const newer = await orders.openSession({
-      employeeId: ids.employee,
-      tableId: table.id,
-    });
+    const newer = await orders.openSession(
+      {
+        employeeId: ids.employee,
+        tableId: table.id,
+      },
+      randomUUID(),
+    );
     posSessionIds.push(newer.id);
     await orders.completeSession(session.id, ids.employee);
     expect(
@@ -2142,7 +2149,10 @@ describe('Remote takeaway orders (e2e)', () => {
     const configured = await menu.replaceItemOptions(
       ids.menuItem,
       ids.employee,
-      optionDto,
+      {
+        ...optionDto,
+        expectedRevision: (await menu.getItemOptions(ids.menuItem)).revision,
+      },
     );
     const [medium, large] = configured.optionGroups[0].options;
     const publicMenu = await request(app.getHttpServer())
@@ -2164,11 +2174,10 @@ describe('Remote takeaway orders (e2e)', () => {
     };
     clientRequestIds.push(dto.clientRequestId);
     const quoted = await onlineOrders.createPublicRequest(dto);
-    const repeated = await menu.replaceItemOptions(
-      ids.menuItem,
-      ids.employee,
-      optionDto,
-    );
+    const repeated = await menu.replaceItemOptions(ids.menuItem, ids.employee, {
+      ...optionDto,
+      expectedRevision: configured.revision,
+    });
     expect(repeated.optionGroups[0].options.map((option) => option.id)).toEqual(
       [medium.id, large.id],
     );

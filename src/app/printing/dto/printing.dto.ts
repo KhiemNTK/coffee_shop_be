@@ -67,6 +67,14 @@ export class RetryPrintJobDto extends createZodDto(
   }),
 ) {}
 
+export class ResolvePrintJobDto extends createZodDto(
+  z.object({
+    outcome: z.enum(['PRINTED', 'NOT_PRINTED']),
+    reason: z.string().trim().min(3).max(500),
+    expectedUpdatedAt: z.iso.datetime(),
+  }),
+) {}
+
 export class ReprintReceiptDto extends createZodDto(
   z.object({
     reason: z.string().trim().min(3).max(500),
@@ -107,5 +115,6 @@ export class FailPrintJobDto extends createZodDto(
   z.object({
     leaseToken: LeaseTokenSchema,
     error: z.string().trim().min(1).max(2_000),
+    outcome: z.enum(['NOT_PRINTED', 'UNKNOWN']).default('UNKNOWN'),
   }),
 ) {}

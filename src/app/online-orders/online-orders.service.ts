@@ -38,6 +38,7 @@ import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OrdersService } from '../orders/orders.service';
 import { PUBLIC_TAKEAWAY_FEEDBACK_SELECT } from '../orders/takeaway-feedback.select';
 import { InvoicesService } from '../invoices/invoices.service';
+import { PrintingService } from '../printing/printing.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import { IdempotencyService } from '../durable/idempotency.service';
 import { OutboxService } from '../durable/outbox.service';
@@ -69,6 +70,7 @@ import {
   ONLINE_ORDER_TELEGRAM_STAFF_EVENT,
 } from './telegram-events';
 import { onlineOrderAccessExpiresAt } from './online-order-access';
+import { fulfillmentWhere } from './fulfillment-where';
 
 const REVIEW_WINDOW_MS = 30 * 60 * 1000;
 const REORDER_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
@@ -122,6 +124,7 @@ export class OnlineOrdersService {
     config: ConfigService,
     private readonly turnstile: TurnstileService,
     private readonly intake: OnlineOrderIntakeService,
+    private readonly printing: PrintingService,
   ) {
     this.pickupSchedule = readPickupSchedule(config);
     this.telegramBotUsername = config.get<string>('TELEGRAM_BOT_USERNAME');
@@ -967,56 +970,7 @@ export class OnlineOrdersService {
     const overdueBefore = new Date(
       now.getTime() - ONLINE_ORDER_NO_SHOW_GRACE_MS,
     );
-    const where: Prisma.OnlineOrderRequestWhereInput = {
-      status: OnlineOrderStatus.ACCEPTED,
-      ...(query.overdueOnly
-        ? {
-            OR: [
-              { pickupAt: { lt: overdueBefore } },
-              {
-                pickupAt: null,
-                orderSession: {
-                  is: {
-                    orderItems: {
-                      some: {
-                        replacementRemake: { is: null },
-                        serveStatus: ServeStatus.READY,
-                      },
-                      none: {
-                        replacementRemake: { is: null },
-                        serveStatus: { not: ServeStatus.CANCELLED },
-                        OR: [
-                          { serveStatus: { not: ServeStatus.READY } },
-                          { readyAt: null },
-                          { readyAt: { gt: overdueBefore } },
-                          { isPaid: true },
-                          { invoiceId: { not: null } },
-                        ],
-                      },
-                    },
-                  },
-                },
-              },
-            ],
-          }
-        : {}),
-      orderSession: {
-        is: {
-          orderItems: {
-            some: {
-              replacementRemake: { is: null },
-              serveStatus: {
-                in: [
-                  ServeStatus.PENDING,
-                  ServeStatus.COOKING,
-                  ServeStatus.READY,
-                ],
-              },
-            },
-          },
-        },
-      },
-    };
+    const where = fulfillmentWhere(query.overdueOnly ? now : undefined);
     const paging = this.pagination.paging(query);
     const [totalItems, list] = await Promise.all([
       this.prisma.onlineOrderRequest.count({ where }),
@@ -1403,13 +1357,12 @@ export class OnlineOrdersService {
           tx,
           activeItems.map((item) => item.id),
         );
-        await tx.printJob.updateMany({
-          where: {
-            kitchenTicket: { orderSessionId: request.orderSessionId },
-            status: PrintJobStatus.PENDING,
-          },
-          data: { status: PrintJobStatus.CANCELLED },
-        });
+        await this.printing.cancelKitchenItems(
+          tx,
+          activeItems.map((item) => item.id),
+          employeeId,
+          reason,
+        );
         const sessionUpdate = await tx.orderSession.updateMany({
           where: {
             id: request.orderSessionId,

@@ -20,6 +20,7 @@ import {
   GetPrintJobsDto,
   ReprintReceiptDto,
   RetryPrintJobDto,
+  ResolvePrintJobDto,
   UpdatePrintDeviceDto,
 } from './dto';
 import { PrintingService } from './printing.service';
@@ -117,5 +118,15 @@ export class PrintingController {
     @Body() dto: ReprintReceiptDto,
   ) {
     return this.printing.reprintReceipt(id, employeeId, dto);
+  }
+
+  @Post('jobs/:id/resolve')
+  @RequirePermissions(PermissionKeys.PRINT_JOBS_MANAGE)
+  resolveJob(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: ResolvePrintJobDto,
+  ) {
+    return this.printing.resolveJob(id, employeeId, dto);
   }
 }

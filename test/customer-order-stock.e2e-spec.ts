@@ -377,7 +377,10 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
         transactionDate: undefined,
       }),
     ).rejects.toThrow();
-    const session = await orders.openSession({ employeeId: ids.employee });
+    const session = await orders.openSession(
+      { employeeId: ids.employee },
+      randomUUID(),
+    );
     sessions.push(session.id);
     await orders.addOrderItems(
       session.id,
@@ -732,7 +735,10 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
     });
     const pendingSessions: string[] = [];
     for (let index = 0; index < 2; index++) {
-      const session = await orders.openSession({ employeeId: ids.employee });
+      const session = await orders.openSession(
+        { employeeId: ids.employee },
+        randomUUID(),
+      );
       sessions.push(session.id);
       pendingSessions.push(session.id);
       await orders.addOrderItems(
@@ -840,7 +846,10 @@ describe('Customer orders and ingredient commitments (PostgreSQL)', () => {
     });
     const checkoutSessions: string[] = [];
     for (let index = 0; index < 2; index++) {
-      const session = await orders.openSession({ employeeId: ids.employee });
+      const session = await orders.openSession(
+        { employeeId: ids.employee },
+        randomUUID(),
+      );
       sessions.push(session.id);
       checkoutSessions.push(session.id);
       await orders.addOrderItems(

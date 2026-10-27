@@ -37,6 +37,41 @@ describe('KitchenService ticket state', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
+  it('keeps READY tickets in the default queue and removes handed-off tickets', async () => {
+    const records = [
+      ticket([ServeStatus.READY]),
+      ticket([ServeStatus.SERVED]),
+      ticket([ServeStatus.CANCELLED]),
+    ];
+    const matches = (where: any) =>
+      records.filter((row) =>
+        row.items.some((line) =>
+          where.items.some.orderItem.serveStatus.in.includes(
+            line.orderItem.serveStatus,
+          ),
+        ),
+      );
+    prisma.kitchenTicket.count.mockImplementation(({ where }) =>
+      Promise.resolve(matches(where).length),
+    );
+    prisma.kitchenTicket.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(matches(where)),
+    );
+    const result = await service.getTickets({
+      page: 1,
+      itemPerPage: 50,
+      includeCompleted: false,
+      includeScheduled: false,
+    });
+    expect(result.totalItems).toBe(1);
+    expect(result.list).toMatchObject([
+      { state: 'COMPLETED', items: [{ serveStatus: ServeStatus.READY }] },
+    ]);
+    expect(prisma.kitchenTicket.count.mock.calls[0][0].where).toEqual(
+      prisma.kitchenTicket.findMany.mock.calls[0][0].where,
+    );
+  });
+
   it('keeps scheduled tickets out of the active queue unless explicitly requested', async () => {
     prisma.kitchenTicket.count.mockResolvedValue(0);
     prisma.kitchenTicket.findMany.mockResolvedValue([]);

@@ -21,6 +21,7 @@ import { OrderPolicyService } from './order-policy.service';
 import { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import { CashierShiftLedgerService } from '../cashier-shifts/cashier-shift-ledger.service';
 import { KitchenRoutingService } from '../kitchen/kitchen-routing.service';
+import { PrintingService } from '../printing/printing.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 
 describe('OrdersService', () => {
@@ -38,6 +39,7 @@ describe('OrdersService', () => {
   };
   let cashierShiftLedger: { findOpenShiftId: jest.Mock };
   let kitchenRouting: { createTickets: jest.Mock };
+  let printing: { cancelKitchenItems: jest.Mock; splitKitchenItems: jest.Mock };
 
   describe('completeSession', () => {
     beforeEach(() => {
@@ -191,6 +193,7 @@ describe('OrdersService', () => {
       },
     };
 
+    idempotency.execute.mockImplementation((_input, callback) => callback(tx));
     outbox = { enqueue: jest.fn() };
     inventoryConsumption = {
       consumeOrderItem: jest.fn().mockResolvedValue([]),
@@ -204,11 +207,16 @@ describe('OrdersService', () => {
     kitchenRouting = {
       createTickets: jest.fn().mockResolvedValue([]),
     };
+    printing = { cancelKitchenItems: jest.fn(), splitKitchenItems: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         OrdersService,
         TakeawayService,
+        {
+          provide: PrintingService,
+          useValue: printing,
+        },
         { provide: IdempotencyService, useValue: idempotency },
         {
           provide: PRISMA_SERVICE_TOKEN,
@@ -311,6 +319,22 @@ describe('OrdersService', () => {
 
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass durable idempotency for an internal caller without a key or actor', async () => {
+    const items = [{ menuItemId: 'menu-item-id', quantity: 1 }];
+    await expect(
+      service.addOrderItems('session-id', { items } as never, 'employee-id'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.addOrderItems(
+        'session-id',
+        { items, idempotencyKey: 'valid-retry-key' },
+        undefined as never,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(idempotency.execute).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('consumes inventory once when an item starts cooking', async () => {
@@ -1278,6 +1302,12 @@ describe('OrdersService', () => {
       employeeId: 'employee-id',
       reason: 'Customer changed order',
     });
+    expect(printing.cancelKitchenItems).toHaveBeenCalledWith(
+      tx,
+      ['order-item-id'],
+      'employee-id',
+      'Customer changed order',
+    );
     expect(tx.actionLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ actionType: 'ORDER_ITEM_CANCELLED' }),
@@ -1294,9 +1324,14 @@ describe('OrdersService', () => {
     tx.menuItem.findMany.mockResolvedValue([]);
 
     await expect(
-      service.addOrderItems('session-id', {
-        items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
-      }),
+      service.addOrderItems(
+        'session-id',
+        {
+          idempotencyKey: 'unavailable-menu-key',
+          items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
+        },
+        'employee-id',
+      ),
     ).rejects.toBeInstanceOf(NotFoundException);
 
     expect(tx.menuItem.findMany).toHaveBeenCalledWith(
@@ -1338,9 +1373,14 @@ describe('OrdersService', () => {
     kitchenRouting.createTickets.mockResolvedValue([
       { id: 'ticket-id', stationId: 'station-id', availableAt },
     ]);
-    await service.addOrderItems('session-id', {
-      items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
-    });
+    await service.addOrderItems(
+      'session-id',
+      {
+        idempotencyKey: 'new-ticket-key',
+        items: [{ menuItemId: 'menu-item-id', quantity: 1 }],
+      },
+      'employee-id',
+    );
     expect(outbox.enqueue).toHaveBeenCalledWith(
       tx,
       expect.objectContaining({
@@ -1365,11 +1405,14 @@ describe('OrdersService', () => {
     tx.diningTable.updateMany.mockResolvedValue({ count: 0 });
 
     await expect(
-      service.openSession({
-        tableId: 'table-id',
-        employeeId: 'employee-id',
-        guestCount: 2,
-      }),
+      service.openSession(
+        {
+          tableId: 'table-id',
+          employeeId: 'employee-id',
+          guestCount: 2,
+        },
+        'open-key',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(tx.orderSession.create).not.toHaveBeenCalled();
@@ -1383,10 +1426,13 @@ describe('OrdersService', () => {
       ...data,
     }));
 
-    await service.openSession({
-      employeeId: 'employee-id',
-      guestCount: 1,
-    });
+    await service.openSession(
+      {
+        employeeId: 'employee-id',
+        guestCount: 1,
+      },
+      'open-key',
+    );
 
     expect(cashierShiftLedger.findOpenShiftId).toHaveBeenCalledWith(
       tx,
@@ -1399,14 +1445,7 @@ describe('OrdersService', () => {
     );
   });
 
-  it('retries serializable transaction conflicts', async () => {
-    const conflict = new Prisma.PrismaClientKnownRequestError(
-      'Transaction conflict',
-      {
-        code: 'P2034',
-        clientVersion: 'test',
-      },
-    );
+  it('opens through the existing idempotency transaction with a canonical payload', async () => {
     const session = {
       id: 'session-id',
       tableId: 'table-id',
@@ -1414,11 +1453,6 @@ describe('OrdersService', () => {
       shiftId: null,
     };
 
-    prisma.$transaction
-      .mockRejectedValueOnce(conflict)
-      .mockImplementationOnce((callback: (transactionClient: any) => unknown) =>
-        callback(tx),
-      );
     tx.employee.findUnique.mockResolvedValue({ id: 'employee-id' });
     tx.diningTable.findFirst.mockResolvedValue({
       id: 'table-id',
@@ -1430,14 +1464,26 @@ describe('OrdersService', () => {
     tx.orderSession.create.mockResolvedValue(session);
 
     await expect(
-      service.openSession({
-        tableId: 'table-id',
-        employeeId: 'employee-id',
-        guestCount: 2,
-      }),
+      service.openSession(
+        {
+          tableId: 'table-id',
+          employeeId: 'employee-id',
+          guestCount: 2,
+        },
+        'open-key',
+      ),
     ).resolves.toEqual(session);
 
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(idempotency.execute).toHaveBeenCalledWith(
+      {
+        employeeId: 'employee-id',
+        operation: 'orders.sessions.open',
+        key: 'open-key',
+        request: { tableId: 'table-id', guestCount: 2 },
+      },
+      expect.any(Function),
+    );
+    expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
@@ -1586,6 +1632,34 @@ describe('OrdersService', () => {
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
     expect(tx.orderSession.updateMany).not.toHaveBeenCalled();
     expect(tx.diningTable.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('clears kitchen print jobs and releases reservations before publishing a cleared table', async () => {
+    tx.diningTable.findUnique.mockResolvedValue({ id: 'table-id' });
+    tx.orderSession.findFirst.mockResolvedValue({
+      id: 'session-id',
+      orderItems: [
+        { id: 'pending', serveStatus: ServeStatus.PENDING, isPaid: false },
+        { id: 'cancelled', serveStatus: ServeStatus.CANCELLED, isPaid: false },
+      ],
+    });
+    tx.orderSession.updateMany.mockResolvedValue({ count: 1 });
+    await service.clearTable(
+      'table-id',
+      'session-id',
+      'employee-id',
+      'Customer left',
+    );
+    expect(inventoryConsumption.releaseReservations).toHaveBeenCalledWith(tx, [
+      'pending',
+    ]);
+    expect(printing.cancelKitchenItems).toHaveBeenCalledWith(
+      tx,
+      ['pending'],
+      'employee-id',
+      'Customer left',
+    );
+    expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('rejects splitting an item that does not belong to the source session', async () => {

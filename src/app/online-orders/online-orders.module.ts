@@ -4,6 +4,7 @@ import { OrdersModule } from '../orders/orders.module';
 import { InvoicesModule } from '../invoices/invoices.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { TurnstileModule } from '../auth/turnstile.module';
+import { PrintingModule } from '../printing/printing.module';
 import { OnlineOrdersController } from './online-orders.controller';
 import { OnlineOrdersService } from './online-orders.service';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
@@ -16,6 +17,7 @@ import { TelegramDeliveryService } from './telegram-delivery.service';
     InvoicesModule,
     InventoryModule,
     TurnstileModule,
+    PrintingModule,
     PaginationUtilModule,
   ],
   controllers: [OnlineOrdersController],

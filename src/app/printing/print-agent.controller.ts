@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiHeader, ApiTags } from '@nestjs/swagger';
 import type { AuthenticatedPrintDevice } from '../../common/types';
 import { IDDto } from '../../common/dto/param.dto';
@@ -47,12 +47,26 @@ export class PrintAgentController {
     return this.printing.completeJob(device.id, id, dto.leaseToken);
   }
 
+  @Get('jobs/:id')
+  getJobStatus(
+    @CurrentPrintDevice() device: AuthenticatedPrintDevice,
+    @Param() { id }: IDDto,
+  ) {
+    return this.printing.getAgentJob(device.id, id);
+  }
+
   @Post('jobs/:id/fail')
   failJob(
     @CurrentPrintDevice() device: AuthenticatedPrintDevice,
     @Param() { id }: IDDto,
     @Body() dto: FailPrintJobDto,
   ) {
-    return this.printing.failJob(device.id, id, dto.leaseToken, dto.error);
+    return this.printing.failJob(
+      device.id,
+      id,
+      dto.leaseToken,
+      dto.error,
+      dto.outcome,
+    );
   }
 }

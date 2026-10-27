@@ -56,10 +56,11 @@ export class OrdersController {
     @Employee('employeeId') employeeId: string,
     @Body() openSessionDto: OpenSessionDto,
   ) {
-    return this.ordersService.openSession({
-      ...openSessionDto,
-      employeeId,
-    });
+    const { idempotencyKey, ...session } = openSessionDto;
+    return this.ordersService.openSession(
+      { ...session, employeeId },
+      idempotencyKey,
+    );
   }
 
   @Get('sessions')

@@ -8,6 +8,7 @@ import type { OutboxService } from '../durable/outbox.service';
 import type { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import type { InvoicesService } from '../invoices/invoices.service';
 import type { OrdersService } from '../orders/orders.service';
+import type { PrintingService } from '../printing/printing.service';
 import type { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OnlineOrdersService } from './online-orders.service';
 
@@ -26,6 +27,7 @@ describe('Online order overdue and no-show policy', () => {
     new ConfigService({ JWT_SECRET: 'isolated-fulfillment-policy-secret' }),
     {} as TurnstileService,
     {} as OnlineOrderIntakeService,
+    {} as PrintingService,
   );
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-10-24T04:00:00Z'));

@@ -15,6 +15,7 @@ import { InvoicePolicyService } from '../src/app/invoices/invoice-policy.service
 import { InvoicesService } from '../src/app/invoices/invoices.service';
 import { readInvoiceSnapshot } from '../src/app/invoices/invoice-snapshot';
 import { OrdersService } from '../src/app/orders/orders.service';
+import { PrintingService } from '../src/app/printing/printing.service';
 import { OrderPolicyService } from '../src/app/orders/order-policy.service';
 import { TakeawayService } from '../src/app/orders/takeaway.service';
 import { PromotionCalculatorService } from '../src/app/promotions/services/promotion-calculator.service';
@@ -91,6 +92,7 @@ describe('Invoice and table integrity (isolated PostgreSQL)', () => {
       pagination,
       new TakeawayService(prisma as never, pagination, new ConfigService()),
       idempotency,
+      new PrintingService(prisma as never, pagination, idempotency, invoices),
     );
   });
 

@@ -83,6 +83,7 @@ describe('Audit hardening (isolated PostgreSQL)', () => {
       pagination,
       new TakeawayService(prisma, pagination, config),
       {} as never,
+      {} as never,
     );
   }, 60_000);
 

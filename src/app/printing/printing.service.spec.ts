@@ -137,7 +137,10 @@ describe('PrintingService leases', () => {
 
   it('rejects completion when the lease token is stale', async () => {
     const prisma = {
-      printJob: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      printJob: {
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
     };
     const service = createService(prisma);
 
@@ -190,7 +193,13 @@ describe('PrintingService leases', () => {
     const service = createService(prisma);
 
     await expect(
-      service.failJob('device-id', 'job-id', 'valid-token-value', 'offline'),
+      service.failJob(
+        'device-id',
+        'job-id',
+        'valid-token-value',
+        'offline',
+        'NOT_PRINTED',
+      ),
     ).resolves.toEqual({ success: true, retrying: false });
     expect(tx.printJob.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,7 +248,7 @@ describe('PrintingService receipt reprints', () => {
     employee: { findFirst: jest.fn() },
     invoice: { findFirst: jest.fn() },
     printDevice: { findFirst: jest.fn() },
-    printJob: { findFirst: jest.fn(), create: jest.fn() },
+    printJob: { findFirst: jest.fn(), create: jest.fn(), count: jest.fn() },
     actionLog: { create: jest.fn() },
   };
   const idempotency = { execute: jest.fn() };
@@ -252,6 +261,7 @@ describe('PrintingService receipt reprints', () => {
         operation(tx),
     );
     tx.employee.findFirst.mockResolvedValue({ id: 'employee-id' });
+    tx.printJob.count.mockResolvedValue(0);
     tx.invoice.findFirst.mockResolvedValue({
       ...originalPayload,
       id: originalPayload.invoiceId,
@@ -367,6 +377,14 @@ describe('PrintingService receipt reprints', () => {
   it('still rejects unpaid invoices when an original receipt exists', async () => {
     tx.invoice.findFirst.mockResolvedValue(null);
 
+    await expect(
+      service.reprintReceipt('invoice-id', 'employee-id', dto),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(tx.printJob.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks receipt reprints until an uncertain delivery is reconciled', async () => {
+    tx.printJob.count.mockResolvedValue(1);
     await expect(
       service.reprintReceipt('invoice-id', 'employee-id', dto),
     ).rejects.toBeInstanceOf(ConflictException);

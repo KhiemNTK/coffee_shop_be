@@ -277,7 +277,11 @@ export class KitchenService {
               some: {
                 orderItem: {
                   serveStatus: {
-                    in: [ServeStatus.PENDING, ServeStatus.COOKING],
+                    in: [
+                      ServeStatus.PENDING,
+                      ServeStatus.COOKING,
+                      ServeStatus.READY,
+                    ],
                   },
                 },
               },

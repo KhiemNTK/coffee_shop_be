@@ -6,6 +6,7 @@ import { OrderPolicyService } from './order-policy.service';
 import { InventoryModule } from '../inventory/inventory.module';
 import { CashierShiftsModule } from '../cashier-shifts/cashier-shifts.module';
 import { KitchenModule } from '../kitchen/kitchen.module';
+import { PrintingModule } from '../printing/printing.module';
 import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 
 @Module({
@@ -13,6 +14,7 @@ import { PaginationUtilModule } from '../../common/utils/pagination-util/paginat
     CashierShiftsModule,
     InventoryModule,
     KitchenModule,
+    PrintingModule,
     PaginationUtilModule,
   ],
   controllers: [OrdersController],

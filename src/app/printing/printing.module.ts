@@ -6,11 +6,17 @@ import { PrintEventConsumerService } from './print-event-consumer.service';
 import { PrintingController } from './printing.controller';
 import { PrintingService } from './printing.service';
 import { InvoicesModule } from '../invoices/invoices.module';
+import { PrintLeaseRecoveryService } from './print-lease-recovery.service';
 
 @Module({
   imports: [PaginationUtilModule, InvoicesModule],
   controllers: [PrintingController, PrintAgentController],
-  providers: [PrintingService, PrintDeviceGuard, PrintEventConsumerService],
+  providers: [
+    PrintingService,
+    PrintDeviceGuard,
+    PrintEventConsumerService,
+    PrintLeaseRecoveryService,
+  ],
   exports: [PrintingService],
 })
 export class PrintingModule {}

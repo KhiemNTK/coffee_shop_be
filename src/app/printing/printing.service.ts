@@ -13,6 +13,7 @@ import {
   PrintDeviceType,
   PrintJobStatus,
   PrintJobType,
+  ServeStatus,
 } from '@prisma/client';
 import {
   PRISMA_SERVICE_TOKEN,
@@ -24,6 +25,7 @@ import type {
   AuthenticatedPrintDevice,
   ClaimedPrintJob,
   ExtendedPrismaTransactionClient,
+  KitchenPrintSplit,
   ReceiptPrintPayload,
   PrecheckPrintPayload,
 } from '../../common/types';
@@ -41,6 +43,7 @@ import {
   PrintAgentHeartbeatDto,
   ReprintReceiptDto,
   RetryPrintJobDto,
+  ResolvePrintJobDto,
   UpdatePrintDeviceDto,
 } from './dto';
 
@@ -348,9 +351,25 @@ export class PrintingService {
       await assertActiveEmployee(tx, employeeId);
       const job = await tx.printJob.findUnique({
         where: { id },
-        include: { kitchenTicket: { select: { availableAt: true } } },
+        include: {
+          kitchenTicket: {
+            select: {
+              availableAt: true,
+              items: {
+                where: { orderItem: { serveStatus: ServeStatus.CANCELLED } },
+                select: { orderItemId: true },
+              },
+            },
+          },
+        },
       });
       if (!job) throw new NotFoundException(`Print job ${id} not found.`);
+      if (job.status === PrintJobStatus.REQUIRES_REVIEW) {
+        throw new ConflictException({
+          code: 'PRINT_JOB_REQUIRES_REVIEW',
+          message: 'Check the printer and reconcile this job before retrying.',
+        });
+      }
       if (
         job.status !== PrintJobStatus.PENDING &&
         job.status !== PrintJobStatus.FAILED
@@ -362,6 +381,24 @@ export class PrintingService {
 
       const deviceId = dto.deviceId === undefined ? job.deviceId : dto.deviceId;
       if (deviceId) await this.assertCompatibleDevice(tx, deviceId, job.type);
+
+      let payload: Prisma.InputJsonObject | undefined;
+      if (
+        job.type === PrintJobType.KITCHEN_TICKET &&
+        this.isKitchenOrderPayload(job.payload)
+      ) {
+        const cancelled = new Set(
+          job.kitchenTicket?.items.map((item) => item.orderItemId),
+        );
+        const items = job.payload.items.filter(
+          (item) => !cancelled.has(item.orderItemId),
+        );
+        if (items.length === 0)
+          throw new ConflictException(
+            'Cancelled kitchen items cannot be printed again.',
+          );
+        payload = { ...job.payload, items };
+      }
 
       const updated = await tx.printJob.updateMany({
         where: { id, status: job.status },
@@ -377,6 +414,7 @@ export class PrintingService {
           ),
           failedAt: null,
           lastError: null,
+          ...(payload ? { payload } : {}),
         },
       });
       if (updated.count !== 1) {
@@ -385,6 +423,60 @@ export class PrintingService {
       await this.audit(tx, employeeId, 'PRINT_JOB_RETRIED', {
         printJobId: id,
         deviceId,
+      });
+      return tx.printJob.findUniqueOrThrow({
+        where: { id },
+        select: this.jobSelect,
+      });
+    });
+  }
+
+  async resolveJob(id: string, employeeId: string, dto: ResolvePrintJobDto) {
+    return this.transaction(async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
+      const job = await tx.printJob.findUnique({ where: { id } });
+      if (!job) throw new NotFoundException(`Print job ${id} not found.`);
+      if (
+        job.status !== PrintJobStatus.REQUIRES_REVIEW ||
+        job.updatedAt.toISOString() !== dto.expectedUpdatedAt
+      ) {
+        throw new ConflictException(
+          'Print job state changed. Refresh before resolving.',
+        );
+      }
+      if (dto.outcome === 'PRINTED' && !job.deviceId) {
+        throw new ConflictException(
+          'Cannot confirm printing without an assigned device.',
+        );
+      }
+      const updated = await tx.printJob.updateMany({
+        where: {
+          id,
+          status: PrintJobStatus.REQUIRES_REVIEW,
+          updatedAt: job.updatedAt,
+        },
+        data: {
+          status:
+            dto.outcome === 'PRINTED'
+              ? PrintJobStatus.PRINTED
+              : PrintJobStatus.FAILED,
+          printedAt: dto.outcome === 'PRINTED' ? new Date() : null,
+          failedAt: dto.outcome === 'NOT_PRINTED' ? new Date() : null,
+          leaseTokenHash: null,
+          lastError:
+            dto.outcome === 'NOT_PRINTED'
+              ? 'Operator confirmed no paper was printed.'
+              : null,
+        },
+      });
+      if (updated.count !== 1)
+        throw new ConflictException(
+          'Print job state changed. Refresh before resolving.',
+        );
+      await this.audit(tx, employeeId, 'PRINT_JOB_RESOLVED', {
+        printJobId: id,
+        outcome: dto.outcome,
+        reason: dto.reason,
       });
       return tx.printJob.findUniqueOrThrow({
         where: { id },
@@ -496,6 +588,21 @@ export class PrintingService {
           throw new UnauthorizedException('Employee is inactive or not found.');
         }
         const invoice = await this.findPrintableInvoice(tx, invoiceId);
+        if (
+          await tx.printJob.count({
+            where: {
+              invoiceId,
+              type: PrintJobType.RECEIPT,
+              status: PrintJobStatus.REQUIRES_REVIEW,
+            },
+          })
+        ) {
+          throw new ConflictException({
+            code: 'PRINT_JOB_REQUIRES_REVIEW',
+            message:
+              'Reconcile the uncertain receipt before requesting another copy.',
+          });
+        }
         const deviceId = await this.resolveReceiptDevice(tx, dto.deviceId);
         const original = await tx.printJob.findFirst({
           where: {
@@ -644,7 +751,6 @@ export class PrintingService {
   async claimJobs(device: AuthenticatedPrintDevice, dto: ClaimPrintJobsDto) {
     const leaseToken = randomBytes(32).toString('base64url');
     const leaseTokenHash = this.hash(leaseToken);
-    const leaseExpiresAt = new Date(Date.now() + PRINT_JOB_LEASE_MS);
 
     const jobs = await this.prisma.$transaction(async (tx) => {
       const current = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -678,7 +784,7 @@ export class PrintingService {
           "status" = 'PROCESSING'::"PrintJobStatus",
           "attempts" = job."attempts" + 1,
           "lockedAt" = CURRENT_TIMESTAMP,
-          "leaseExpiresAt" = ${leaseExpiresAt},
+          "leaseExpiresAt" = clock_timestamp() + ${PRINT_JOB_LEASE_MS} * INTERVAL '1 millisecond',
           "leaseTokenHash" = ${leaseTokenHash},
           "updatedAt" = CURRENT_TIMESTAMP
         FROM candidates
@@ -702,27 +808,55 @@ export class PrintingService {
   }
 
   async completeJob(deviceId: string, jobId: string, leaseToken: string) {
+    const leaseTokenHash = this.hash(leaseToken);
     const updated = await this.prisma.printJob.updateMany({
       where: {
         id: jobId,
         deviceId,
-        status: PrintJobStatus.PROCESSING,
-        leaseTokenHash: this.hash(leaseToken),
-        leaseExpiresAt: { gte: new Date() },
+        status: {
+          in: [PrintJobStatus.PROCESSING, PrintJobStatus.REQUIRES_REVIEW],
+        },
+        leaseTokenHash,
       },
       data: {
         status: PrintJobStatus.PRINTED,
         printedAt: new Date(),
         lockedAt: null,
         leaseExpiresAt: null,
-        leaseTokenHash: null,
+        // Keep the final token hash so a lost acknowledgement can be retried safely.
         lastError: null,
       },
     });
     if (updated.count !== 1) {
-      throw new ConflictException('Print job lease is stale or invalid.');
+      const completed = await this.prisma.printJob.findFirst({
+        where: {
+          id: jobId,
+          deviceId,
+          status: PrintJobStatus.PRINTED,
+          leaseTokenHash,
+        },
+        select: { id: true },
+      });
+      if (!completed)
+        throw new ConflictException('Print job lease is stale or invalid.');
     }
     return { success: true };
+  }
+
+  async getAgentJob(deviceId: string, jobId: string) {
+    const job = await this.prisma.printJob.findFirst({
+      where: { id: jobId, deviceId },
+      select: {
+        id: true,
+        status: true,
+        attempts: true,
+        leaseExpiresAt: true,
+        printedAt: true,
+        updatedAt: true,
+      },
+    });
+    if (!job) throw new NotFoundException(`Print job ${jobId} not found.`);
+    return job;
   }
 
   async failJob(
@@ -730,8 +864,9 @@ export class PrintingService {
     jobId: string,
     leaseToken: string,
     error: string,
+    outcome: 'NOT_PRINTED' | 'UNKNOWN' = 'UNKNOWN',
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.transaction(async (tx) => {
       const job = await tx.printJob.findFirst({
         where: {
           id: jobId,
@@ -740,11 +875,40 @@ export class PrintingService {
           leaseTokenHash: this.hash(leaseToken),
           leaseExpiresAt: { gte: new Date() },
         },
+        include: {
+          kitchenTicket: {
+            select: {
+              items: {
+                where: { orderItem: { serveStatus: ServeStatus.CANCELLED } },
+                select: { orderItemId: true },
+              },
+            },
+          },
+        },
       });
       if (!job) {
         throw new ConflictException('Print job lease is stale or invalid.');
       }
       const exhausted = job.attempts >= job.maxAttempts;
+      const uncertain = outcome === 'UNKNOWN';
+      let payload: Prisma.InputJsonObject | undefined;
+      if (
+        !uncertain &&
+        job.type === PrintJobType.KITCHEN_TICKET &&
+        this.isKitchenOrderPayload(job.payload)
+      ) {
+        const cancelled = new Set(
+          job.kitchenTicket?.items.map((item) => item.orderItemId),
+        );
+        payload = {
+          ...job.payload,
+          items: job.payload.items.filter(
+            (item) => !cancelled.has(item.orderItemId),
+          ),
+        };
+      }
+      const cancelled =
+        Array.isArray(payload?.items) && payload.items.length === 0;
       const updated = await tx.printJob.updateMany({
         where: {
           id: job.id,
@@ -752,21 +916,31 @@ export class PrintingService {
           leaseTokenHash: job.leaseTokenHash,
         },
         data: {
-          status: exhausted ? PrintJobStatus.FAILED : PrintJobStatus.PENDING,
+          status: cancelled
+            ? PrintJobStatus.CANCELLED
+            : uncertain
+              ? PrintJobStatus.REQUIRES_REVIEW
+              : exhausted
+                ? PrintJobStatus.FAILED
+                : PrintJobStatus.PENDING,
           availableAt: new Date(
             Date.now() + Math.min(300, 2 ** (job.attempts - 1)) * 1_000,
           ),
           lockedAt: null,
           leaseExpiresAt: null,
-          leaseTokenHash: null,
-          failedAt: exhausted ? new Date() : null,
+          leaseTokenHash: uncertain ? job.leaseTokenHash : null,
+          failedAt: !cancelled && !uncertain && exhausted ? new Date() : null,
           lastError: error,
+          ...(payload ? { payload } : {}),
         },
       });
       if (updated.count !== 1) {
         throw new ConflictException('Print job state changed. Please retry.');
       }
-      return { success: true, retrying: !exhausted };
+      return {
+        success: true,
+        retrying: !cancelled && !uncertain && !exhausted,
+      };
     });
   }
 
@@ -962,31 +1136,226 @@ export class PrintingService {
     });
   }
 
+  recoverExpiredLeases() {
+    return this.prisma.$transaction((tx) => this.recoverExpiredJobs(tx));
+  }
+
   private recoverExpiredJobs(
     tx: ExtendedPrismaTransactionClient,
-    deviceId: string,
+    deviceId?: string,
   ) {
     return tx.$executeRaw(Prisma.sql`
-      UPDATE "PrintJob"
+      WITH expired AS (
+        SELECT "id" FROM "PrintJob"
+        WHERE "status" = 'PROCESSING'::"PrintJobStatus"
+          AND "leaseExpiresAt" < CURRENT_TIMESTAMP
+          ${deviceId ? Prisma.sql`AND "deviceId" = ${deviceId}` : Prisma.empty}
+        ORDER BY "leaseExpiresAt", "id"
+        LIMIT 200
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE "PrintJob" job
       SET
-        "status" = CASE
-          WHEN "attempts" >= "maxAttempts" THEN 'FAILED'::"PrintJobStatus"
-          ELSE 'PENDING'::"PrintJobStatus"
-        END,
-        "availableAt" = CURRENT_TIMESTAMP,
+        "status" = 'REQUIRES_REVIEW'::"PrintJobStatus",
         "lockedAt" = NULL,
         "leaseExpiresAt" = NULL,
-        "leaseTokenHash" = NULL,
-        "failedAt" = CASE
-          WHEN "attempts" >= "maxAttempts" THEN CURRENT_TIMESTAMP
-          ELSE NULL
-        END,
-        "lastError" = 'Print agent lease expired.',
+        "lastError" = 'Print acknowledgement missing. Check the printer before retrying.',
         "updatedAt" = CURRENT_TIMESTAMP
-      WHERE "deviceId" = ${deviceId}
-        AND "status" = 'PROCESSING'::"PrintJobStatus"
-        AND "leaseExpiresAt" < CURRENT_TIMESTAMP
+      FROM expired WHERE job."id" = expired."id"
     `);
+  }
+
+  private isKitchenOrderPayload(
+    payload: unknown,
+  ): payload is Prisma.JsonObject & {
+    items: Array<Prisma.JsonObject & { orderItemId: string }>;
+  } {
+    if (
+      payload === null ||
+      Array.isArray(payload) ||
+      typeof payload !== 'object'
+    )
+      return false;
+    const value = payload as Prisma.JsonObject;
+    return (
+      value.documentType !== 'KITCHEN_CANCELLATION' &&
+      Array.isArray(value.items) &&
+      value.items.every(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          !Array.isArray(item) &&
+          typeof item.orderItemId === 'string',
+      )
+    );
+  }
+
+  async splitKitchenItems(
+    tx: ExtendedPrismaTransactionClient,
+    {
+      employeeId,
+      destinationSessionId,
+      destinationTableName,
+      moves,
+    }: KitchenPrintSplit,
+  ) {
+    if (moves.length === 0) return;
+    const movesById = new Map(moves.map((move) => [move.orderItemId, move]));
+    const jobs = await tx.printJob.findMany({
+      where: {
+        type: PrintJobType.KITCHEN_TICKET,
+        deduplicationKey: { startsWith: 'KITCHEN_TICKET:' },
+        kitchenTicket: {
+          items: { some: { orderItemId: { in: [...movesById.keys()] } } },
+        },
+      },
+      orderBy: { id: 'asc' },
+    });
+    for (const job of jobs) {
+      if (job.status === PrintJobStatus.CANCELLED) continue;
+      if (!this.isKitchenOrderPayload(job.payload)) {
+        throw new ConflictException(
+          'Invalid kitchen print payload. Reconcile before splitting.',
+        );
+      }
+      const movedItems: Prisma.InputJsonObject[] = [];
+      const remaining = job.payload.items.map((item) => {
+        const move = movesById.get(item.orderItemId);
+        if (!move) return item;
+        if (item.quantity !== move.originalQuantity) {
+          throw new ConflictException(
+            'Kitchen print quantity changed. Refresh before splitting.',
+          );
+        }
+        movedItems.push({
+          ...item,
+          orderItemId: move.movedOrderItemId,
+          quantity: move.quantityToMove,
+        });
+        return {
+          ...item,
+          quantity: move.originalQuantity - move.quantityToMove,
+        };
+      });
+      if (movedItems.length === 0) continue;
+      // A claimed ticket may already be on paper, so its quantities are immutable.
+      if (
+        job.status !== PrintJobStatus.PENDING &&
+        job.status !== PrintJobStatus.FAILED
+      ) {
+        throw new ConflictException({
+          code: 'KITCHEN_SPLIT_REQUIRES_UNPRINTED',
+          message:
+            'Cannot partially split a line after its kitchen ticket was claimed. Move the whole line instead.',
+        });
+      }
+      const updated = await tx.printJob.updateMany({
+        where: { id: job.id, status: job.status, updatedAt: job.updatedAt },
+        data: { payload: { ...job.payload, items: remaining } },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException(
+          'Kitchen print state changed. Retry splitting.',
+        );
+      }
+      await tx.printJob.create({
+        data: {
+          type: PrintJobType.KITCHEN_TICKET,
+          kitchenTicketId: job.kitchenTicketId,
+          deviceId: job.deviceId,
+          requestedById: employeeId,
+          status: job.status,
+          copies: job.copies,
+          maxAttempts: job.maxAttempts,
+          availableAt: job.availableAt,
+          deduplicationKey: `KITCHEN_TICKET:${job.id}:SPLIT:${destinationSessionId}`,
+          payload: {
+            ...job.payload,
+            orderSessionId: destinationSessionId,
+            tableName: destinationTableName,
+            items: movedItems,
+          },
+        },
+      });
+    }
+  }
+
+  async cancelKitchenItems(
+    tx: ExtendedPrismaTransactionClient,
+    orderItemIds: string[],
+    employeeId: string,
+    reason: string,
+  ) {
+    if (orderItemIds.length === 0) return;
+    const cancelled = new Set(orderItemIds);
+    const jobs = await tx.printJob.findMany({
+      where: {
+        type: PrintJobType.KITCHEN_TICKET,
+        deduplicationKey: { startsWith: 'KITCHEN_TICKET:' },
+        kitchenTicket: {
+          items: { some: { orderItemId: { in: orderItemIds } } },
+        },
+      },
+      orderBy: { id: 'asc' },
+    });
+    for (const job of jobs) {
+      if (job.status === PrintJobStatus.CANCELLED) continue;
+      if (!this.isKitchenOrderPayload(job.payload)) {
+        throw new ConflictException(
+          'Invalid kitchen print payload. Reconcile the ticket before cancellation.',
+        );
+      }
+      const items = job.payload.items.filter((item) =>
+        cancelled.has(item.orderItemId),
+      );
+      if (items.length === 0) continue;
+      if (
+        job.status === PrintJobStatus.PENDING ||
+        job.status === PrintJobStatus.FAILED
+      ) {
+        const remaining = job.payload.items.filter(
+          (item) => !cancelled.has(item.orderItemId),
+        );
+        const updated = await tx.printJob.updateMany({
+          where: { id: job.id, status: job.status, updatedAt: job.updatedAt },
+          data: {
+            payload: { ...job.payload, items: remaining },
+            ...(remaining.length === 0
+              ? { status: PrintJobStatus.CANCELLED, failedAt: null }
+              : {}),
+          },
+        });
+        if (updated.count !== 1)
+          throw new ConflictException(
+            'Kitchen print state changed. Retry cancellation.',
+          );
+      } else {
+        const signature = this.hash(
+          items
+            .map((item) => item.orderItemId)
+            .sort()
+            .join(','),
+        );
+        await tx.printJob.createMany({
+          data: {
+            type: PrintJobType.KITCHEN_TICKET,
+            kitchenTicketId: job.kitchenTicketId,
+            deviceId: job.deviceId,
+            requestedById: employeeId,
+            deduplicationKey: `KITCHEN_CANCELLATION:${job.id}:${signature}`,
+            payload: {
+              ...job.payload,
+              documentType: 'KITCHEN_CANCELLATION',
+              title: 'CANCELLED ITEMS',
+              originalJobId: job.id,
+              reason,
+              items,
+            },
+          },
+          skipDuplicates: true,
+        });
+      }
+    }
   }
 
   private lockDevice(tx: ExtendedPrismaTransactionClient, deviceId: string) {

@@ -12,6 +12,7 @@ import type { OutboxService } from '../durable/outbox.service';
 import type { InventoryConsumptionService } from '../inventory/services/inventory-consumption.service';
 import type { InvoicesService } from '../invoices/invoices.service';
 import type { OrdersService } from '../orders/orders.service';
+import type { PrintingService } from '../printing/printing.service';
 import type { CreateOnlineOrderDto } from './dto';
 import type { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OnlineOrdersService } from './online-orders.service';
@@ -37,6 +38,7 @@ describe('Online order read-only recovery', () => {
     } as unknown as ConfigService,
     turnstile as unknown as TurnstileService,
     {} as OnlineOrderIntakeService,
+    {} as PrintingService,
   );
   const dto: CreateOnlineOrderDto = {
     clientRequestId: '6f967ae8-33dc-49c0-989d-a9c623d52a9b',

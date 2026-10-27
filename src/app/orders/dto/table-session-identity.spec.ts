@@ -23,9 +23,27 @@ describe('Table mutation identity contract', () => {
     ).toBe(false);
     expect(ClearDiningTableDto.schema.safeParse({}).success).toBe(false);
     expect(
-      ClearDiningTableDto.schema.safeParse({ expectedOrderSessionId: null })
+      ClearDiningTableDto.schema.safeParse({ reason: 'Customer cancelled' })
         .success,
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it('accepts an observed empty or occupied table only with a valid reason', () => {
+    for (const expectedOrderSessionId of [null, sourceSession]) {
+      const input = {
+        expectedOrderSessionId,
+        reason: '  Customer cancelled  ',
+      };
+      expect(ClearDiningTableDto.schema.parse(input)).toEqual({
+        expectedOrderSessionId,
+        reason: 'Customer cancelled',
+      });
+      for (const reason of [undefined, '', '   ', 'ab', 'a'.repeat(501)]) {
+        expect(
+          ClearDiningTableDto.schema.safeParse({ ...input, reason }).success,
+        ).toBe(false);
+      }
+    }
   });
 
   it('requires distinct sessions and matching source-table/session counts', () => {
