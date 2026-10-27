@@ -12,7 +12,6 @@ export type * from './invoice.types';
 export type * from './inventory.types';
 export type * from './kitchen.types';
 export type * from './mail.types';
-export type * from './options.types';
 export type * from './order-event.types';
 export type * from './order.types';
 export type * from './payment.types';

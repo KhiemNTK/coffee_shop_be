@@ -7,6 +7,7 @@ export interface GenerateExcelParams {
     fieldsExclude?: string[];
     fieldsMapping?: Record<string, string>;
     fieldsExtend?: string[];
+    numberFormats?: Record<string, string>;
   }[];
 }
 

@@ -3,7 +3,7 @@ import { ExcelUtilService } from './excel-util.service';
 import { ExcelUtilModule } from './excel-util.module';
 import { AutoMockingModule } from '../../../../test/auto-mocking/auto-mocking.module';
 import { BadRequestException, Logger } from '@nestjs/common';
-import { Workbook } from 'exceljs';
+import { ValueType, Workbook } from 'exceljs';
 import { createRequire } from 'node:module';
 import { EXCEL_IMPORT_LIMITS } from './excel-import-limits';
 import type { File } from './dto/excel-util.interface';
@@ -29,6 +29,75 @@ describe('ExcelUtilService', () => {
     const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
     return { buffer, size: buffer.length } as File;
   }
+
+  it('round-trips only explicitly numeric columns and preserves wider precision and identifiers', async () => {
+    const row = {
+      money: '45000.25',
+      quantity: '0.1250',
+      percentage: '25.50',
+      wide: '123456789012345.67',
+      phone: '00973336850',
+      name: '=1+1',
+      negative: '-1250.50',
+      constructor: '00123',
+    };
+    const workbook = service.generateExcel({
+      worksheets: [
+        {
+          sheetName: 'Numbers',
+          data: [row],
+          numberFormats: {
+            money: '#,##0.00',
+            quantity: '#,##0.0000',
+            percentage: '0.00"%"',
+            wide: '#,##0.00',
+            negative: '#,##0.00',
+          },
+        },
+      ],
+    });
+    const parsed = new Workbook();
+    await parsed.xlsx.load(
+      (await fileFor(workbook)).buffer as unknown as ArrayBuffer,
+    );
+    const sheet = parsed.worksheets[0];
+    expect(sheet.getCell('A2').value).toBe(45000.25);
+    expect(sheet.getCell('A2').numFmt).toBe('#,##0.00');
+    expect(sheet.getCell('B2').value).toBe(0.125);
+    expect(sheet.getCell('B2').numFmt).toBe('#,##0.0000');
+    expect(sheet.getCell('C2').value).toBe(25.5);
+    expect(sheet.getCell('C2').numFmt).toBe('0.00"%"');
+    expect(sheet.getCell('D2').type).toBe(ValueType.String);
+    expect(sheet.getCell('D2').value).toBe(row.wide);
+    expect(sheet.getCell('E2').value).toBe(row.phone);
+    expect(sheet.getCell('F2').type).toBe(ValueType.String);
+    expect(sheet.getCell('G2').value).toBe(-1250.5);
+    expect(sheet.getCell('H2').value).toBe('00123');
+    expect(row.money).toBe('45000.25');
+  });
+
+  it('keeps explicit column headers in empty Excel sheets', async () => {
+    const workbook = service.generateExcel({
+      worksheets: [
+        {
+          sheetName: 'Empty',
+          data: [],
+          fieldsExtend: ['name', 'grossSales'],
+          numberFormats: { grossSales: '#,##0.00' },
+        },
+      ],
+    });
+    const parsed = new Workbook();
+    await parsed.xlsx.load(
+      (await fileFor(workbook)).buffer as unknown as ArrayBuffer,
+    );
+    expect(parsed.worksheets[0].rowCount).toBe(1);
+    expect(parsed.worksheets[0].getRow(1).values).toEqual([
+      undefined,
+      'Name',
+      'Gross Sales',
+    ]);
+  });
 
   it('reads generated tables, normalizes headers, and preserves hyperlink text', async () => {
     const workbook = service.generateExcel({

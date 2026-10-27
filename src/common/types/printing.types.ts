@@ -20,6 +20,18 @@ export interface ClaimedPrintJob {
   leaseExpiresAt: Date;
 }
 
+export interface KitchenPrintSplit {
+  employeeId: string;
+  destinationSessionId: string;
+  destinationTableName: string;
+  moves: Array<{
+    orderItemId: string;
+    movedOrderItemId: string;
+    originalQuantity: number;
+    quantityToMove: number;
+  }>;
+}
+
 export interface ReceiptPrintPayload extends Prisma.JsonObject {
   isReprint: boolean;
   invoiceId: string;

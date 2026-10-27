@@ -67,6 +67,7 @@ enum PrintJobType {
 enum PrintJobStatus {
   PENDING
   PROCESSING
+  REQUIRES_REVIEW
   PRINTED
   FAILED
   CANCELLED
@@ -510,6 +511,8 @@ model MenuItemOptionIngredient {
 }
 
 model Promotion {
+  showOnStorefront Boolean @default(false)
+  storefrontDescription String? @db.VarChar(500)
   id            String       @id @default(uuid()) // MaKhuyenMai
   name          String // TenKhuyenMai
   startDate     DateTime // NgayBatDau
@@ -1552,6 +1555,7 @@ model PrintJob {
   @@index([kitchenTicketId])
   @@index([requestedById, createdAt])
   @@index([leaseExpiresAt])
+  @@index([status, updatedAt, id])
 }
 
 model PaymentAttempt {
@@ -1741,6 +1745,8 @@ model OutboxEvent {
   lockedAt      DateTime?
   lockedBy      String?
   lastError     String?
+  lastErrorCode String?
+  lastFailedAt  DateTime?
   occurredAt    DateTime          @default(now())
   publishedAt   DateTime?
 

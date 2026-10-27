@@ -6,8 +6,4 @@ class ImportExcel {
   employee!: EmployeeInfo;
 }
 
-enum ColumnExport {
-  REQUIRE_FIELDS = 'REQUIRE_FIELDS',
-}
-
-export { ImportExcel, ColumnExport };
+export { ImportExcel };

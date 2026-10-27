@@ -4,6 +4,20 @@ import { type CellValue, Workbook, type Worksheet } from 'exceljs';
 import { File, GenerateExcelParams } from './dto/excel-util.interface';
 import { EXCEL_IMPORT_LIMITS } from './excel-import-limits';
 import { validateExcelArchive } from './excel-import-guard';
+import { Decimal } from '@prisma/client/runtime/library';
+
+function excelNumericValue(value: unknown) {
+  if (typeof value !== 'string' || !/^-?\d+(?:\.\d+)?$/.test(value))
+    return value;
+  const decimal = new Decimal(value);
+  const numeric = decimal.toNumber();
+  // Excel retains 15 significant digits; preserve wider values as exact text.
+  return decimal.precision() <= 15 &&
+    Number.isFinite(numeric) &&
+    decimal.equals(numeric)
+    ? numeric
+    : value;
+}
 
 const toCamelCase = (str: string): string =>
   str
@@ -59,6 +73,7 @@ export class ExcelUtilService {
         fieldsExclude = ['id'],
         fieldsMapping,
         fieldsExtend = [],
+        numberFormats = {},
       } = workSheetData;
 
       const worksheet = workbook.addWorksheet(sheetName);
@@ -75,11 +90,27 @@ export class ExcelUtilService {
             header: toStartCase(mappedHeaderName),
             key: field,
             width: 25,
+            style: {
+              numFmt: Object.hasOwn(numberFormats, field)
+                ? numberFormats[field]
+                : undefined,
+            },
           };
         });
 
       worksheet.columns = columns;
-      worksheet.addRows(data);
+      worksheet.addRows(
+        data.map((row: Record<string, unknown>) =>
+          Object.fromEntries(
+            Object.entries(row).map(([field, value]) => [
+              field,
+              Object.hasOwn(numberFormats, field)
+                ? excelNumericValue(value)
+                : value,
+            ]),
+          ),
+        ),
+      );
 
       this.customHeaders(worksheet);
     }
@@ -94,15 +125,6 @@ export class ExcelUtilService {
 
   private cleanData(value: CellValue): any {
     return this.convertHyperlinkToString(value);
-  }
-
-  generateExcelSheetsName(
-    services: Record<string, string>,
-  ): Record<string, string> {
-    return Object.keys(services).reduce((acc, service) => {
-      acc[service] = service.replace(`Service`, '');
-      return acc;
-    }, {});
   }
 
   async read(file: File) {
