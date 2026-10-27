@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { createZodDto } from 'nestjs-zod';
+import { MoneyInputSchema } from '../../../common/validation/money.schema';
 
 export const CreatePositionInputSchema = z.object({
   name: z
@@ -8,9 +9,7 @@ export const CreatePositionInputSchema = z.object({
     .min(1, 'Position name cannot be empty')
     .max(100, 'Position name is too long'),
 
-  salary: z.coerce
-    .number()
-    .nonnegative('Salary must be a positive number or zero'),
+  salary: MoneyInputSchema,
 });
 
 export class CreatePositionDto extends createZodDto(

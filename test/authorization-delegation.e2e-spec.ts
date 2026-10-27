@@ -42,7 +42,9 @@ describe('Authorization delegation (PostgreSQL)', () => {
         target.pathname.endsWith('_test'),
       'Only use a dedicated loopback test database.',
     );
-    admin = new PrismaClient({ datasources: { db: { url: target.href } } });
+    const adminUrl = new URL(target);
+    adminUrl.pathname = '/postgres';
+    admin = new PrismaClient({ datasources: { db: { url: adminUrl.href } } });
     await admin.$executeRawUnsafe(`CREATE DATABASE "${databaseName}"`);
     databaseCreated = true;
     target.pathname = `/${databaseName}`;
@@ -176,7 +178,12 @@ describe('Authorization delegation (PostgreSQL)', () => {
     await expect(
       employees.updateEmployee(
         ids.ownerA,
-        { email: 'takeover@example.test' },
+        {
+          email: 'takeover@example.test',
+          expectedUpdatedAt: (
+            await base.employee.findUniqueOrThrow({ where: { id: ids.ownerA } })
+          ).updatedAt.toISOString(),
+        },
         ids.manager,
       ),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE);
@@ -280,7 +287,12 @@ describe('Authorization delegation (PostgreSQL)', () => {
     });
     await employees.updateEmployee(
       ids.cashier,
-      { email: 'changed@authz-test.example' },
+      {
+        email: 'changed@authz-test.example',
+        expectedUpdatedAt: (
+          await base.employee.findUniqueOrThrow({ where: { id: ids.cashier } })
+        ).updatedAt.toISOString(),
+      },
       ids.manager,
     );
     expect(
@@ -293,6 +305,94 @@ describe('Authorization delegation (PostgreSQL)', () => {
         where: { employeeId: ids.cashier, usedAt: null },
       }),
     ).toBe(0);
+  });
+
+  it('rejects a stale profile instead of reopening an account disabled by another operator', async () => {
+    const position = await base.position.findFirstOrThrow();
+    const target = await base.employee.create({
+      data: {
+        email: 'profile-lock@example.test',
+        username: 'profile-lock',
+        fullName: 'Profile lock',
+        password: 'not-a-login',
+        positionId: position.id,
+      },
+    });
+    const locked = await employees.updateEmployee(
+      target.id,
+      { expectedUpdatedAt: target.updatedAt.toISOString(), isActive: false },
+      ids.manager,
+    );
+    await expect(
+      employees.updateEmployee(
+        target.id,
+        {
+          expectedUpdatedAt: target.updatedAt.toISOString(),
+          isActive: true,
+          phoneNumber: '0901234567',
+        },
+        ids.manager,
+      ),
+    ).rejects.toMatchObject({ response: { code: 'EMPLOYEE_PROFILE_CHANGED' } });
+    expect(
+      (await base.employee.findUniqueOrThrow({ where: { id: target.id } }))
+        .isActive,
+    ).toBe(false);
+    const renamed = await employees.updateEmployee(
+      target.id,
+      {
+        expectedUpdatedAt: locked.updatedAt.toISOString(),
+        fullName: 'Still inactive',
+      },
+      ids.manager,
+    );
+    expect(renamed.isActive).toBe(false);
+    expect(
+      await base.actionLog.count({
+        where: {
+          actionType: 'EMPLOYEE_UPDATED',
+          details: { path: ['employeeId'], equals: target.id },
+        },
+      }),
+    ).toBe(2);
+  });
+
+  it('commits only one concurrent profile edit from the same observed timestamp', async () => {
+    const position = await base.position.findFirstOrThrow();
+    const target = await base.employee.create({
+      data: {
+        email: 'profile-race@example.test',
+        username: 'profile-race',
+        fullName: 'Profile race',
+        password: 'not-a-login',
+        positionId: position.id,
+      },
+    });
+    const outcomes = await Promise.allSettled(
+      ['First name', 'Second name'].map((fullName) =>
+        employees.updateEmployee(
+          target.id,
+          { expectedUpdatedAt: target.updatedAt.toISOString(), fullName },
+          ids.manager,
+        ),
+      ),
+    );
+    expect(
+      outcomes.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      outcomes.find((result) => result.status === 'rejected'),
+    ).toMatchObject({
+      reason: { response: { code: 'EMPLOYEE_PROFILE_CHANGED' } },
+    });
+    expect(
+      await base.actionLog.count({
+        where: {
+          actionType: 'EMPLOYEE_UPDATED',
+          details: { path: ['employeeId'], equals: target.id },
+        },
+      }),
+    ).toBe(1);
   });
 
   it('preserves an active OWNER under concurrent removals', async () => {

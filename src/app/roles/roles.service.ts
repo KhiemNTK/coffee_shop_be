@@ -156,7 +156,7 @@ export class RolesService {
       skip: paging.skip,
       take: paging.itemPerPage,
       where: searchQuery,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     const data = paging.format(list);
@@ -441,16 +441,24 @@ export class RolesService {
     const fieldsSelect = this.queryUtilService.convertFieldsSelectOption<Role>(
       select,
       'Role',
-    );
-    const roles = await this.prisma.role.export({
+    ) ?? {
+      name: true,
+      description: true,
+      isSystemRole: true,
+      createdAt: true,
+      updatedAt: true,
+    };
+    const roles = await this.prisma.role.findMany({
       select: fieldsSelect,
       where,
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
     });
     const data = this.excelUtilService.generateExcel({
       worksheets: [
         {
           sheetName: this.excelSheets[this.roleEntityName],
           data: roles,
+          fieldsExtend: Object.keys(fieldsSelect),
         },
       ],
     });

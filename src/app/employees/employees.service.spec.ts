@@ -5,10 +5,13 @@ import { EmployeesModule } from './employees.module';
 import { PRISMA_SERVICE_TOKEN } from '../../common/prisma/prisma.service';
 import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
-import { GetEmployeesPaginationDto } from './dto';
+import { GetEmployeesPaginationDto, UpdateEmployeeDto } from './dto';
 import { AuthorizationService } from '../authorization/authorization.service';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { AUTH_ERRORS, AUTHORIZATION_ERRORS } from '../../common/consts/message';
+import { NotFoundException } from '@nestjs/common';
+
+const expectedUpdatedAt = '2026-10-26T01:00:00.000Z';
 
 describe('EmployeesService', () => {
   let service: EmployeesService;
@@ -25,10 +28,28 @@ describe('EmployeesService', () => {
     employeeCreate = jest.fn();
     const prisma = module.get<Record<string, unknown>>(PRISMA_SERVICE_TOKEN);
     prisma.employee = { create: employeeCreate };
+    prisma.position = {
+      findFirst: jest.fn().mockResolvedValue({ id: 'position' }),
+    };
+    prisma.$transaction = jest.fn((fn) => fn(prisma));
   });
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('requires a profile revision and does not default a PATCH to an active account', () => {
+    const patch = UpdateEmployeeDto.schema.parse({
+      expectedUpdatedAt,
+      phoneNumber: '0901234567',
+    });
+    expect(patch).not.toHaveProperty('isActive');
+    expect(
+      UpdateEmployeeDto.schema.safeParse({ fullName: 'Changed' }).success,
+    ).toBe(false);
+    expect(
+      UpdateEmployeeDto.schema.safeParse({ expectedUpdatedAt }).success,
+    ).toBe(false);
   });
 
   it('keeps role assignments out of the ordinary employee profile', async () => {
@@ -142,6 +163,31 @@ describe('EmployeesService', () => {
       'correct-horse-battery-staple',
     );
   });
+
+  it('rejects assignment to a deleted position before writing the employee', async () => {
+    const create = jest.fn();
+    const tx = {
+      employee: { create },
+      position: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const subject = new EmployeesService(
+      { $transaction: jest.fn((fn) => fn(tx)) } as never,
+      {} as never,
+      {} as never,
+      { hash: jest.fn().mockResolvedValue('hash') } as never,
+    );
+    await expect(
+      subject.createEmployee({
+        fullName: 'Employee',
+        email: 'employee@example.test',
+        username: 'employee',
+        password: 'test-password',
+        positionId: 'deleted',
+        isActive: true,
+      }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(create).not.toHaveBeenCalled();
+  });
 });
 
 describe('Employee access changes', () => {
@@ -174,6 +220,7 @@ describe('Employee access changes', () => {
     fullName: id,
     isActive: true,
     deletedAt: null,
+    updatedAt: new Date(expectedUpdatedAt),
     employeeRoles: roles.map((entry) => ({ role: entry })),
   });
   function fixture() {
@@ -239,6 +286,7 @@ describe('Employee access changes', () => {
         ),
       },
       role: { findMany: jest.fn().mockResolvedValue([cashierRole]) },
+      position: { findFirst: jest.fn().mockResolvedValue(null) },
       employeeRole: { deleteMany: jest.fn(), createMany: jest.fn() },
       authSession: { updateMany: jest.fn() },
       passwordResetToken: { updateMany: jest.fn() },
@@ -262,6 +310,17 @@ describe('Employee access changes', () => {
     };
   }
   beforeEach(() => ({ tx, service } = fixture()));
+
+  it('rejects moving an employee to a deleted position without updating the profile', async () => {
+    await expect(
+      service.updateEmployee(
+        'cashier',
+        { expectedUpdatedAt, positionId: 'deleted' },
+        'owner',
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(tx.employee.update).not.toHaveBeenCalled();
+  });
 
   it('blocks manager grants of OWNER and custom roles with higher permissions', async () => {
     for (const requested of [
@@ -290,7 +349,7 @@ describe('Employee access changes', () => {
     await expect(
       service.updateEmployee(
         'owner',
-        { password: 'another-password' },
+        { expectedUpdatedAt, password: 'another-password' },
         'manager',
       ),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.GRANT_OUTSIDE_SCOPE);
@@ -305,7 +364,11 @@ describe('Employee access changes', () => {
       service.replaceEmployeeRoles('owner', { roleIds: [] }, 'owner'),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.SELF_ACCESS_CHANGE);
     await expect(
-      service.updateEmployee('owner', { isActive: false }, 'owner'),
+      service.updateEmployee(
+        'owner',
+        { expectedUpdatedAt, isActive: false },
+        'owner',
+      ),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.SELF_ACCESS_CHANGE);
     await expect(service.deleteEmployee('owner', 'owner')).rejects.toThrow(
       AUTHORIZATION_ERRORS.SELF_ACCESS_CHANGE,
@@ -322,7 +385,11 @@ describe('Employee access changes', () => {
       service.replaceEmployeeRoles('owner', { roleIds: [] }, 'delegate'),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.LAST_OWNER);
     await expect(
-      service.updateEmployee('owner', { isActive: false }, 'delegate'),
+      service.updateEmployee(
+        'owner',
+        { expectedUpdatedAt, isActive: false },
+        'delegate',
+      ),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.LAST_OWNER);
     await expect(service.deleteEmployee('owner', 'delegate')).rejects.toThrow(
       AUTHORIZATION_ERRORS.LAST_OWNER,
@@ -423,7 +490,7 @@ describe('Employee access changes', () => {
   it('revokes sessions and reset tokens after credential changes without auditing secrets', async () => {
     await service.updateEmployee(
       'cashier',
-      { password: 'new-secret', email: 'new@example.test' },
+      { expectedUpdatedAt, password: 'new-secret', email: 'new@example.test' },
       'manager',
     );
     expect(tx.authSession.updateMany).toHaveBeenCalledWith(
@@ -453,5 +520,36 @@ describe('Employee access changes', () => {
         }),
       }),
     );
+  });
+
+  it('rejects a stale edit without reopening a disabled account', async () => {
+    const current = records.get('cashier')!;
+    current.isActive = false;
+    current.updatedAt = new Date(Date.parse(expectedUpdatedAt) + 1);
+    await expect(
+      service.updateEmployee(
+        'cashier',
+        { expectedUpdatedAt, isActive: true, phoneNumber: '0901234567' },
+        'manager',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'EMPLOYEE_PROFILE_CHANGED' } });
+    expect(tx.employee.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps an inactive account inactive when only its profile name is changed', async () => {
+    records.get('cashier')!.isActive = false;
+    const result = await service.updateEmployee(
+      'cashier',
+      { expectedUpdatedAt, fullName: 'Renamed' },
+      'manager',
+    );
+    expect(result.isActive).toBe(false);
+    expect(tx.employee.update.mock.calls[0][0].data).not.toHaveProperty(
+      'isActive',
+    );
+    expect(tx.employee.update.mock.calls[0][0].where).toMatchObject({
+      updatedAt: new Date(expectedUpdatedAt),
+    });
   });
 });

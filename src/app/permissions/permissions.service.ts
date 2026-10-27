@@ -71,7 +71,7 @@ export class PermissionsService {
       skip: paging.skip,
       take: paging.itemPerPage,
       where: searchQuery,
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
     });
 
     return paging.format(list);

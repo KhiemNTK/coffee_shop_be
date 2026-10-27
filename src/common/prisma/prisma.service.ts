@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  OnModuleDestroy,
-  OnModuleInit,
-  BadRequestException,
-} from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { getRequestContext } from '../request-context';
 
@@ -95,53 +90,6 @@ export class PrismaService
             }
 
             return query(args);
-          },
-        },
-      },
-      model: {
-        $allModels: {
-          async export<T>(
-            this: T,
-            args: Prisma.Args<T, 'findMany'> = {} as any,
-          ) {
-            const context = Prisma.getExtensionContext(this);
-            const modelName = (context as any).$name as string;
-
-            const modelDefinition = Prisma.dmmf.datamodel.models.find(
-              (m) => m.name === modelName,
-            );
-            if (!modelDefinition) {
-              throw new BadRequestException(
-                `Model ${modelName} not found in DMMF`,
-              );
-            }
-
-            const modelFields = modelDefinition.fields.map((f) => f.name);
-            const FIELDS_EXCLUDE = ['id', 'password', 'deletedAt'];
-
-            if (args.select) {
-              const selectObj = args.select as Record<string, unknown>;
-              const invalidFields = Object.keys(selectObj).filter(
-                (field) => !modelFields.includes(field),
-              );
-
-              if (invalidFields.length > 0) {
-                throw new BadRequestException(
-                  `Invalid fields for export: ${invalidFields.join(', ')}`,
-                );
-              }
-            } else {
-              (args as Record<string, any>).select = modelFields.reduce<
-                Record<string, boolean>
-              >((acc, field) => {
-                if (!FIELDS_EXCLUDE.includes(field)) {
-                  acc[field] = true;
-                }
-                return acc;
-              }, {});
-            }
-
-            return await (context as any).findMany(args);
           },
         },
       },

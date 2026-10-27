@@ -23,6 +23,7 @@ import type {
   ExtendedPrismaTransactionClient,
 } from '../../common/types';
 import { runSerializableTransaction } from '../../common/prisma/transaction.util';
+import { assertActivePosition } from '../../common/prisma/position.util';
 import { PasswordHashService } from '../../common/utils/password-hash/password-hash.service';
 import {
   CreateEmployeeDto,
@@ -54,6 +55,7 @@ const EMPLOYEE_ACCESS_SELECT = {
   fullName: true,
   isActive: true,
   deletedAt: true,
+  updatedAt: true,
   employeeRoles: {
     where: { role: { deletedAt: null } },
     select: {
@@ -87,9 +89,12 @@ export class EmployeesService {
     const password = await this.passwordHashService.hash(
       createEmployeeDto.password,
     );
-    return this.prisma.employee.create({
-      data: { ...createEmployeeDto, password },
-      select: EMPLOYEE_PUBLIC_SELECT,
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActivePosition(tx, createEmployeeDto.positionId);
+      return tx.employee.create({
+        data: { ...createEmployeeDto, password },
+        select: EMPLOYEE_PUBLIC_SELECT,
+      });
     });
   }
 
@@ -164,6 +169,7 @@ export class EmployeesService {
     updateEmployeeDto: UpdateEmployeeDto,
     actorId: string,
   ) {
+    const { expectedUpdatedAt, ...changes } = updateEmployeeDto;
     const password = updateEmployeeDto.password
       ? await this.passwordHashService.hash(updateEmployeeDto.password)
       : undefined;
@@ -180,6 +186,18 @@ export class EmployeesService {
           PermissionKeys.EMPLOYEES_UPDATE,
         ]);
         const before = await this.loadManagedEmployee(tx, id, actor);
+        if (
+          before.updatedAt.toISOString() !==
+          new Date(expectedUpdatedAt).toISOString()
+        ) {
+          throw new ConflictException({
+            code: 'EMPLOYEE_PROFILE_CHANGED',
+            message: 'Employee profile changed. Reload before saving.',
+          });
+        }
+        if (updateEmployeeDto.positionId !== undefined) {
+          await assertActivePosition(tx, updateEmployeeDto.positionId);
+        }
         if (updateEmployeeDto.isActive === false) {
           if (id === actorId)
             throw new ForbiddenException(
@@ -188,9 +206,16 @@ export class EmployeesService {
           await this.assertOwnerRemains(tx, before);
         }
         const updated = await tx.employee.update({
-          where: { id, deletedAt: null },
+          where: {
+            id,
+            deletedAt: null,
+            updatedAt: new Date(expectedUpdatedAt),
+          },
           data: {
-            ...updateEmployeeDto,
+            ...changes,
+            updatedAt: new Date(
+              Math.max(Date.now(), before.updatedAt.getTime() + 1),
+            ),
             ...(password ? { password } : {}),
           },
           select: EMPLOYEE_PUBLIC_SELECT,
@@ -221,7 +246,7 @@ export class EmployeesService {
             actionType: 'EMPLOYEE_UPDATED',
             details: {
               employeeId: id,
-              changedFields: Object.keys(updateEmployeeDto),
+              changedFields: Object.keys(changes),
               before: { isActive: before.isActive },
               after: { isActive: updated.isActive },
             },

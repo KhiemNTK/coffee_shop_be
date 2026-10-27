@@ -18,6 +18,7 @@ import {
   UpdatePositionDto,
 } from './dto';
 import { ApiTags } from '@nestjs/swagger';
+import { Employee } from '../../common/decorators/employee.decorator';
 
 @ApiTags('Positions')
 @Controller('positions')
@@ -26,8 +27,11 @@ export class PositionsController {
 
   @Post()
   @RequirePermissions(PermissionKeys.POSITIONS_CREATE)
-  createPosition(@Body() createPositionDto: CreatePositionDto) {
-    return this.positionsService.createPosition(createPositionDto);
+  createPosition(
+    @Body() createPositionDto: CreatePositionDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.positionsService.createPosition(createPositionDto, employeeId);
   }
 
   @Get('dropdown')
@@ -53,13 +57,21 @@ export class PositionsController {
   updatePosition(
     @Param() { id }: IDDto,
     @Body() updatePositionDto: UpdatePositionDto,
+    @Employee('employeeId') employeeId: string,
   ) {
-    return this.positionsService.updatePosition(id, updatePositionDto);
+    return this.positionsService.updatePosition(
+      id,
+      updatePositionDto,
+      employeeId,
+    );
   }
 
   @Delete(':id')
   @RequirePermissions(PermissionKeys.POSITIONS_DELETE)
-  deletePosition(@Param() { id }: IDDto) {
-    return this.positionsService.deletePosition(id);
+  deletePosition(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+  ) {
+    return this.positionsService.deletePosition(id, employeeId);
   }
 }

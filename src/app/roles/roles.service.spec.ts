@@ -8,6 +8,8 @@ import { BadRequestException } from '@nestjs/common';
 import { ExcelUtilService } from '../../common/utils/excel-util/excel-util.service';
 import type { ImportRolesDto } from './dto';
 import type { File } from '../../common/utils/excel-util/dto/excel-util.interface';
+import { QueryUtilService } from '../../common/utils/query-util/query-util.service';
+import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 
 describe('RoleService', () => {
   let service: RolesService;
@@ -23,6 +25,63 @@ describe('RoleService', () => {
   it('should be defined', () => {
     expect(service).toBeDefined();
   });
+});
+
+describe('Role export boundary', () => {
+  const prisma = { role: { findMany: jest.fn() } };
+  const service = new RolesService(
+    prisma as never,
+    new PaginationUtilService(),
+    new QueryUtilService(),
+    new ExcelUtilService(),
+    {} as never,
+  );
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    prisma.role.findMany.mockResolvedValue([
+      { name: 'CUSTOM', description: 'Service role' },
+    ]);
+  });
+
+  it('defaults to scalar metadata without role or employee assignments', async () => {
+    const workbook = await service.exportRoles({ ids: null, select: null });
+    expect(prisma.role.findMany).toHaveBeenCalledWith({
+      where: {},
+      select: {
+        name: true,
+        description: true,
+        isSystemRole: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    });
+    expect(workbook.worksheets[0].columns.map((column) => column.key)).toEqual([
+      'name',
+      'description',
+    ]);
+  });
+
+  it('retains explicit metadata selection and ID filtering', async () => {
+    await service.exportRoles({ ids: ['role-id'], select: 'name,description' });
+    expect(prisma.role.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ['role-id'] } },
+        select: { name: true, description: true },
+      }),
+    );
+  });
+
+  it.each(['rolePermissions', 'employeeRoles', 'password'])(
+    'rejects forbidden export selection: %s',
+    async (select) => {
+      await expect(
+        service.exportRoles({ ids: null, select }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.role.findMany).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('Role import validation', () => {
