@@ -125,6 +125,60 @@ describe('Public menu and reservation request (e2e)', () => {
     }
   });
 
+  it('filters table availability by time and exclusion while the database rejects concurrent overlaps', async () => {
+    const startsAt = new Date(Date.now() + 5 * 86_400_000);
+    const endsAt = new Date(startsAt.getTime() + 3_600_000);
+    const query = { startsAt, endsAt, tableId, page: 1, itemPerPage: 20 };
+    expect((await reservations.findAvailableTables(query)).list).toEqual([
+      { id: tableId, name: expect.any(String) },
+    ]);
+    const results = await Promise.allSettled(
+      [1, 2].map(() =>
+        reservations.create(employeeId, {
+          startsAt,
+          endsAt,
+          tableId,
+          phoneNumber: '0900000099',
+          guestCount: 2,
+        }),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    const saved = await prisma.reservation.findFirstOrThrow({
+      where: { tableId },
+    });
+    expect((await reservations.findAvailableTables(query)).list).toEqual([]);
+    expect(
+      (
+        await reservations.findAvailableTables({
+          ...query,
+          excludeReservationId: saved.id,
+        })
+      ).list,
+    ).toHaveLength(1);
+    expect(
+      (
+        await reservations.findAvailableTables({
+          ...query,
+          startsAt: endsAt,
+          endsAt: new Date(endsAt.getTime() + 3_600_000),
+        })
+      ).list,
+    ).toHaveLength(1);
+    const response = await request(app.getHttpServer())
+      .get(`${prefix}/reservations/available-tables`)
+      .query({
+        startsAt: startsAt.toISOString(),
+        endsAt: endsAt.toISOString(),
+      });
+    expect(response.status).toBe(401);
+  });
+
   it('allows only one concurrent edit for the same reservation revision', async () => {
     const startsAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
     const created = await reservations.create(employeeId, {

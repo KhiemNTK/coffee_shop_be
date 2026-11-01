@@ -40,6 +40,7 @@ describe('ReservationsService', () => {
   };
   const prisma = {
     $transaction: jest.fn(),
+    diningTable: { count: jest.fn(), findMany: jest.fn() },
     reservation: {
       count: jest.fn(),
       findMany: jest.fn(),
@@ -109,6 +110,64 @@ describe('ReservationsService', () => {
       }),
     );
     expect(tx.actionLog.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('looks up available active tables with half-open overlap and excludes the edited reservation', async () => {
+    const rows = [{ id: 'table-id', name: 'Table 01' }];
+    const format = jest.fn((list: unknown[]) => ({ list }));
+    prisma.diningTable.count.mockResolvedValue(21);
+    prisma.diningTable.findMany.mockResolvedValue(rows);
+    paginationUtil.paging.mockReturnValue({
+      skip: 20,
+      itemPerPage: 20,
+      format,
+    });
+    await expect(
+      service.findAvailableTables({
+        startsAt,
+        endsAt,
+        page: 2,
+        itemPerPage: 20,
+        excludeReservationId: 1,
+        tableId: 'table-id',
+        keyword: '01',
+      }),
+    ).resolves.toEqual({ list: rows });
+    const where = {
+      deletedAt: null,
+      id: 'table-id',
+      name: { contains: '01', mode: 'insensitive' },
+      reservations: {
+        none: {
+          id: { not: 1 },
+          status: { in: ['PENDING', 'ARRIVED'] },
+          startsAt: { lt: endsAt },
+          endsAt: { gt: startsAt },
+        },
+      },
+    };
+    expect(prisma.diningTable.count).toHaveBeenCalledWith({ where });
+    expect(prisma.diningTable.findMany).toHaveBeenCalledWith({
+      where,
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: 20,
+      take: 20,
+    });
+  });
+
+  it('rejects invalid availability windows before reading tables', async () => {
+    for (const duration of [0, 14 * 60_000, 9 * 3_600_000]) {
+      await expect(
+        service.findAvailableTables({
+          startsAt,
+          endsAt: new Date(startsAt.getTime() + duration),
+          page: 1,
+          itemPerPage: 20,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(prisma.diningTable.count).not.toHaveBeenCalled();
   });
 
   it('preserves the pending-future default and explicitly supports all requests', async () => {

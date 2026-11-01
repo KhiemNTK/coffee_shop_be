@@ -7,14 +7,18 @@ const ReservationDateTimeSchema = z
   .datetime({ offset: true })
   .transform((value) => new Date(value));
 
+export const normalizeReservationPhone = (value: string) =>
+  value.replace(/[()\-\s]/g, '');
+
 const ReservationFields = {
   customerName: z.string().trim().min(1).max(120).nullish(),
   phoneNumber: z
     .string()
     .trim()
-    .min(8)
-    .max(20)
-    .regex(/^[0-9+()\-\s]+$/, 'Invalid phone number'),
+    .max(30)
+    .regex(/^[0-9+()\-\s]+$/, 'Invalid phone number')
+    .transform(normalizeReservationPhone)
+    .pipe(z.string().regex(/^\+?[0-9]{8,15}$/, 'Invalid phone number')),
   tableId: z.uuid('Invalid UUID for dining table'),
   startsAt: ReservationDateTimeSchema,
   endsAt: ReservationDateTimeSchema,
@@ -83,6 +87,20 @@ export class GetReservationsDto extends createZodDto(
 
 export class ReservationIdDto extends createZodDto(
   z.object({ id: z.coerce.number().int().positive() }),
+) {}
+
+export class GetAvailableReservationTablesDto extends createZodDto(
+  z
+    .object({
+      startsAt: ReservationDateTimeSchema,
+      endsAt: ReservationDateTimeSchema,
+      excludeReservationId: z.coerce.number().int().positive().optional(),
+      tableId: z.uuid().optional(),
+      keyword: z.string().trim().max(100).optional(),
+      page: z.coerce.number().int().min(1).default(1),
+      itemPerPage: z.coerce.number().int().min(1).max(100).default(20),
+    })
+    .superRefine(validateWindow),
 ) {}
 
 export class CancelReservationDto extends createZodDto(

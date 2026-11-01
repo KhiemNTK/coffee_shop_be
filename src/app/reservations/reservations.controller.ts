@@ -24,6 +24,7 @@ import {
   CreateReservationDto,
   GetReservationRequestsDto,
   GetReservationsDto,
+  GetAvailableReservationTablesDto,
   RejectReservationRequestDto,
   ReservationIdDto,
   ReservationRequestIdDto,
@@ -119,6 +120,16 @@ export class ReservationsController {
   @RequirePermissions(PermissionKeys.RESERVATIONS_READ)
   findAll(@Query() query: GetReservationsDto) {
     return this.reservationsService.findAll(query);
+  }
+
+  @Get('available-tables')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions(
+    PermissionKeys.RESERVATIONS_READ,
+    PermissionKeys.DINING_TABLES_READ,
+  )
+  getAvailableTables(@Query() query: GetAvailableReservationTablesDto) {
+    return this.reservationsService.findAvailableTables(query);
   }
 
   @Get(':id')

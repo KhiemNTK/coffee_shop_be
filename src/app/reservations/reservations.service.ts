@@ -34,6 +34,8 @@ import {
   CreateReservationDto,
   GetReservationRequestsDto,
   GetReservationsDto,
+  GetAvailableReservationTablesDto,
+  normalizeReservationPhone,
   RejectReservationRequestDto,
   UpdateReservationDto,
 } from './dto';
@@ -70,6 +72,39 @@ export class ReservationsService
     if (this.noShowTimer) clearInterval(this.noShowTimer);
   }
 
+  async findAvailableTables(query: GetAvailableReservationTablesDto) {
+    this.assertValidWindow(query.startsAt, query.endsAt, false);
+    const where: Prisma.DiningTableWhereInput = {
+      deletedAt: null,
+      ...(query.tableId ? { id: query.tableId } : {}),
+      ...(query.keyword
+        ? { name: { contains: query.keyword, mode: 'insensitive' } }
+        : {}),
+      reservations: {
+        none: {
+          status: {
+            in: [ReservationStatus.PENDING, ReservationStatus.ARRIVED],
+          },
+          startsAt: { lt: query.endsAt },
+          endsAt: { gt: query.startsAt },
+          ...(query.excludeReservationId
+            ? { id: { not: query.excludeReservationId } }
+            : {}),
+        },
+      },
+    };
+    const totalItems = await this.prisma.diningTable.count({ where });
+    const paging = this.paginationUtil.paging({ ...query, totalItems });
+    const list = await this.prisma.diningTable.findMany({
+      where,
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      skip: paging.skip,
+      take: paging.itemPerPage,
+    });
+    return paging.format(list);
+  }
+
   async createPublicRequest(
     dto: CreatePublicReservationRequestDto,
     ipAddress?: string,
@@ -94,7 +129,7 @@ export class ReservationsService
       if (!existing) return null;
       if (
         existing.customerName !== dto.customerName ||
-        existing.phoneNumber !== dto.phoneNumber ||
+        normalizeReservationPhone(existing.phoneNumber) !== dto.phoneNumber ||
         existing.startsAt.getTime() !== dto.startsAt.getTime() ||
         existing.endsAt.getTime() !== dto.endsAt.getTime() ||
         existing.guestCount !== dto.guestCount ||
