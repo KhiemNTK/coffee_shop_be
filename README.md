@@ -1,712 +1,138 @@
-# Coffee Shop Backend
+# Coffee Homes Backend
 
-Position assignment and access policy: [Permissions And Positions](docs/authorization-delegation.md).
-Print-agent acknowledgement and recovery: [POS Printing](docs/pos-precheck-payment-feedback.md).
+NestJS API for one coffee shop, maintained separately from the sibling
+`../coffee_shop_fe` React repository. PostgreSQL owns business state; Redis/BullMQ
+handle background delivery and rate limiting. This is a modular monolith, not a
+multi-branch or microservice platform.
 
-Customer-owned order history and ingredient reservations are documented in
-[Customer Orders And Ingredient Commitments](docs/customer-orders-stock.md).
-Deploy the migration before the new API, with old inventory writers stopped.
+## Local Setup
 
-## Online Order Rollout
+Requirements: Node.js 22, pnpm 9.15.9, Docker Compose, PostgreSQL 15 and Redis 7.
 
-Apply `20261024000000_allow_asap_order_no_show` before this backend, then deploy
-the matching frontend. This migration only permits ASAP no-show records while
-retaining the cancellation checks; it changes no stock, order or financial data.
-It was verified on an isolated test database, not applied to the business DB.
-
-Generic POS invoice/checkout/payment attempts and cancellation of original online
-order lines return `ONLINE_ORDER_PICKUP_REQUIRED`. Use online-order collection or
-whole-order cancellation. Voiding a legacy unpaid POS invoice retains the accepted
-order's stock commitment; already paid legacy inconsistencies need staff review.
-
-For reload recovery, `POST /online-orders/requests/recover-by-key` takes exactly
-`{clientRequestId,requestHash}`. `/customers/orders/recover-by-key` also requires
-`expectedCustomerId`, the owner's session and customer CSRF. These rate-limited,
-`no-store` routes only read saved requests and enforce hash/owner equality. Treat
-the proof as a private credential, never log it or include it in URLs. The frontend
-keeps the original basket/time/price and proof, not contact fields or CAPTCHA.
-Only explicit same-key resend with matching contacts and fresh CAPTCHA can create
-a missing request. Guest recovery never attaches an order to a customer account.
-
-## Customer Wishlist And Catalog
-
-Apply `20261013000000_customer_wishlist` before deploying the API. Customers use
-Google sign-in and are separate from employees and role/permission grants. Configure
-the existing `GOOGLE_CLIENT_ID` and Turnstile settings; no public employee signup is
-enabled. Customer sessions are random opaque tokens hashed in PostgreSQL, expire
-after 30 days, and are revoked server-side on logout. A customer has at most ten
-sessions; expired sessions are removed by the existing bounded housekeeping job.
-Cookies `customerSession` (HttpOnly) and `customerCsrfToken` are separate from staff.
-
-- `POST /customers/auth/google`: existing Google/Turnstile DTO; returns only customer identity.
-- `GET /customers/me`, `POST /customers/auth/logout`: current customer session.
-- `GET /customers/wishlist`: at most 100 favorites with current price and availability;
-  discontinued items return `item: null` and remain removable.
-- `PUT/DELETE /customers/wishlist/:id`: idempotent save/remove; JSON body requires
-  `expectedCustomerId` as an account-change precondition, not an authorization identity.
-  The server always uses the authenticated session as the owner. Cookie mutations
-  require `X-CSRF-Token` from `customerCsrfToken`, even with a Bearer header present.
-
-The Coffee Homes catalog is opt-in, separate from permission/OWNER seeding:
+1. For a new checkout, copy [.env.example](.env.example) to `.env`; do not overwrite
+   an existing configuration. Set the database, Redis, frontend origin and secrets.
+2. Confirm `DATABASE_URL` targets your local development database before migration.
+3. Run from this repository:
 
 ```powershell
-pnpm prisma:seed:catalog --database db_nestjs_coffee_shop_be --seed 20261017
+pnpm install --frozen-lockfile
+docker compose up -d
+pnpm prisma:generate
+pnpm exec prisma migrate deploy
+pnpm start:dev
 ```
 
-Only a loopback PostgreSQL database whose name exactly matches `--database` is
-allowed; production is rejected. Stable catalog IDs make replay non-destructive even
-with another random seed: existing prices, recipes, soft deletions and consumed stock
-are preserved. A fresh database receives five categories, 44 menu items with
-item-specific recipes, 32 ingredients, three units, two kitchen stations and ten
-empty tables. On an already seeded database only missing rows are inserted.
-Names and descriptions are customer-facing, without demo labels. Prices vary in VND 5,000 steps within
-product-specific ranges, bounded by reference ingredient costs; those reference
-costs are not written as accounting costs. Reorder thresholds also vary by seed.
+The example API address is `http://localhost:3000/api/v1`; an existing `PORT`
+can override it. Check `/api/v1/health/live` and `/api/v1/health/ready`.
+The frontend's development proxy currently defaults to port 8888: set its
+`API_PROXY_TARGET=http://localhost:3000` when using the backend example unchanged.
 
-New ingredients start with zero stock and zero average cost. New menu items are
-unavailable until staff review them and post actual purchase receipts. This script
-creates no inventory/cash transactions, funds, invoices, payments, customers or staff
-accounts. Prices and recipes are proposed catalog values, not verified supplier or
-shop records. No supplier/customer PII or unverified image URLs are seeded.
+Configuration is validated at startup. See [.env.example](.env.example) and
+[environment validation](src/config/environment.ts), not a committed filled env.
+No migration or seed runs automatically when the API starts.
 
-To replace the old demo catalog on this local database, explicitly add `--replace-demo`.
-Cleanup and catalog insertion commit together or roll back together. Only records
-whose IDs and names match the old seed are eligible: an unrelated record named
-`Demo ...` is not enough. Unused menu items and empty, unreferenced ingredients are
-deleted; records with orders, favorites, inventory ledger or other dependencies are
-soft-deleted instead. Active external catalog references prevent ingredient archival.
-Existing table/station IDs, occupancy, tickets, cash shifts and fund balance are
-preserved; only their old demo labels are replaced. Historical order snapshots and
-stock/cash transactions are never rewritten or deleted. Archived opening stock is
-not transferred into the new catalog: post real purchase receipts or stocktake first.
+## Accounts And Seed Data
 
-## Local Business Activity
+Public employee signup is disabled by default and prohibited in production.
+For an initial OWNER, privately configure `OWNER_EMAIL`, `OWNER_USERNAME`,
+`OWNER_FULL_NAME` and `OWNER_PASSWORD` (at least 12 characters), then run
+`pnpm prisma:seed` on the reviewed local database.
 
-For an explicitly approved development/demo database, the opt-in
-`pnpm prisma:seed:activity` command adds coherent synthetic order, customer,
-inventory and cashier history. It rejects production, non-loopback URLs and
-database names that do not match `--database`. Preview first; `--through` must
-be a fully completed Vietnam business day:
+| Command                                                                 | Purpose and boundary                                                                                                                    |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm prisma:seed`                                                      | Initial system roles/settings and optional OWNER; replaces system-role grants. Not a routine production update.                         |
+| `pnpm prisma:seed:permissions`                                          | Synchronizes permission definitions and adds missing default system-role grants; does not remove extra grants or bootstrap OWNER.       |
+| `pnpm permissions:check`                                                | Read-only permission catalog check.                                                                                                     |
+| `pnpm prisma:seed:catalog --database coffee_shop`                       | Opt-in local catalog; replace the database name with the exact target. Preserves existing catalog values; new stock/cost start at zero. |
+| `pnpm prisma:seed:activity --database coffee_shop --through YYYY-MM-DD` | Local synthetic history preview; a completed Vietnam date is required. Only `--apply` writes the batch.                                 |
 
-```powershell
-pnpm prisma:seed:activity --database db_nestjs_coffee_shop_be --seed 20261022 --through 2026-10-21
-pnpm prisma:seed:activity --database db_nestjs_coffee_shop_be --seed 20261022 --through 2026-10-21 --apply
-```
+Catalog and activity seeds reject production and non-loopback databases.
+Activity data is fictional, changes revenue/stock/cash totals and creates no usable
+customer logins or real provider/notification calls. Never use that database as
+production accounting evidence. Replaying the same completed batch writes nothing;
+changed parameters are rejected. Do not delete its completion marker to reseed.
+Review [catalog](prisma/seed-catalog.ts) and [activity](prisma/seed-activity.ts)
+before use. Catalog `--replace-demo` explicitly archives/removes matching old demo
+records; it is not a general data reset.
 
-The reproducible batch adds 30 days, 300 orders, 50 fictional customer profiles
-with wishlists, purchase receipts, closed shifts, cash invoices, refunds, waste
-and feedback. It uses existing catalog items with active recipes/stations and no
-option groups. Prices and recipes are synthetic historical snapshots, not verified
-historical facts; catalog rows may have been created after the simulated period.
-Existing history, selling flags, prices, images and table occupancy are preserved.
-Documented stock movements update remaining stock and weighted-average costs;
-a separate fund and inactive cashier isolate simulated cash flows.
+## Code Map
 
-Supplier/transaction notes and an immutable audit marker identify
-`coffee-homes-local-activity-v1`. Emails use `coffee-homes.example.test`; the
-shared phone `0900000000` is a placeholder, never a verified outreach contact.
-Profiles have no usable login or customer sessions. The importer does not enqueue
-outbox events, print jobs, Telegram messages, provider payments or Gemini calls.
-Current catalog availability still needs manual review.
+| Area                                        | Source                                                                                                                           |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Models, constraints and schema changes      | [prisma/](prisma/)                                                                                                               |
+| Staff authentication and permissions        | [auth](src/app/auth/), [authorization](src/app/authorization/), [roles](src/app/roles/)                                          |
+| Customers, wishlist and order history       | [customers](src/app/customers/)                                                                                                  |
+| POS, tables, invoices and payment providers | [orders](src/app/orders/), [dining-tables](src/app/dining-tables/), [invoices](src/app/invoices/), [payments](src/app/payments/) |
+| Online pickup and reservations              | [online-orders](src/app/online-orders/), [reservations](src/app/reservations/)                                                   |
+| Kitchen, printing, menu and inventory       | [kitchen](src/app/kitchen/), [printing](src/app/printing/), [menu](src/app/menu/), [inventory](src/app/inventory/)               |
+| Shifts, reconciliation and reporting        | [cashier-shifts](src/app/cashier-shifts/), [reports](src/app/reports/)                                                           |
+| Events, audit and operational exceptions    | [durable](src/app/durable/), [audit-logs](src/app/audit-logs/), [management-exceptions](src/app/management-exceptions/)          |
 
-One serializable transaction and an advisory lock protect the batch. Replaying
-the same parameters writes nothing; changed parameters are rejected after
-completion. Existing stock reservations and closed reporting days block imports.
-Do not delete the completion marker or reseed under another identity; there is
-no automatic reset. Afterwards run `pnpm prisma:preflight` and
-`pnpm permissions:check`, then review the imported Vietnam date range.
-Synthetic activity changes business totals: never promote this database into
-production or present its results as real business/accounting evidence.
+Controllers, DTOs and service responses define the current API contract. Enable
+`SWAGGER_ENABLED` locally to inspect `/api/v1/docs`; keep it disabled in production.
+Do not copy an old rollout note as an API specification.
 
-NestJS, Prisma, PostgreSQL and Redis backend for a single coffee shop. API
-routes use `/api/v1` by default. PostgreSQL stores business state; Redis is
-used for background delivery and cache. Do not run migrations or seed against
-a shared database without reviewing the target URL and backup first.
+## Business And Security Rules
 
-## Audit hardening rollout
-
-- Cookie-creating login routes accept JSON only and reject untrusted browser
-  origins (including customer Google login). Header-less JSON API clients remain
-  supported; `FE_URL` must list the actual frontend origins, including scheme/port.
-- Staff CSRF cookies last as long as refresh cookies; authenticated `/auth/me`
-  restores a missing CSRF cookie without rotating an existing one. A legacy
-  browser missing both a valid access token and CSRF must sign in again once.
-- Invalid reset tokens are rejected before bcrypt; token consumption, password
-  changes and session revocation still commit atomically. Reset has its own throttle.
-- Refresh conflicts retry bounded serializable transactions, not a replay grace
-  window. Only invalid/reused token state triggers family revocation. Transient
-  refresh errors do not clear frontend identity or automatically replay commands.
-
-- Shutdown rejects new HTTP work, closes kitchen SSE, and waits for in-flight
-  requests before stopping the outbox worker and database/Redis dependencies.
-  The existing shutdown deadline still bounds the whole operation.
-- Production SMTP uses implicit TLS on port 465 and requires STARTTLS on other
-  ports. Certificate verification is not disabled. Test mail stays in memory.
-- Excel report numeric columns are explicit; money/quantities within Excel's
-  15-significant-digit precision are numeric, while wider values stay exact text.
-  Empty report sheets keep their headers. JSON response contracts are unchanged.
-
-- Exhausted database write conflicts return `409 TRANSACTION_CONFLICT`;
-  pool acquisition timeouts return `503 DATABASE_BUSY` with `Retry-After`.
-  Reload and review before retrying; preserve existing idempotency keys for
-  uncertain commands. Transaction API errors such as `P2028` are not reclassified
-  as safe rejections, and the client never automatically replays a mutation.
-- Role Excel export selects scalar metadata only. Permission and employee
-  assignments cannot be requested as export fields. No new schema migration is
-  required for these query and error-handling changes.
-- Employee `PATCH /api/v1/employees/:id` requires `expectedUpdatedAt` from a
-  profile/list read. A stale edit returns `409 EMPLOYEE_PROFILE_CHANGED`.
-  Omitted `isActive` never changes account status; clients send changed fields only.
-- `POST /api/v1/orders/sessions` requires a UUID `idempotencyKey` per opening.
-  Keep the same key, table and guest count after a lost reply. Session creation,
-  response snapshot and outbox commit together; a different payload with the same
-  key is rejected. Deploy matching POS clients; no new migration is required.
-
-- List/export `select` accepts scalar fields of the requested model only. Relations,
-  unknown fields and credential fields return HTTP 400 rather than expanding private
-  records. Shared pagination requires integer pages and at most 100 items per page.
-- Cookie-authenticated mutations, including refresh/logout, require CSRF even when
-  an Authorization header is supplied. Only a successfully authenticated Bearer
-  request is exempt; malformed headers never fall back to an employee cookie.
-- Logout revokes the current browser's entire session family in a serializable
-  transaction, including a concurrently rotated successor; other device families
-  remain valid. Permission grants use one parameterized PostgreSQL query per load,
-  retain active/deleted filters, and stay transaction-bound for delegation checks.
-- New idempotency snapshots use the same numeric Decimal JSON shape as HTTP
-  responses. Existing snapshots, including legacy Decimal strings, remain valid
-  for safe retries. Never clear them during
-  deployment merely to change response types.
-- HTTP logging/metrics run before guards and record 401/403/429 and client aborts
-  once, with request IDs and stable error codes. Query strings and request credentials
-  are excluded from access/error request paths. Business-action permissions remain
-  distinct; no role-name bypass or permission cache is added.
-
-- Apply `20261012000000_payment_link_recovery_and_retention` before starting the
-  updated API. It adds durable payment URLs and an outbox retention index. Existing
-  pending attempts without a stored URL require reconciliation; never recreate a
-  payment just to recover a QR. Drain these attempts before rolling out.
-- Transfer requires `sourceOrderSessionId`; merge requires
-  `sourceOrderSessionIds` and `destinationOrderSessionId`; clear requires
-  `expectedOrderSessionId` (explicitly `null` for a table with no session).
-  Older clients fail validation rather than modifying a newer customer session.
-  Deploy the matching frontend and pin its integration `BACKEND_REF` accordingly.
-- `POST /payment-attempts/:id/payment-link` requires payment-attempt create and
-  read permissions. It returns only an existing, unexpired link for a pending,
-  unpaid attempt. It does not call a payment provider or create another attempt.
-- Authorization is read from PostgreSQL on each request. Redis remains in use
-  for queues and rate limiting, not for caching revocable permission grants.
-- ASAP intake defaults to 07:00-22:00 Vietnam time via `ONLINE_ASAP_OPEN_LOCAL`
-  and `ONLINE_ASAP_CLOSE_LOCAL`. Scheduled pickup retains its separate slot
-  policy; existing submissions can still replay after closing or a pause.
-- Housekeeping deletes at most 500 rows per table per five-minute cycle:
-  published outbox older than 30 days, auth sessions expired over 30 days ago,
-  password-reset tokens expired over 7 days ago, and completed idempotency records
-  past their existing expiry, except `inventory.stock.*` and `cashier-shift.*`.
-  Stock and cashier commands keep their request hashes and response snapshots so
-  delayed retries cannot repeat a movement or reopen/close another shift.
-  All four manual import/export endpoints require an
-  `idempotencyKey`; generate it once per command and reuse it on retry.
-  Pending/processing/dead-letter events, still-valid
-  tokens, audit logs and financial records are not purged.
-- Password-reset requests commit the hashed token and email outbox intent in one
-  transaction. Outbox/Redis contain only the reset-token ID, never the bearer
-  token, email address or reset URL. The worker derives the link using a
-  purpose-scoped HMAC with `JWT_SECRET`, checks expiry/consumption/employee state,
-  and retries delivery failures. Rotating the secret invalidates unsent links;
-  request a new reset instead of reusing obsolete jobs. SMTP delivery is
-  at-least-once: a crash after sending may resend the same one-time link.
-  Stop previous API/outbox workers before starting this version; old workers
-  do not handle the new auth email event. Stock/cashier replay keys already
-  purged by an older version cannot be recovered by this change.
-- Cashier open/close/manual transactions require an `idempotencyKey`.
-  Close and manual transactions also require `expectedShiftId`, captured from
-  the shift the employee is viewing, not inferred again during recovery. A stale
-  target returns `409 CASHIER_SHIFT_CHANGED`; never substitute a new shift ID or
-  key for an uncertain command. Deploy the matching frontend with this API.
-  Legacy recovery commands without a shift ID remain blocked for reconciliation.
-  Fund type/deletion and cashier/handover retries use the shared serializable
-  transaction helper, including retry metrics. No new schema migration is needed.
-- Cash handovers cannot debit or credit a cash fund with an open shift. Check
-  `409 CASH_HANDOVER_FUND_BUSY` and reload before trying again. Bank reconciliation
-  commits each credit, handover settlement, statement match and audit atomically;
-  ignoring an entry cannot overwrite a concurrent match.
-- Bank statement imports replay by their existing fund/content checksum. Retrying
-  the exact statement returns its original ID with `replayed: true`, without
-  rerunning reconciliation. Overlapping bank transaction IDs with changed content
-  still return 409. After a lost response, `POST /bank-reconciliation/imports/recover`
-  accepts the original import body and only reads its result; it requires the import
-  permission. `404 BANK_IMPORT_RECOVERY_NOT_FOUND` allows an explicit resend of the
-  unchanged body. The frontend keeps this pending body in actor-scoped session
-  storage until confirmed; do not clear browser data to bypass recovery.
-- Payment incident `keyword` searches title, merchant reference, invoice number,
-  incident type and exact UUIDs on the server. Its paged `totalItems` always uses
-  the same filters. Read errors are not zero incidents; refresh before retrying
-  an uncertain incident command. Ignoring a statement mismatch is an audited
-  exception decision, not proof of payment or a handover settlement.
-- `GET /cashier-shifts/mine/closed` requires `/cash-handovers_create` and scopes
-  history to the authenticated cashier, regardless of supplied employee/status
-  filters. The frontend uses this list to recover handover after a page reload.
-- Audit reads keep exact `actionType` and `requestId` filters. `actionPrefix`
-  filters a group such as `PAYMENT`; `keyword` searches action names or an exact
-  request ID. Group and keyword filters apply together, not instead of each other.
-
-## payOS Integration
-
-payOS is an optional invoice payment provider, alongside VNPay and MoMo. It uses
-the official `@payos/node` SDK, pinned in the lockfile. The existing remote takeaway
-checkout still accepts payment on collection; this change does not introduce public
-prepayment or bypass employee permissions.
-
-- Apply `20261012010000_add_payos_provider` before starting the updated API, even
-  if payOS remains disabled. The migration adds the provider, link ID and PostgreSQL
-  order-code sequence. It does not seed new permissions or modify existing invoices.
-- Configure `PAYOS_CLIENT_ID`, `PAYOS_API_KEY`, `PAYOS_CHECKSUM_KEY` and
-  `PAYOS_RETURN_URL` together. Leave all four blank to keep payOS disabled. The
-  return URL must be your configured frontend's `/payment/payos/return` route,
-  using HTTPS in production. Never put these keys in frontend `VITE_*` variables.
-- Register `https://YOUR_API_DOMAIN/api/v1/payments/payos/webhook` in your payOS
-  channel dashboard. Do not enable a browser CAPTCHA/challenge on this server-to-server
-  endpoint. A signed registration probe is acknowledged without creating a payment.
-- `POST /invoices/:id/payment-attempts` accepts `provider: "PAYOS"` using existing
-  payment-attempt permissions and idempotency key. Amounts must be positive whole
-  VND within JavaScript's safe integer range. Retry the same key after an uncertain
-  response; never switch provider or mint another key to work around it.
-- Creation uses a database sequence rather than timestamps or random short codes.
-  A duplicate/lost creation response is recovered by querying the original order
-  code. URLs are persisted and reopened through the existing protected payment-link API.
-- Signed webhook data and its reconciliation outbox event commit together. Redis
-  workers query the signed payOS link outside the financial transaction, then validate
-  link identity, exact invoice amount and all bank-transaction totals before finalizing.
-  Repeated notifications cannot book another payment. Partial payments remain unresolved;
-  overpayments and inconsistent amounts go to the manager exception queue.
-- Return navigation is read-only. A server-issued UUID/HMAC capability allows the
-  public status lookup; `status`, `code`, `cancel` and `orderCode` from the browser
-  never confirm payment. The FE removes the capability from the address bar; keep
-  proxy access logs free of query strings and retain `Referrer-Policy: no-referrer`.
-- Automatic payOS refunds/payouts are deliberately not exposed. Cancelling a link
-  is not a refund. Handle refunds through a separately approved accounting workflow.
-
-### Go-Live Checklist
-
-1. Use a dedicated payOS channel for this system. Verify the merchant account,
-   receiving bank account, current fees and limits in your payOS dashboard.
-2. Deploy the migration and matching BE/FE before supplying credentials. Check
-   webhook registration and the expected frontend origin; do not auto-register a
-   webhook or rotate keys on application startup.
-3. With the merchant account ready, run a controlled real small-value payment,
-   duplicate webhook, lost-response retry, expired/cancelled link and partial/overpaid
-   scenario. Fixture tests are not proof of a working merchant account.
-4. Monitor outbox/dead-letter lag and payment incidents. Preserve Redis and the
-   reconciliation scheduler; the periodic query is the fallback for a missed webhook.
-5. Before changing keys/channel, drain or reconcile unresolved attempts. After a
-   PostgreSQL restore, advance `payos_order_code_seq` beyond every order code already
-   issued in the payOS channel before reopening payment intake; never reuse codes.
-   Once PAYOS rows exist, do not roll back to a binary that does not support this enum.
-
-References: [payOS Node SDK](https://payos.vn/docs/sdks/back-end/node/),
-[payOS API and webhook contract](https://payos.vn/docs/api/).
-
-## Local setup
-
-1. Use Node.js 22 and pnpm 9.15.9. Copy `.env.example` to `.env`, then set
-   private values locally.
-2. Start PostgreSQL and Redis with `docker compose up -d`.
-3. Run `pnpm install`, `pnpm prisma:generate`, and
-   `pnpm exec prisma migrate deploy` against the intended local database.
-4. Start the API with `pnpm start:dev`. Check
-   `GET http://localhost:3000/api/v1/health/live` and `/health/ready`.
-
-`pnpm prisma:seed` is an explicit development bootstrap step, not part of
-application startup or deployment. Review its target database before running.
-
-## Employee Google Sign-In and Turnstile
-
-- Set `GOOGLE_CLIENT_ID` to a Google web OAuth client ID to enable Google
-  sign-in. The frontend obtains a Google ID token and sends
-  `{idToken,turnstileToken}` to `POST /api/v1/auth/google`. This does not create
-  or automatically match employees by email. An active employee first signs in
-  with a password, then calls `POST /api/v1/auth/google/link` with
-  `{idToken,password}`. The verified Google email must match the employee email.
-  `POST /api/v1/auth/google/unlink` takes `{password}` and revokes all sessions;
-  the employee can still sign in with a password. `GET /api/v1/auth/me` returns
-  `googleLinked`, never the Google subject.
-- Configure the frontend Turnstile widget for `login` on password and Google
-  sign-in, `password_reset` on forgot-password, `online_order` on takeaway
-  checkout, and `reservation_request` on public reservations. Send the widget token as
-  `turnstileToken` in the JSON request body. The backend verifies it with
-  Cloudflare Siteverify and checks the action and hostname against `FE_URL`.
-  The public sitekey belongs in the frontend; keep `TURNSTILE_SECRET_KEY` only
-  on the backend. Production requires a real secret and HTTPS `FE_URL`.
-  Development/test may omit the secret to bypass verification locally.
-- Authenticated link/unlink requests using cookies require the existing
-  `X-CSRF-Token` header. Configure the frontend origin in `FE_URL`; do not put
-  Google ID tokens or Turnstile tokens in URLs or logs. These Google endpoints
-  authenticate staff, not customers placing remote takeaway orders.
+- The backend enforces permissions; frontend visibility is not authorization.
+  Customer and employee sessions are separate. Cookies require CSRF protection.
+- Role metadata edits require `expectedUpdatedAt` from a fresh role read and return
+  `409 ROLE_CHANGED` on conflict. Employee edits also require their observed version.
+  System roles are protected; reassign employees before deleting an in-use custom role.
+- Public reservation requests do not hold a table. Staff approval reserves it.
+  `GET /reservations/available-tables` requires reservation-read and table-read;
+  its paged time-window lookup is advisory. Database constraints prevent overlap.
+  Phone input normalizes formatting and requires 8-15 digits with optional leading
+  `+`; existing stored values are not backfilled.
+- Online pickup uses payment on collection. Acceptance reserves recipe ingredients;
+  cooking consumes them. Prepared cancellations record waste, not restored stock.
+  Use the dedicated online collection/cancellation flow, not generic POS checkout.
+- Reuse the original idempotency key and payload after an uncertain write.
+  Recovery reads do not create orders. Do not replace a pending command merely
+  because its response timed out.
+- Send large money values as decimal strings. API Decimal values may be numbers
+  or exact strings; never convert wide values through JavaScript `Number`.
+  Invoice documents preserve their issued item/table snapshots.
+- Only verified provider callbacks/reconciliation confirm online payments.
+  Return URLs and screenshots are not payment evidence. Active cash shifts are
+  required for cash collection; refunds and adjustments remain audited.
+- Outbox delivery is at least once, not exactly once. Keep consumer idempotency,
+  Redis persistence and `noeviction`; preserve pending/failed work during recovery.
 
 ## Verification
 
-`pnpm verify` validates Prisma, lints, type-checks, builds and runs unit tests.
-`pnpm exec jest --config test/jest-e2e.json --maxWorkers=1 --workerThreads --workerIdleMemoryLimit=512MB` requires a separate disposable PostgreSQL
-database, Redis, applied migrations and `NODE_ENV=test`; it mutates test data.
-`pnpm audit --prod --audit-level high` is a required CI/release gate. Record its
-output for the actual release lockfile; previous results are not a current
-security clearance. `.npmrc` disables automatic peer
-installation; declare a peer explicitly only when the application uses it.
+```powershell
+pnpm verify
+pnpm audit --prod --audit-level high
+```
 
-The security baseline requires Zod 4.6.6 or newer. Targeted pnpm overrides keep
-Express 5 on body-parser 2.4.0 and Nest's Express 11 adapter on multer 2.5.0;
-older resolved versions are affected by the October 2026 DoS advisories. Remove
-an override only after the upstream dependency resolves a patched version and
-the frozen-lockfile install, production audit and HTTP upload tests pass.
+`pnpm verify` validates Prisma, lints without rewriting, type-checks, builds and
+runs unit tests with one worker. CI also checks migration/schema consistency,
+integration behavior and the non-root production container.
 
-CI also builds runtime/tooling images and runs `node test/runtime-smoke.cjs`.
-The smoke test owns an isolated Compose project with disposable PostgreSQL/Redis,
-loopback-only HTTP and fixture credentials. It verifies production startup under
-the read-only/512 MB heap profile, Redis outage/recovery, persisted signed IPN,
-authenticated kitchen SSE and graceful SIGTERM. It never calls a payment gateway.
-Build both `coffee-shop-api:ci` and `coffee-shop-tooling:ci` images first when
-running it locally; it removes its test containers in `finally`.
+Database integration tests mutate data. Use `NODE_ENV=test`, a dedicated loopback
+PostgreSQL database ending in `_test`, dedicated test Redis and applied migrations.
+Never load the shop's queues or database into the test environment.
 
-Health routes bypass rate limiting: liveness remains 200 during a Redis outage,
-while readiness returns 503. Ordinary routes fail-closed with 503 and
-`RATE_LIMIT_UNAVAILABLE`. Signed payment callbacks use an independent in-process
-limit of 600 requests/minute/IP/route; signatures and database replay protection
-remain mandatory. Coordinate abuse limits at the reverse proxy before adding
-replicas. Redis outage delays background/realtime delivery, not callback storage.
+```powershell
+pnpm test:e2e --maxWorkers=1 --workerThreads --workerIdleMemoryLimit=512MB
+```
+
+A green fixture or empty-database test is not proof of merchant acceptance,
+migration safety on existing data, restore readiness or a production load target.
 
 ## Operations
 
-- [Single VPS deployment and recovery](deploy/README.md): configuration, release
-  gates, controlled migration/permission seeding, backup/restore and incidents.
-- [Observability](deploy/observability/README.md): metrics, alerts and tracing.
-- [Load testing](test/load/README.md): read-only staging profile and limits.
+| Guide                                           | Use                                                     |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| [Single VPS deployment](deploy/README.md)       | Configuration, release, migrations, backup and recovery |
+| [Observability](deploy/observability/README.md) | Metrics, logs, alerts, tracing and outbox diagnosis     |
+| [AI activation](deploy/ai/README.md)            | Optional Gemini insights and offline recommendations    |
+| [Load testing](test/load/README.md)             | Read-only staging profile and measured limits           |
+| [HTTP localization](src/common/i18n/README.md)  | Stable API codes with localized display text            |
 
-CI checks schema drift. Backup/restore and point-in-time recovery require a
-separate staging rehearsal before go-live.
-
-## Customer-facing and operator APIs
-
-- `GET /api/v1/menu/public/categories` and `/menu/public/items` expose only
-  active categories and saleable item names/prices/option groups. Availability is manually
-  controlled; this is not a promise that ingredients are reserved.
-- Staff configure size/topping groups with `GET/PUT /api/v1/menu/items/:id/options`
-  (`/menu_read` or `/menu_update`). `PUT` replaces all groups with
-  `{expectedRevision,groups:[{name,minSelected,maxSelected,options:[{name,priceDelta,ingredients:[{inventoryItemId,quantity}]}]}]}`.
-  Recipe and option GET responses include `revision`; both PUT endpoints require
-  that value as `expectedRevision`. A stale configuration returns
-  `409 MENU_CONFIGURATION_CHANGED` without replacing it. Read again before saving.
-  Changing groups gives choices new IDs, so pending online requests with old
-  choices must be resubmitted; accepted orders retain their price, choice and
-  recipe snapshots. Ingredients are additive to the base recipe, not substitutes.
-- Remote takeaway uses `POST /api/v1/online-orders/requests` with
-  `{clientRequestId, pickupName, phoneNumber, items:[{menuItemId,quantity,note?,optionIds?}], maxSubtotal?, turnstileToken?}`.
-  `clientRequestId` is a fresh UUID per checkout attempt; retry with the same
-  ID and payload returns the same request and `accessToken`, while a changed
-  payload returns 409. The first submission requires a valid Turnstile token
-  in production; an exact retry of a stored request does not need a fresh
-  token. Set `maxSubtotal` to the current quote when confirming
-  a reordered cart; a higher server quote returns 409 without creating an
-  order. The server quotes base price plus selected choices;
-  `POST /api/v1/orders/sessions/:id/items` accepts the same `optionIds` per
-  line for POS. No stock or
-  payment is reserved. Requests wait up to 30 minutes for staff review.
-- After a lost creation response, `POST /api/v1/online-orders/requests/recover`
-  takes the original checkout body and `clientRequestId` without a CAPTCHA token.
-  Signed-in customers use `POST /api/v1/customers/orders/recover` with their
-  original `expectedCustomerId`. Recovery only reads a saved request after
-  comparing its payload hash and customer; it never creates an order or reserves
-  stock. `ONLINE_ORDER_RECOVERY_NOT_FOUND` requires fresh verification and an
-  explicit resend of the unchanged body/key. Never automatically create on 404.
-- Customers send `{requestId, accessToken}` in the body of
-  `POST /api/v1/online-orders/requests/status` to track review, kitchen
-  readiness, and payment, or `/requests/cancel` to withdraw a pending request.
-  The token works for 72 hours from creation. Keep it out of URLs and logs;
-  rotating `JWT_SECRET` invalidates existing tokens. Staff use
-  `GET /api/v1/online-orders/requests` and `GET /requests/:id` with
-  `/online-orders_read`, then `POST /requests/:id/accept` or `/reject` with
-  `/online-orders_review`. Rejection requires `{reason}`. Acceptance creates
-  one takeaway order session and kitchen ticket atomically; changed menu prices,
-  choices or unavailable items require staff to reject and ask the customer to reorder.
-  Acceptance snapshots recipes and reserves ingredients atomically, but does not
-  collect payment. Staff use
-  `GET /api/v1/online-orders/requests/fulfillment` to monitor accepted orders.
-  Once every item is `READY`, staff with `/invoices_create`, `/invoices_pay` and
-  `/orders_items_handoff` send `{accessToken,amountTendered,idempotencyKey}` to
-  `POST /api/v1/online-orders/requests/:id/collect`. The customer must present
-  their access token; the open cashier shift, cash invoice, cash ledger entry,
-  item handoff and audit are committed together. Reuse the same idempotency key
-  when retrying a failed response. Do not use the generic unpaid handoff route
-  for online orders. Staff with `/online-orders_review` can send `{reason}` to
-  `POST /api/v1/online-orders/requests/:id/cancel` before payment or collection;
-  prepared ingredients are recorded as waste, not returned to stock.
-- Scheduled pickup uses `GET /api/v1/online-orders/pickup-slots?date=YYYY-MM-DD`
-  and an optional `pickupAt` ISO timestamp on request creation. Configure
-  `ONLINE_PICKUP_SLOT_CAPACITY`, `ONLINE_PICKUP_OPEN_LOCAL` and
-  `ONLINE_PICKUP_CLOSE_LOCAL` to enable it (15-minute slots in
-  `Asia/Ho_Chi_Minh`; the current shop uses 07:00-22:00 and 4 accepted orders
-  per slot). A pending request does **not** reserve capacity; acceptance
-  rechecks it transactionally. `GET /requests/fulfillment?overdueOnly=true`
-  shows scheduled orders past their pickup grace and ASAP orders whose last
-  ready time is more than 15 minutes ago;
-  staff decide whether to cancel, and prepared stock is recorded as waste.
-- Staff with `/online-orders_review` may call
-  `POST /api/v1/online-orders/requests/:id/no-show` only for an unpaid,
-  order whose active items are all READY and whose grace period has passed.
-  The 15-minute grace starts at the last item-ready time for ASAP orders and the
-  later of pickup/last-ready time for scheduled orders, so kitchen delays are not
-  blamed on the guest.
-  This explicitly cancels the order and session, records prepared ingredients as
-  waste, and writes an audit entry; there is no automatic no-show cancellation.
-  Staff detail and fulfillment responses include `isNoShowEligible`.
-- A new online request returns a `reorderToken` and `reorderExpiresAt` in
-  addition to its 72-hour `accessToken`. Keep the reorder token in private
-  client storage, not in URLs or logs. It is valid for 180 days from order
-  creation and only grants a cart preview, not order status, customer details
-  or checkout. `POST /api/v1/online-orders/requests/reorder-template` accepts
-  either `{requestId,accessToken}` within 72 hours or
-  `{requestId,reorderToken}` within 180 days. It returns `items` and a live
-  `quote` with per-line availability and current prices. When `canSubmit` is
-  false, the customer must update unavailable items or choices. On confirmation,
-  submit a fresh `clientRequestId`, customer details and `maxSubtotal` equal to
-  `quote.currentSubtotal`; the server requotes and never reuses old prices.
-  `POST /requests/reorder-key` reissues the key while the 72-hour access token
-  is valid; `POST /requests/reorder-key/revoke` revokes it using the reorder
-  token. Older orders without a reorder key cannot be recovered after their
-  access token expires; long-term account-based history would require customer
-  authentication. In production, keep `ONLINE_REORDER_SECRET` stable and
-  separate from JWT secrets so JWT rotation does not break reorder keys.
-- Optional "buy together" suggestions: before checkout, generate a fresh
-  `clientRequestId` and call `POST /api/v1/recommendations/online` with
-  `{clientRequestId,menuItemIds:[...]}`. Use the same ID in
-  `POST /api/v1/online-orders/requests`; generate a new ID if the basket's
-  starting items change. `CONTROL` intentionally returns no suggestions;
-  `TREATMENT` returns up to three currently saleable items with current base
-  prices. The client must never auto-add them. Pairs come from paid or partially
-  refunded invoices in the past 90 days (not fully refunded invoices), require at least three distinct invoices, and
-  refresh in the background every six hours. Availability is still checked on
-  each response, including replay. Base recipes exclude deleted ingredients and
-  insufficient available stock (`stock - reservedStock`) in bounded batches.
-  Untracked items without a base recipe remain eligible. This is advisory: stock
-  is not reserved, and the final basket quote validates options and concurrent
-  changes. The public endpoint is rate-limited
-  and stores only the checkout UUID, basket hash, cohort and suggested IDs,
-  never customer contact details. Repeating the same ID and basket is safe;
-  changing the basket with that ID returns 409. Staff with `/reports_read` use
-  `GET /api/v1/recommendations/experiment?from=<ISO>&to=<ISO>` for the last
-  90 days. `assignments` means API responses assigned to a cohort, not verified
-  screen views; `attachedOrders` counts purchased suggested items, not retained
-  items after refunds. Invoice-level refunds cannot identify returned lines.
-  Conversion retains previously paid orders after refunds; `revenue` subtracts
-  only successful refunds. Compare
-  paid conversion and revenue per assignment before enabling suggestions for
-  everyone. No recommendation is shown until enough paid history exists.
-  POS staff with `/orders_sessions_read` can call
-  `GET /api/v1/recommendations/pos/:id` for an active order session. This uses
-  the same current-menu filter but is not part of the online A/B experiment.
-- Optional Telegram updates use explicit customer opt-in and the durable order
-  outbox. See [activation](deploy/README.md#optional-telegram) and
-  [subscription/delivery contract](docs/online-order-preparation.md#telegram-delivery).
-  API state remains authoritative; notification retries can repeat messages.
-- `GET /api/v1/reports/online-orders?from=...&to=...&timeZone=...` requires
-  `/reports_read` and returns a daily request-cohort funnel: submitted,
-  reviewed/accepted, rejected, expired, cancelled, ready, paid and collected,
-  plus review/preparation time and paid receipts after successful refunds.
-  `from` is inclusive, `to` exclusive (default last 30 days, maximum 366 days);
-  each day follows the requested IANA time zone. The cohort is the request's
-  creation day, not the payment day: late payments/refunds can restate old
-  cohorts. Stage counts overlap (a later-cancelled order was still accepted),
-  and quoted demand is not booked revenue. Menu views and abandoned carts are
-  not measured because the backend has no trustworthy event for them.
-  `noShowCount` is an explicit staff-confirmed outcome. `noShowRatePercent`
-  divides no-shows by no-shows plus collected scheduled orders, excluding
-  upcoming and unresolved bookings from the denominator.
-- `GET /api/v1/reports/kitchen-sla?from=...&to=...&stationId=...` requires
-  `/reports_read` and reports completed, late and still-overdue kitchen tickets
-  by station, with average and p95 ticket-to-ready seconds. The range is
-  limited to 31 days; cancelled items are excluded from completion timing.
-- `GET /api/v1/reports/kitchen-bottlenecks?from=...&to=...&timeZone=...&stationId=...`
-  requires `/reports_read` and groups kitchen tickets by station and their
-  creation hour in the requested IANA time zone. `bucketStartAt` is an absolute
-  UTC timestamp, so repeated local hours during DST remain distinguishable.
-  The default range is 7 days and the maximum is 7 days (`from` inclusive,
-  `to` exclusive). `orderedUnitCount` includes units later cancelled;
-  `lateRatePercent` divides late completions by completed tickets only.
-  `openNowCount` and `overdueOpenCount` are current snapshots at `period.asOf`,
-  not reconstructed historical backlog. Cancellation can restate past cohorts.
-  The report diagnoses load and observed delay; it does not infer root cause.
-- `GET /api/v1/kitchen/workload` requires `/kitchen-tickets_read` and returns
-  one current snapshot per non-deleted station: open tickets and units,
-  overdue tickets, tickets due within five minutes, oldest open time and next
-  due time. Open means at least one item is `PENDING` or `COOKING`, matching the
-  KDS ticket list. Counts change with time even without a kitchen event; clients
-  should refresh periodically as well as on `kitchen.refresh` events. This is
-  an operational queue snapshot, not a historical backlog or staffing forecast.
-- `POST /api/v1/reservations/public/requests` accepts a request up to 30 days
-  ahead. Include `turnstileToken` from the `reservation_request` widget in
-  production. For safe retries, generate 32 random bytes with Web Crypto,
-  base64url-encode them as `clientRequestToken` (43 characters), and keep the
-  same token and payload across retries. The server stores only its hash and
-  returns it as the booking `accessToken`; a changed payload with the same
-  token returns 409. A stored exact retry does not need a new Turnstile token.
-  Treat `clientRequestToken` as a secret: never put it in URLs or logs. Older
-  clients may omit it and continue to receive a server-generated token, but
-  their creation requests are not idempotent. This request does **not** reserve
-  a table or confirm the booking. Staff review
-  requests through `GET /api/v1/reservations/requests` and approve with
-  `POST /api/v1/reservations/requests/:id/approve` plus a table ID, or reject with
-  `POST /api/v1/reservations/requests/:id/reject`. Pending requests expire after their
-  requested start time. Redis-backed rate limiting is shared between replicas
-  when `REDIS_URL` is configured.
-- Creation returns a one-time `accessToken`. The client uses it in the body of
-  `POST /api/v1/reservations/public/requests/status` to check the outcome, or
-  `POST /api/v1/reservations/public/requests/cancel` to withdraw while still
-  pending and before the start time. Do not put the token in URLs or logs; only
-  its hash is stored. Already-approved bookings must be cancelled by staff.
-  Requests created before this feature have no token and remain staff-managed.
-- `GET /api/v1/menu/items/stock-status` is a paginated, permission-protected
-  advisory based on recipe and current stock. It does not reserve stock or
-  toggle `isAvailable`; inventory is consumed when an item enters `COOKING`.
-- `GET /api/v1/audit-logs` is read-only, paginated, redacted, and requires
-  `/audit-logs_read`. OWNER and MANAGER receive that permission from the seed.
-- For takeaway sessions, `PATCH /api/v1/orders/items/:id/status` supports
-  `COOKING -> READY -> SERVED`. Staff can read ready items through
-  `GET /api/v1/orders/takeaway/handoff`, including paid orders whose session is
-  already complete. Waiters and cashiers use `POST /api/v1/orders/items/:id/handoff`
-  to acknowledge collection without receiving kitchen status permissions.
-  `readyAt` is persisted when the item becomes ready. Dine-in
-  keeps the existing `COOKING -> SERVED` path until prepaid table lifecycle is
-  addressed; the direct path remains valid for older takeaway clients too.
-- For paid takeaway invoices, staff with `/invoices_read` can call
-  `POST /api/v1/orders/takeaway/invoices/:id/pickup-code`. The customer sends
-  `{invoiceId, code}` in the body of `POST /api/v1/orders/takeaway/pickup/status`;
-  staff with `/orders_items_handoff` sends `{invoiceId, code, itemId}` to
-  `POST /api/v1/orders/takeaway/pickup/collect`. Never put the code in a URL or
-  log. The code expires 72 hours after issuance; a repeated issue returns the
-  same active code. Staff with `/invoices_update` can rotate it using
-  `POST /api/v1/orders/takeaway/invoices/:id/pickup-code/rotate` or revoke it
-  using `POST /api/v1/orders/takeaway/invoices/:id/pickup-code/revoke`.
-  Both mutations require `{code}` in the body and return 409 for a stale code;
-  a retry cannot invalidate a newly rotated code.
-  Refunded or voided invoices cannot use a code. Codes issued before the
-  pickup-code lifecycle migration remain valid until 72 hours after invoice
-  creation unless rotated or revoked. Rotating `JWT_SECRET` invalidates all
-  codes; a staff member can issue a new one. Only code version and issuance
-  time are stored, never the code itself.
-- After every item is collected, the customer may send
-  `{invoiceId, code, rating, comment?}` to
-  `POST /api/v1/orders/takeaway/pickup/feedback`. The rating is 1-5 and the
-  optional comment is limited to 500 characters. One invoice has one immutable
-  feedback record; retrying the same payload returns it, while changing the
-  rating or comment returns 409. Staff with `/reports_read` can use
-  `GET /api/v1/orders/takeaway/feedback/summary` and
-  `GET /api/v1/orders/takeaway/feedback` to review 30 days by default, with
-  optional ISO-8601 `from`/`to` filters with timezone offsets. No customer
-  profile or phone field is collected; free-text comments may still contain
-  information typed by the customer and are staff-only.
-- Ratings 1-2 remain in `GET /api/v1/orders/takeaway/feedback/cases` until
-  resolved. Staff with `/feedback_resolve` can send `{resolutionNote}` to
-  `POST /api/v1/orders/takeaway/feedback/:id/resolve`. The action records an
-  employee and audit entry; the note is internal and is not sent to customers.
-- Managers with `/management-exceptions_read` can use
-  `GET /api/v1/management/exceptions/summary` and
-  `GET /api/v1/management/exceptions?kind=PAYMENT&page=1&itemPerPage=20`.
-  Other kinds are `CASH_EXPENSE`, `CASH_HANDOVER`, and `FEEDBACK`. Each kind is
-  paginated independently, oldest first; the inbox is read-only and reflects
-  source records immediately. Resolve cases through their payment, cashier,
-  handover, or feedback APIs so existing checks and audit logs remain in force.
-
-Deploy the new migrations before calling the reservation-request API. Apply
-permission seed changes to the intended database in a controlled release; code
-deployment alone does not grant existing roles the new audit permission.
-
-## Scheduled Online Orders And Intake Control
-
-Scheduled takeaway tickets and print jobs are held until their persisted release
-time. Managers can pause new online intake with an expiring, versioned setting;
-existing orders and identical retries remain available. See
-[API contracts, KDS polling and migration checks](docs/online-order-preparation.md)
-before deployment or seeding `/online-orders_manage-intake`.
-
-## Menu Image Storage
-
-Menu images can be uploaded through the backend to Supabase Storage. The feature
-is disabled by default; manual HTTPS image URLs remain supported. No Supabase
-secret or SDK is needed in the frontend. See [setup and release checks](docs/supabase-images.md).
-
-Apply `20261017000000_menu_image_uploads` before deploying this version, even when
-uploads remain disabled: menu image changes use the tracker to attach and retire
-managed files atomically. No automatic migration or seed runs on application startup.
-
-## Optional Manager AI Insights
-
-Business analysis runs asynchronously in the existing application, never in POS
-checkout or public recommendations. It is disabled by default. See
-[configuration, API and activation checks](deploy/ai/README.md) before
-enabling Gemini or seeding `/reports_insights_generate` on the intended database.
-
-The runbook includes queue alerts, synthetic quality cases, explicit provider
-smoke and the offline recommendation baseline. `pnpm ai:smoke`
-does not call Gemini unless `--live` is supplied. These tools do not migrate,
-seed or mutate business data.
-
-## Cash Refunds And Order Remakes
-
-Cash refunds post an audited payout in the operator's current cash shift. Full-line
-remakes create nonbillable kitchen work with recipe snapshots and inventory waste,
-without altering the original receipt. See
-[API contracts, limits and accounting behavior](docs/cash-refunds-remakes.md)
-before enabling frontend actions.
-
-## Invoice And Table Integrity
-
-- Deploy `20261024100000_invoice_document_snapshot` before starting this backend.
-  Invoice documents capture item names, quantities, prices, options and table names
-  at issuance. PostgreSQL prevents overwriting an existing document snapshot.
-  Historical records are marked `LEGACY_BACKFILL`; items already detached from a
-  voided invoice before this migration cannot be reconstructed by the migration.
-- `POST /api/v1/invoices/quote` returns `quoteFingerprint`. Send that fingerprint
-  and `expectedTotal` with invoice creation/checkout to reject changed items or
-  discounts with `409 INVOICE_QUOTE_CHANGED`. Both fields remain optional for
-  existing API integrations; the POS always supplies them and requires review
-  after a mismatch. Never retry a changed quote as a new payment automatically.
-- Invoice void, session cancellation and table clear now require a trimmed
-  `reason` (3-500 characters). Transfer, merge, split, clear and cancellation
-  write the authenticated actor to `ActionLog` in the same transaction.
-- `POST /api/v1/orders/sessions/:id/items` requires an `idempotencyKey`
-  (8-120 characters). Keep the same key, session and basket after a lost reply.
-  Missing keys are rejected; existing POS clients already supply them.
-- Table clear and accepted online-order cancellation reconcile kitchen printing
-  in the business transaction. Unclaimed jobs lose cancelled lines; claimed,
-  printed or uncertain jobs get a separate cancellation notice.
-- Partial line splits update unclaimed print quantities and queue a separate
-  ticket for the destination table. A claimed, printed or uncertain original
-  returns `409 KITCHEN_SPLIT_REQUIRES_UNPRINTED`; move the whole line instead.
-  Previously printed paper is never silently rewritten.
-- Money accepts at most 16 integer digits and 2 decimal places; tax accepts
-  0-100 with at most 2 decimal places. Send large amounts as decimal strings.
-- POS cash/card recovery preserves the original command and idempotency key
-  across reloads in the same browser tab, scoped to employee and session.
-  After 23 hours, reconcile invoices and cashier shifts manually rather than
-  issuing a fresh payment. A lost browser session is not a cross-device recovery
-  mechanism; the invoice ledger remains the source for reconciliation.
-
-Verification: run `test/invoice-table-integrity.e2e-spec.ts` only against a
-dedicated loopback PostgreSQL database ending in `_test`, with one worker.
-No migration or activity seed runs automatically on application startup.
-
-## Durable Recovery And Monitoring
-
-Apply `20261024200000_outbox_delivery_context` before starting the updated
-backend; stop older workers before deployment. Queued events and active work
-have separate ownership, with heartbeats and abandoned-lease recovery.
-Request IDs follow events into worker logs and audit entries. Monitoring stays
-accessible with its token during Redis limiter outages, and SSE connection
-lifetimes no longer distort REST latency. See the
-[monitoring and recovery runbook](deploy/observability/README.md).
-
-Large Decimal responses are strings rather than rounded numbers; normal-size
-responses keep their existing representation. The same rule applies to stored
-idempotent responses. Run `test/durable-recovery.e2e-spec.ts` on a dedicated
-loopback PostgreSQL database ending in `_test` and dedicated test Redis on a
-non-default port (locally tested on 56389), or the isolated `/14` Redis database
-provided by CI, with one worker. Never point the suite at the shop's live queues.
+Deploy migrations and the matching backend before frontend contract changes;
+pin frontend CI `BACKEND_REF` to the pushed, compatible backend SHA.
+Optional Google, Turnstile, payment, Telegram, Supabase and Gemini configuration
+belongs in the backend env unless explicitly marked as a public frontend value.
+Credentials, tokens, customer details and raw payment payloads must not enter logs.

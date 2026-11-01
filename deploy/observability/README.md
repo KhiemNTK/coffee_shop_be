@@ -1,12 +1,13 @@
 # Production Observability
 
-Use the [single-VPS runbook](../README.md) for release, backup and recovery.
+Use the [deployment runbook](../README.md) for release, backup and recovery.
+Metrics/logs diagnose the system; they are not payment or accounting evidence.
 
 ## Prometheus
 
-Scrape `GET /metrics` with the production `METRICS_TOKEN` as a bearer token.
-Keep the token in the deployment secret store, not in Prometheus configuration
-committed to Git.
+Enable metrics and scrape `GET /metrics` on the private monitoring network.
+Production requires `METRICS_TOKEN`; the endpoint bypasses the Redis limiter,
+not bearer authentication. Never commit the token.
 
 ```yaml
 scrape_configs:
@@ -15,64 +16,52 @@ scrape_configs:
       type: Bearer
       credentials_file: /run/secrets/coffee-shop-metrics-token
     static_configs:
-      - targets: [coffee-shop-api:3000]
+      - targets: [backend:3000]
 ```
 
-Load `prometheus-rules.yml` through Prometheus `rule_files`. Route critical
-alerts to the on-call channel and warning alerts to the operations queue.
+Use the actual reachable service address; `backend` is the production Compose
+service name. A scraper outside that Docker network needs an approved private route.
+Load [prometheus-rules.yml](prometheus-rules.yml) through `rule_files` and route
+critical/warning alerts to a monitored channel.
 
-`/metrics` bypasses the Redis-backed rate limiter, not its bearer-token check.
-Keep it on the private monitoring network. PostgreSQL dependency and collector
-failure alerts do not require a minimum number of HTTP requests. Failed collection
-leaves the last successful business gauges in place; check dependency state and
-collector failures before trusting them.
-
-Redis health checks bound connection initialization and PING together, share an
-in-flight check and close a stalled health connection before retrying. Memory
-collection uses a bounded `INFO memory` on that dedicated connection. Allow
-`PING`, `INFO` and initialization commands in its ACL; the runtime limiter also
-requires `EVAL`/key writes and BullMQ needs its documented command set. Do not
-assume PING success proves those writes are allowed.
-
-`coffee_shop_redis_memory_used_bytes` and `coffee_shop_redis_maxmemory_bytes`
-report Redis's memory usage and configured ceiling, not container RSS or host
-free RAM. Rules warn above 80% and on unlimited maxmemory. Limiter command errors
-increment `coffee_shop_rate_limit_unavailable_total` and alert even if PING works
-(for example OOM, ACL or persistence write errors). Inspect container/host memory
-as well; do not resolve queue pressure by enabling eviction.
-
-Validate rules and their outage scenarios with a pinned Prometheus tool image:
+Validate existing outage scenarios from the backend root:
 
 ```powershell
 docker run --rm --entrypoint /bin/promtool --mount "type=bind,source=$((Resolve-Path deploy/observability).Path),target=/rules,readonly" prom/prometheus:v3.5.0 test rules /rules/prometheus-rules.test.yml
 ```
 
-`coffee_shop_postgres_connections` measures PostgreSQL server connections. It
-does not claim to expose Prisma's private pool occupancy. Correlate connection
-pressure with request latency, transaction retries and PostgreSQL monitoring.
+| Signal                                                                     | Interpretation                                                                                              |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| HTTP latency/errors/in-flight                                              | REST durations exclude SSE lifetimes; request/in-flight counts still include SSE.                           |
+| Dependency/collector failures                                              | Some business gauges retain the last successful value; verify collection health before trusting them.       |
+| `coffee_shop_postgres_connections`                                         | PostgreSQL server connections, not Prisma's private pool occupancy.                                         |
+| `coffee_shop_redis_memory_used_bytes`, `coffee_shop_redis_maxmemory_bytes` | Redis memory/ceiling, not container RSS or host free RAM; warnings start above 80% or an unlimited ceiling. |
+| `coffee_shop_rate_limit_unavailable_total`                                 | Redis command failures, including OOM/ACL/persistence failures even if PING succeeds.                       |
+| `coffee_shop_kitchen_sse_active_connections`                               | Active subscriptions per instance, not unique devices; sum across instances.                                |
+| Outbox lag, retries/dead letters and payment mismatches                    | Investigate persisted state before replay or manual action.                                                 |
+
+Redis checks/INFO collection have bounded deadlines. Its health connection needs
+PING/INFO/initialization permissions; the limiter also needs EVAL/key writes and
+BullMQ needs its command set. PING alone does not prove the app can write.
+Inspect host/container memory too; never enable eviction to relieve queue pressure.
 
 ## Log And Exception Diagnosis
 
-Production logs use JSON stdout and request correlation, without request bodies
-or full responses. Credential redaction covers nested objects, JSON strings,
-authorization headers, device/API keys and URL credentials. It is a safety net:
-never intentionally log provider payloads or Prisma query arguments.
+Production logs are JSON stdout with request correlation, without whole request
+bodies/responses. Redaction is a safety net, not permission to log provider
+payloads, Prisma arguments, URLs with credentials or customer details.
 
-The operations inbox includes uncertain print deliveries and overdue ASAP pickup
-orders. Print review links require print-read permission; confirming paper delivery
-still requires print-manage permission in the printing workflow. Do not blindly
-retry an uncertain print: paper may already have been delivered.
+The management inbox is read-only. Resolve source cases through their payment,
+cashier, feedback or printing workflow so permissions and audit remain in force.
+Uncertain paper output needs operator review, not a blind reprint.
 
-Dead-letter details expose only `lastErrorCode`, `lastFailedAt` and the original
-`requestId`, not payloads or raw errors. Search logs by that request ID or event ID,
-fix the cause, then retry with a reason. Requeued means waiting for a worker, not
-published. Historical failures keep null diagnostics until another delivery fails.
-Apply migration `20261025010000_outbox_failure_diagnostics` before deploying this
-backend, and deploy the backend before the matching frontend contract.
+Dead-letter details expose safe `lastErrorCode`, `lastFailedAt` and `requestId`,
+not raw payloads/errors. Search logs by request/event ID, fix the cause, then
+explicitly retry with a reason. Requeued means waiting, not published.
 
 ## OpenTelemetry
 
-Tracing is opt-in. Set these variables only when an OTLP collector is ready:
+Tracing is optional; set these only when a collector is ready:
 
 ```text
 OTEL_ENABLED=true
@@ -82,116 +71,71 @@ OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.1
 ```
 
-HTTP, Express, NestJS and ioredis are instrumented. Application metrics remain
-Prometheus-native and logs remain JSON stdout to avoid duplicate telemetry.
-Redis spans retain command names only, never keys, Lua source, arguments or job
-payloads. Winston log redaction is not a filter for OTLP span attributes.
+HTTP, Express, NestJS and ioredis are instrumented. Logs stay JSON stdout and
+application metrics stay Prometheus-native. Redis spans retain command names,
+not keys, arguments, Lua or job payloads. Log redaction does not scrub OTLP spans.
 
 ## Kitchen Realtime
 
-Each SSE connection sends `kitchen.renew` and closes after at most 60 seconds.
-The frontend reconnects immediately through the existing authentication and
-permission guards, preserving its event deduplication state. Revoked sessions or
-permissions can therefore retain an existing stream for at most one minute;
-there is no authorization query per message. Older frontends still reconnect
-through their normal SSE error handling.
+Streams renew after at most 60 seconds through normal auth/permission guards;
+revocation can therefore leave an existing stream open for up to one minute.
+The active-connection gauge returns to zero on disconnect/shutdown.
 
-`coffee_shop_kitchen_sse_active_connections` counts active SSE subscriptions per
-application instance, not unique devices or employees. It returns to zero when
-clients disconnect or the application shuts down. Sum across instances for a
-deployment total; do not use employee IDs or connection IDs as labels.
-SSE lifetimes are excluded from the REST duration histogram; request counters
-and in-flight gauges still include these connections.
+KDS reconciles by HTTP every 60 seconds while connected. SSE error or 45 seconds
+without a heartbeat/event enables ticket polling every 6 seconds and workload
+polling every 15 seconds, with reconnect attempts every 5 seconds. The displayed
+update time is the last successful ticket HTTP read, not a connection timestamp.
 
-KDS keeps a 60-second HTTP reconciliation while connected. After an SSE error or
-45 seconds without a heartbeat/event, it uses the existing ticket polling
-(6 seconds) and workload polling (15 seconds), with reconnect attempts every
-5 seconds. The status badge reports periodic updates until the stream reopens.
-The displayed update time comes from the last successful ticket HTTP response.
+Only valid new-ticket events for the selected station whose release is due may
+chime. The latest 200 IDs are deduplicated per mounted KDS; other tabs/reloads
+have separate sound state. Scheduled release remains visible through polling.
 
-Only new-ticket events with a validated station and a release time already due
-may chime. Other events still refresh data. The latest 200 new-ticket event IDs
-are deduplicated per mounted KDS session. Reloads and other tabs have independent
-notification state; this is not an exactly-once delivery guarantee. Scheduled
-release stays visual through reconciliation; add a durable release event only
-if the shop needs a timed audible alert. No new Redis channel, queue, permission
-or database migration is required.
-
-Streams also send `kitchen.connection` and a `realtime` boolean in heartbeats.
-The relay is ready only after subscription acknowledgement and while the
-publisher is connected; losing either side switches the UI to periodic updates
-without repeatedly reconnecting a healthy browser stream. Updated frontends
-retain the last known relay state on legacy heartbeats. Local refreshes are
-delivered before Redis publishing and the latest 500 event IDs are deduplicated
-per API process against Pub/Sub echoes. This does not add durable message replay:
-the existing HTTP reconciliation remains required.
+Relay health requires publisher connectivity and subscriber acknowledgement.
+Connection messages/heartbeats switch the UI to periodic updates when the relay
+fails. Local refreshes are delivered before publish; each API process deduplicates
+its latest 500 IDs against Redis echoes. Pub/Sub is not durable replay: HTTP
+reconciliation remains required. See [implementation](../../src/app/kitchen/).
 
 ## Request Throttling
 
-Public/auth endpoints retain their existing IP limits. Protected staff routes
-first use a coarse IP budget (10 times their route limit), then enforce the
-original route limit by authenticated employee after `AuthGuard`. No identity
-is taken from a client-supplied employee header or body. Both stages share the
-Redis storage and remain fail-closed; payment webhooks keep their separate
-per-instance policy. Do not reorder the employee guard before authentication.
+Public/auth limits use IP identity. Protected staff routes apply a coarse IP
+budget first, then the authenticated employee's route budget after auth.
+Both Redis stages fail closed; payment callbacks retain a separate per-instance
+limit and still require signatures/replay protection. Health and protected metrics
+remain accessible during ordinary limiter outages.
 
-The frontend reads bounded `Retry-After` seconds or HTTP dates, shows the wait
-and disables resubmission in sign-in, checkout, payment and exception workflows.
-Timers stop on expiry/unmount. The UI caps a wait at one hour; server limits
-remain authoritative. Expiry only re-enables user actions; it never retries
-mutations automatically or replaces their pending idempotency key.
+The UI reads bounded `Retry-After` seconds/HTTP dates and waits for explicit action.
+Expiry does not retry a write or replace its idempotency key. Review reverse-proxy
+limits before scaling replicas or serving many clients behind one public IP.
 
 ## Outbox Delivery
 
-Redis producer readiness and commands have a two-second application deadline;
-the producer also uses a Redis command timeout. Blocking BullMQ worker
-connections do not use that timeout. After an enqueue failure, the dispatcher
-releases the rest of the unqueued batch with lease checks in one database update,
-without spending the consumer retry budget.
+PostgreSQL is the durable source. Dispatcher claims enter ENQUEUED; workers
+re-read and conditionally acquire PROCESSING execution leases. Active work renews
+every 20 seconds. Abandoned 90-second leases are checked every 15 seconds plus
+dispatch polling; DB outages/event-loop stalls can extend recovery.
 
-Shutdown stops outbox before `app.close()` removes domain listeners. It stops
-new claims, joins the in-flight dispatch, releases its unqueued claims, then
-closes the worker before the producer queue. Repeated stop calls join the same
-shutdown. The existing global
-shutdown deadline still bounds shutdown; a forced stop may require lease
-recovery and delivery remains at least once.
+Producer readiness/commands have two-second deadlines. Enqueue failure releases
+unsubmitted claims with lease checks, without spending consumer retries.
+Blocking worker connections do not use the producer command timeout.
 
-Apply `20261024200000_outbox_delivery_context` before deploying these workers.
-Stop old API/worker processes first: mixed versions use different lease ownership
-rules. The migration only adds an enum state and nullable context, and updates
-the outbox state constraint; it does not rewrite business payloads.
+Shutdown stops new claims, joins dispatch, releases unqueued claims, then closes
+worker/producer connections before removing listeners/dependencies. A forced stop
+may still need lease recovery. Stop old workers before migrating lease/context
+changes; do not mix versions.
 
-Claims enter `ENQUEUED`. A worker re-reads PostgreSQL and conditionally acquires
-a fresh `PROCESSING` execution lease, rather than trusting a Redis job's old
-lease or retry count. Active execution renews its lease every 20 seconds.
-Abandoned queued/running leases expire after 90 seconds, checked every 15 seconds
-plus the configured dispatch polling interval, independently of retention cleanup.
-This is a normal-operation recovery target, not a deadline during a database
-outage or event-loop stall. Lease fencing prevents stale acknowledgements; it
-does not make external email/Telegram delivery exactly once. Consumers must
-retain their durable idempotency checks.
+Allowlisted request/actor/trace context follows events into worker logs and audit;
+legacy events use `outbox:<event-id>`. No tokens, request bodies or arbitrary
+baggage are captured. Fencing protects stale acknowledgements, not exactly-once
+external email/Telegram delivery. Consumers retain durable idempotency.
+See [durable implementation](../../src/app/durable/).
 
-New events capture an allowlisted request ID, employee ID and W3C trace context
-separately from their payload. Worker logs and transaction-created audit entries
-restore this context; legacy events use `outbox:<event-id>` as their request ID.
-No customer identifiers, auth tokens, request bodies or arbitrary tracing baggage
-are captured. Trace export remains opt-in. POS checkout and exception actions
-show a selectable/copyable support ID without discarding uncertain-payment state.
+## Decimal Responses And AI
 
-## Decimal Responses
+HTTP and stored idempotent responses share Decimal serialization: safe exact
+values remain numbers; wider/lossy values remain strings. Reconcile old rounded
+snapshots against invoices/ledgers; never erase financial replay keys to retry.
 
-HTTP and idempotent response storage use the same Decimal serializer. Existing
-small exact-roundtrip values remain numbers; values beyond the safe money range
-or values changed by number conversion are decimal strings. Clients must accept
-both representations and calculate money using decimal/minor-unit helpers.
-Previously rounded cached responses cannot be reconstructed from the cache.
-Reconcile against the persisted invoice/ledger; never delete financial replay
-keys just to force a new operation.
-
-## Optional AI Queue
-
-When manager AI is enabled, the same scrape collects bounded BullMQ queue heads
-and counts. AI disabled means no queue connection for metrics. Rules include AI
-queue inspection failure, stalled queue heads and repeated terminal job failures.
-See the [AI runbook](../ai/README.md) for metric meanings, retry accounting and
-activation checks. Do not interpret token/job counters as a billing ledger.
+Enabled AI uses bounded queue collection in the same scrape; disabled AI does not
+open a metrics queue connection. Shared queue gauges use `max` across replicas,
+not `sum`. See [AI activation](../ai/README.md) for budget and evaluation limits.

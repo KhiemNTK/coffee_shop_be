@@ -1,27 +1,28 @@
-# Load Test
+# Read-Only Load Test
 
-Run only against an isolated staging environment with production-like
-PostgreSQL and Redis sizing. The token must belong to a seeded employee with
-read permissions for menu, dining tables and order sessions.
+Use isolated staging with representative PostgreSQL/Redis sizing and k6 installed.
+Never target shop traffic, real orders or live payment/stock data.
+
+From the backend root:
 
 ```powershell
-$env:API_BASE_URL='https://staging.example.com/api/v1'
-$env:ACCESS_TOKEN='<access-token>'
+$env:API_BASE_URL = 'https://staging.example.com/api/v1'
+$env:ACCESS_TOKEN = '<staging-employee-access-token>'
 pnpm test:load
+Remove-Item Env:ACCESS_TOKEN
 ```
 
-The profile ramps to 250 RPS, holds it, bursts to 500 RPS and then recovers.
-It fails when read p95 reaches 300 ms, errors reach 1 percent, checks fall below
-99 percent or the load generator drops an iteration. Run the generator outside
-the application host and save the k6 summary with the release evidence.
+The employee needs read permissions for menu, dining tables and order sessions.
+[coffee-shop.k6.js](coffee-shop.k6.js) ramps to 250 RPS, holds, bursts to 500 RPS,
+then recovers. Passing requires p95 below 300 ms, errors below 1%, checks above
+99% and no dropped iterations. This profile does not measure mutation throughput.
 
-The generator uses one source IP. The default `THROTTLE_LIMIT=100` per minute
-will intentionally return 429 before this throughput is reached. For the
-read-throughput rehearsal, set a documented staging limit high enough for the
-generator or distribute traffic across representative POS source IPs. Test the
-production throttle policy separately, including clients behind one NAT; a
-successful throughput run with a raised limit does not validate abuse control.
+Run k6 outside the application host. The generator has one source IP; normal
+rate limits can return 429 well before the target. Document any staging-only limit
+adjustment and test real abuse controls/NAT behavior separately, without weakening
+production limits.
 
-This script is read-only by design. Financial and inventory mutation load tests
-need isolated fixtures and unique idempotency keys; do not point them at shared
-staging or production data.
+Save the commit, sizing, configuration and k6 summary with release evidence.
+A configured target is not a measured capacity guarantee. Financial/inventory
+load needs separate fixtures and unique idempotency keys; it is not part of this
+read-only profile. See [release gates](../../deploy/README.md#release-gate).
