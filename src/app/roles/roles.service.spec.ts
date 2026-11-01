@@ -308,6 +308,7 @@ describe('Role metadata and templates', () => {
     name: 'Custom',
     description: null,
     isSystemRole: false,
+    updatedAt: new Date('2026-10-01T00:00:00.000Z'),
   };
   function fixture() {
     const tx = {
@@ -472,10 +473,18 @@ describe('Role metadata and templates', () => {
 
   it('updates only metadata, auditing before/after without touching grants', async () => {
     const { tx, service } = fixture();
-    await service.updateRole('role', { name: 'Renamed' }, 'actor');
+    await service.updateRole(
+      'role',
+      { name: 'Renamed', expectedUpdatedAt: metadata.updatedAt },
+      'actor',
+    );
     expect(tx.role.update).toHaveBeenCalledWith({
-      where: { id: 'role', deletedAt: null },
-      data: { name: 'Renamed', description: undefined },
+      where: { id: 'role', deletedAt: null, updatedAt: metadata.updatedAt },
+      data: {
+        name: 'Renamed',
+        description: undefined,
+        updatedAt: expect.any(Date),
+      },
     });
     expect(tx.actionLog.create).toHaveBeenCalledWith({
       data: {
@@ -492,13 +501,37 @@ describe('Role metadata and templates', () => {
 
   it('protects system metadata and does not audit unchanged metadata', async () => {
     const { tx, service } = fixture();
-    await service.updateRole('role', { name: 'Custom' }, 'actor');
+    await service.updateRole(
+      'role',
+      { name: 'Custom', expectedUpdatedAt: metadata.updatedAt },
+      'actor',
+    );
     expect(tx.role.update).not.toHaveBeenCalled();
     expect(tx.actionLog.create).not.toHaveBeenCalled();
     tx.role.findUnique.mockResolvedValue({ ...metadata, isSystemRole: true });
     await expect(
-      service.updateRole('role', { name: 'Renamed' }, 'actor'),
+      service.updateRole(
+        'role',
+        { name: 'Renamed', expectedUpdatedAt: metadata.updatedAt },
+        'actor',
+      ),
     ).rejects.toThrow(AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED);
+  });
+
+  it('rejects a stale metadata revision without overwriting another editor or writing audit', async () => {
+    const { tx, service } = fixture();
+    await expect(
+      service.updateRole(
+        'role',
+        {
+          name: 'Stale rename',
+          expectedUpdatedAt: new Date(metadata.updatedAt.getTime() - 1),
+        },
+        'actor',
+      ),
+    ).rejects.toMatchObject({ response: { code: 'ROLE_CHANGED' } });
+    expect(tx.role.update).not.toHaveBeenCalled();
+    expect(tx.actionLog.create).not.toHaveBeenCalled();
   });
 
   it('does not report success when the transactional audit fails', async () => {
@@ -508,7 +541,11 @@ describe('Role metadata and templates', () => {
       service.createRole({ name: 'Custom' }, 'actor'),
     ).rejects.toThrow('Audit unavailable');
     await expect(
-      service.updateRole('role', { name: 'Renamed' }, 'actor'),
+      service.updateRole(
+        'role',
+        { name: 'Renamed', expectedUpdatedAt: metadata.updatedAt },
+        'actor',
+      ),
     ).rejects.toThrow('Audit unavailable');
   });
 });

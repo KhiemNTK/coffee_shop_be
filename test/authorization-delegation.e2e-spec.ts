@@ -529,6 +529,46 @@ describe('Authorization delegation (PostgreSQL)', () => {
     ).toBe(1);
   });
 
+  it('commits exactly one concurrent metadata edit and one audit entry for an observed role version', async () => {
+    const roles = new RolesService(
+      prisma,
+      new PaginationUtilService(),
+      {} as never,
+      {} as never,
+      authorization,
+    );
+    const role = await base.role.create({
+      data: { name: 'Concurrent metadata' },
+    });
+    const results = await Promise.allSettled(
+      ['Editor A', 'Editor B'].map((description) =>
+        roles.updateRole(
+          role.id,
+          { description, expectedUpdatedAt: role.updatedAt },
+          ids.delegate,
+        ),
+      ),
+    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    expect(
+      rejected?.status === 'rejected' && rejected.reason.getResponse(),
+    ).toMatchObject({ code: 'ROLE_CHANGED' });
+    const saved = await base.role.findUniqueOrThrow({ where: { id: role.id } });
+    expect(saved.updatedAt.getTime()).toBeGreaterThan(role.updatedAt.getTime());
+    expect(['Editor A', 'Editor B']).toContain(saved.description);
+    expect(
+      await base.actionLog.count({
+        where: {
+          actionType: 'ROLE_UPDATED',
+          details: { path: ['roleId'], equals: role.id },
+        },
+      }),
+    ).toBe(1);
+  });
+
   it('copies system grants into an independent custom role and blocks deleting it until reassigned', async () => {
     const roles = new RolesService(
       prisma,
@@ -574,7 +614,7 @@ describe('Authorization delegation (PostgreSQL)', () => {
     ).toMatchObject({ deletedAt: null });
     await roles.updateRole(
       created.id,
-      { name: 'Renamed cashier copy' },
+      { name: 'Renamed cashier copy', expectedUpdatedAt: created.updatedAt },
       ids.delegate,
     );
     expect(
@@ -732,7 +772,10 @@ describe('Authorization delegation (PostgreSQL)', () => {
       await expect(
         roles.updateRole(
           existing.id,
-          { name: 'Audit rollback renamed' },
+          {
+            name: 'Audit rollback renamed',
+            expectedUpdatedAt: existing.updatedAt,
+          },
           ids.delegate,
         ),
       ).rejects.toThrow();

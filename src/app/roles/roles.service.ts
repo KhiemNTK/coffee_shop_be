@@ -177,7 +177,7 @@ export class RolesService {
 
   async updateRole(
     id: string,
-    { name, description }: UpdateRoleDto,
+    { name, description, expectedUpdatedAt }: UpdateRoleDto,
     actorId: string,
   ) {
     return runSerializableTransaction(this.prisma, async (tx) => {
@@ -195,6 +195,12 @@ export class RolesService {
         throw new BadRequestException(
           AUTHORIZATION_ERRORS.SYSTEM_ROLE_CANNOT_BE_MODIFIED,
         );
+      if (role.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+        throw new ConflictException({
+          code: 'ROLE_CHANGED',
+          message: 'Role metadata changed. Reload and review before saving.',
+        });
+      }
       if (name) await this.ensureRoleNameAvailable(tx, name, id);
       if (
         (name === undefined || name === role.name) &&
@@ -202,8 +208,15 @@ export class RolesService {
       )
         return role;
       const updated = await tx.role.update({
-        where: { id, deletedAt: null },
-        data: { name, description },
+        where: { id, deletedAt: null, updatedAt: expectedUpdatedAt },
+        data: {
+          name,
+          description,
+          // A successful edit must advance the revision even within one millisecond.
+          updatedAt: new Date(
+            Math.max(Date.now(), role.updatedAt.getTime() + 1),
+          ),
+        },
       });
       await tx.actionLog.create({
         data: {
