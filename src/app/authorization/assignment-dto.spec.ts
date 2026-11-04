@@ -12,13 +12,32 @@ describe('Explicit access replacement payloads', () => {
       }).success,
     ).toBe(false);
     const templateRoleId = '30000000-0000-4000-8000-000000000003';
+    const expectedUpdatedAt = '2026-10-01T00:00:00.000Z';
     expect(
       CreateRoleInputSchema.parse({ name: 'Custom', templateRoleId }),
     ).toEqual({ name: 'Custom', templateRoleId });
     expect(
-      UpdateRoleInputSchema.parse({ name: 'Custom', templateRoleId }),
-    ).toEqual({ name: 'Custom' });
+      UpdateRoleInputSchema.parse({
+        name: 'Custom',
+        templateRoleId,
+        expectedUpdatedAt,
+      }),
+    ).toEqual({
+      name: 'Custom',
+      expectedUpdatedAt: new Date(expectedUpdatedAt),
+    });
   });
+
+  it.each([undefined, null, 'invalid-date'])(
+    'rejects role metadata edits with an invalid observed version: %s',
+    (expectedUpdatedAt) => {
+      expect(
+        UpdateRoleInputSchema.safeParse({ name: 'Custom', expectedUpdatedAt })
+          .success,
+      ).toBe(false);
+    },
+  );
+
   it('does not turn an omitted or null list into a revoke-all command', () => {
     for (const input of [{}, { permissionIds: null }]) {
       expect(ReplaceRolePermissionsInputSchema.safeParse(input).success).toBe(
