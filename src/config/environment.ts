@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { BUSINESS_INSIGHT_MODELS } from '../common/consts/business-insights';
+import { LOG_LEVELS } from '../common/consts/logging';
 
 const BooleanEnvSchema = z.preprocess((value) => {
   if (typeof value === 'boolean') return value;
@@ -42,6 +43,7 @@ export const EnvironmentSchema = z
     HOST: z.string().min(1).default('0.0.0.0'),
     APP_PREFIX: z.string().startsWith('/').default('/api/v1'),
     APP_NAME: z.string().min(1).default('coffee_shop_be'),
+    LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
     SHOP_NAME: optionalBlank(z.string().trim().max(120)),
     SHOP_ADDRESS: optionalBlank(z.string().trim().max(255)),
     SHOP_PHONE: optionalBlank(

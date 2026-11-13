@@ -28,6 +28,17 @@ const productionEnvironment = {
 } as const;
 
 describe('validateEnvironment', () => {
+  it('validates the log level and keeps access logging enabled by default', () => {
+    const base = { DATABASE_URL: 'postgresql://localhost/test' };
+    expect(validateEnvironment(base).LOG_LEVEL).toBe('info');
+    expect(validateEnvironment({ ...base, LOG_LEVEL: 'warn' }).LOG_LEVEL).toBe(
+      'warn',
+    );
+    expect(() => validateEnvironment({ ...base, LOG_LEVEL: 'trace' })).toThrow(
+      'LOG_LEVEL',
+    );
+  });
+
   it('keeps image uploads disabled and validates server-only configuration when enabled', () => {
     const base = { DATABASE_URL: 'postgresql://localhost/test' };
     expect(validateEnvironment(base).SUPABASE_IMAGES_ENABLED).toBe(false);

@@ -7,6 +7,7 @@ import winston from 'winston';
 import { redactLogValue } from './log-redaction';
 import { getRequestContext } from '../../common/request-context';
 import { trace, isSpanContextValid } from '@opentelemetry/api';
+import { LOG_LEVELS } from '../../common/consts/logging';
 
 const enrichRequestContext = winston.format((info) => {
   const request = getRequestContext();
@@ -29,6 +30,9 @@ const redactSensitiveData = winston.format((info) => {
 @Module({})
 export class LoggerModule {
   static createLogger() {
+    const level = process.env.LOG_LEVEL ?? 'info';
+    if (!LOG_LEVELS.some((allowed) => allowed === level))
+      throw new Error(`LOG_LEVEL must be one of: ${LOG_LEVELS.join(', ')}`);
     const production = process.env.NODE_ENV === 'production';
     const format = production
       ? winston.format.combine(
@@ -53,6 +57,7 @@ export class LoggerModule {
         );
 
     return WinstonModule.createLogger({
+      level,
       transports: [new winston.transports.Console({ format })],
     });
   }
