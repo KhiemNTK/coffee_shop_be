@@ -4,12 +4,12 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OAuth2Client } from 'google-auth-library';
+import { gaxios, OAuth2Client } from 'google-auth-library';
 
 @Injectable()
 export class GoogleIdentityService {
   private readonly client = new OAuth2Client({
-    transporterOptions: { timeout: 3_500 },
+    transporterOptions: { timeout: 3_500, retryConfig: { retry: 0 } },
   });
   private readonly clientId?: string;
 
@@ -19,9 +19,11 @@ export class GoogleIdentityService {
 
   async verify(idToken: string) {
     if (!this.clientId) {
-      throw new ServiceUnavailableException(
-        'Google sign-in is not configured.',
-      );
+      throw new ServiceUnavailableException({
+        code: 'GOOGLE_UNAVAILABLE',
+        message:
+          'Google sign-in is temporarily unavailable. Please try again later.',
+      });
     }
 
     try {
@@ -34,7 +36,15 @@ export class GoogleIdentityService {
         throw new UnauthorizedException('Invalid Google credentials.');
       }
       return { subject: payload.sub, email: payload.email };
-    } catch {
+    } catch (error) {
+      // Certificate transport failures are not evidence of invalid credentials.
+      if (error instanceof gaxios.GaxiosError) {
+        throw new ServiceUnavailableException({
+          code: 'GOOGLE_UNAVAILABLE',
+          message:
+            'Google sign-in is temporarily unavailable. Please try again later.',
+        });
+      }
       throw new UnauthorizedException('Invalid Google credentials.');
     }
   }

@@ -3,7 +3,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { OAuth2Client } from 'google-auth-library';
+import { gaxios, OAuth2Client } from 'google-auth-library';
 import { GoogleIdentityService } from './google-identity.service';
 
 const config = (clientId?: string) =>
@@ -68,5 +68,53 @@ describe('GoogleIdentityService', () => {
     await expect(service.verify('bad-token')).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
+  });
+
+  it.each([undefined, 429, 503])(
+    'reports certificate transport failure %s as unavailable without leaking provider details',
+    async (status) => {
+      const options: gaxios.GaxiosOptionsPrepared = {
+        url: new URL('https://www.googleapis.com/oauth2/v1/certs'),
+        headers: new Headers(),
+      };
+      const response = status
+        ? Object.assign(new Response(null, { status }), {
+            config: options,
+            data: {},
+          })
+        : undefined;
+      const verify = jest.spyOn(
+        OAuth2Client.prototype,
+        'verifyIdToken',
+      ) as jest.SpyInstance;
+      verify.mockRejectedValueOnce(
+        new gaxios.GaxiosError('private provider details', options, response),
+      );
+      const service = new GoogleIdentityService(config('client-id'));
+
+      await expect(service.verify('token')).rejects.toMatchObject({
+        status: 503,
+        response: {
+          code: 'GOOGLE_UNAVAILABLE',
+          message:
+            'Google sign-in is temporarily unavailable. Please try again later.',
+        },
+      });
+    },
+  );
+
+  it('does not retry certificate downloads beyond the login timeout budget', async () => {
+    const service = new GoogleIdentityService(config('client-id'));
+    const adapter = jest.fn(() =>
+      Promise.reject(new Error('network unavailable')),
+    );
+    service['client'].transporter.defaults.adapter = adapter;
+    service['client'].transporter.defaults.noProxy = [/.*/];
+
+    await expect(service.verify('token')).rejects.toMatchObject({
+      status: 503,
+      response: { code: 'GOOGLE_UNAVAILABLE' },
+    });
+    expect(adapter).toHaveBeenCalledTimes(1);
   });
 });

@@ -202,11 +202,18 @@ export class AuthService {
     }
     const identity = await this.googleIdentity.verify(dto.idToken);
     if (identity.email.toLowerCase() !== employee.email.toLowerCase()) {
-      throw new BadRequestException('Google email must match employee email.');
+      throw new BadRequestException({
+        code: 'GOOGLE_EMAIL_MISMATCH',
+        message: 'Select the Google account matching your employee email.',
+      });
     }
     if (employee.googleSubject === identity.subject) return { linked: true };
     if (employee.googleSubject) {
-      throw new BadRequestException('A Google account is already linked.');
+      throw new BadRequestException({
+        code: 'GOOGLE_ALREADY_LINKED',
+        message:
+          'A Google account is already linked. Reload your account or contact your manager.',
+      });
     }
 
     try {
@@ -223,7 +230,11 @@ export class AuthService {
           data: { googleSubject: identity.subject },
         });
         if (updated.count !== 1) {
-          throw new BadRequestException('Google account link changed.');
+          throw new BadRequestException({
+            code: 'GOOGLE_LINK_CHANGED',
+            message:
+              'Google account linking changed. Reload your account before retrying.',
+          });
         }
         await tx.actionLog.create({
           data: {
@@ -238,7 +249,11 @@ export class AuthService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new BadRequestException('Google account is already linked.');
+        throw new BadRequestException({
+          code: 'GOOGLE_ALREADY_LINKED',
+          message:
+            'A Google account is already linked. Reload your account or contact your manager.',
+        });
       }
       throw error;
     }
@@ -270,7 +285,11 @@ export class AuthService {
         data: { googleSubject: null },
       });
       if (updated.count !== 1) {
-        throw new BadRequestException('Google account link changed.');
+        throw new BadRequestException({
+          code: 'GOOGLE_LINK_CHANGED',
+          message:
+            'Google account linking changed. Reload your account before retrying.',
+        });
       }
       await tx.authSession.updateMany({
         where: { employeeId, revokedAt: null },
