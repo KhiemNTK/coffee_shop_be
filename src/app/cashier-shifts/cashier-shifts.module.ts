@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PaginationUtilModule } from '../../common/utils/pagination-util/pagination-util.module';
 import { BankReconciliationController } from './bank-reconciliation.controller';
 import { BankReconciliationService } from './bank-reconciliation.service';
+import { BankStatementExcelService } from './bank-statement-excel.service';
 import { CashHandoversController } from './cash-handovers.controller';
 import { CashHandoversService } from './cash-handovers.service';
 import { CashierShiftLedgerService } from './cashier-shift-ledger.service';
@@ -24,6 +25,7 @@ import { FundsService } from './funds.service';
     CashHandoversService,
     FundsService,
     BankReconciliationService,
+    BankStatementExcelService,
   ],
   exports: [CashierShiftLedgerService],
 })

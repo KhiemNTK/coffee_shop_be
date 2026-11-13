@@ -44,6 +44,23 @@ export interface VnpayApiResult {
   response: Record<string, string>;
 }
 
+export type VnpayApiFailureCode =
+  | 'VNPAY_NOT_CONFIGURED'
+  | 'VNPAY_API_TIMEOUT'
+  | 'VNPAY_API_NETWORK_ERROR'
+  | 'VNPAY_API_HTTP_ERROR'
+  | 'VNPAY_API_INVALID_PAYLOAD'
+  | 'VNPAY_API_SIGNATURE_MISSING'
+  | 'VNPAY_API_SIGNATURE_INVALID'
+  | 'VNPAY_API_RESPONSE_MISMATCH';
+
+export interface VnpayApiDiagnostics {
+  providerHttpStatus?: number;
+  providerResponseCode?: string;
+  verification?: 'missing' | 'invalid' | 'verified';
+  networkCode?: string;
+}
+
 export interface VnpayCallbackVerification {
   isValid: boolean;
   params: Record<string, string>;

@@ -65,7 +65,7 @@ describe('PaymentRefundsService', () => {
       create: jest.fn(),
       update: jest.fn(),
     },
-    paymentReconciliationIncident: { upsert: jest.fn() },
+    paymentReconciliationIncident: { upsert: jest.fn(), updateMany: jest.fn() },
     invoice: { updateMany: jest.fn() },
     actionLog: { create: jest.fn() },
   };
@@ -133,6 +133,123 @@ describe('PaymentRefundsService', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  describe('external refund verification', () => {
+    const review = {
+      ...refund,
+      status: PaymentRefundStatus.REQUIRES_REVIEW,
+      amount: new Prisma.Decimal('20000'),
+      paymentAttempt: {
+        ...refund.paymentAttempt,
+        provider: PaymentProvider.VNPAY,
+      },
+    };
+    const input = {
+      expectedUpdatedAt: refund.updatedAt.toISOString(),
+      expectedAmount: '20000',
+      outcome: 'SUCCEEDED' as const,
+      providerReference: 'VNP-REFUND-20',
+      evidenceReference: 'Provider support case CASE-123',
+      resolutionNote: 'Verified refund request and exact amount with provider.',
+    };
+    beforeEach(() => {
+      tx.paymentRefund.findUnique.mockReset().mockResolvedValue(review);
+      tx.paymentRefund.aggregate
+        .mockReset()
+        .mockResolvedValue({ _sum: { amount: review.amount } });
+      tx.paymentRefund.update.mockImplementation(
+        ({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ ...review, ...data }),
+      );
+    });
+    it('records a partial refund with the reviewing actor, audit and outbox without sending money', async () => {
+      const result = await service.reconcileRefund(
+        refund.id,
+        'reviewer-id',
+        input,
+      );
+      expect(result.status).toBe('SUCCEEDED');
+      expect(vnpay.refundTransaction).not.toHaveBeenCalled();
+      expect(tx.invoice.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { paymentStatus: 'PARTIALLY_REFUNDED' },
+        }),
+      );
+      expect(tx.actionLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            employeeId: 'reviewer-id',
+            actionType: 'PAYMENT_REFUND_MANUALLY_RECONCILED',
+            details: expect.objectContaining({
+              amount: '20000.00',
+              evidenceReference: input.evidenceReference,
+            }),
+          }),
+        }),
+      );
+      expect(tx.paymentReconciliationIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            paymentRefundId: refund.id,
+            type: { in: ['PROVIDER_UNAVAILABLE', 'REFUND_STATE_MISMATCH'] },
+          }),
+        }),
+      );
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        tx,
+        expect.objectContaining({ eventName: 'PAYMENT_REFUND_RECONCILED' }),
+      );
+    });
+    it('records confirmed failure without changing the paid invoice', async () => {
+      const result = await service.reconcileRefund(refund.id, 'reviewer-id', {
+        ...input,
+        outcome: 'FAILED',
+      });
+      expect(result.status).toBe('FAILED');
+      expect(tx.invoice.updateMany).not.toHaveBeenCalled();
+      expect(vnpay.refundTransaction).not.toHaveBeenCalled();
+    });
+    it.each([
+      ['self review', 'employee-id', input, review],
+      [
+        'stale version',
+        'reviewer-id',
+        { ...input, expectedUpdatedAt: '2000-01-01T00:00:00.000Z' },
+        review,
+      ],
+      [
+        'wrong amount',
+        'reviewer-id',
+        { ...input, expectedAmount: '100000' },
+        review,
+      ],
+      [
+        'closed refund',
+        'reviewer-id',
+        input,
+        { ...review, status: PaymentRefundStatus.SUCCEEDED },
+      ],
+    ])(
+      'rejects %s without a financial write',
+      async (_case, actor, body, current) => {
+        tx.paymentRefund.findUnique.mockResolvedValue(current);
+        await expect(
+          service.reconcileRefund(refund.id, actor, body),
+        ).rejects.toThrow();
+        expect(tx.paymentRefund.updateMany).not.toHaveBeenCalled();
+        expect(tx.invoice.updateMany).not.toHaveBeenCalled();
+        expect(vnpay.refundTransaction).not.toHaveBeenCalled();
+      },
+    );
+    it('fails closed when another reviewer wins the conditional claim', async () => {
+      tx.paymentRefund.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(
+        service.reconcileRefund(refund.id, 'reviewer-id', input),
+      ).rejects.toThrow(ConflictException);
+      expect(tx.invoice.updateMany).not.toHaveBeenCalled();
+      expect(tx.actionLog.create).not.toHaveBeenCalled();
+    });
+  });
 
   it('rejects MoMo refunds without sending a VNPay refund request', async () => {
     tx.paymentAttempt.findUnique.mockResolvedValue({

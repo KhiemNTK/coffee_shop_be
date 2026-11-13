@@ -28,6 +28,7 @@ import {
   GetPaymentIncidentsDto,
   GetPaymentRefundsDto,
   ResolvePaymentIncidentDto,
+  ReconcilePaymentRefundDto,
   PayosWebhookDto,
 } from './dto';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
@@ -109,6 +110,20 @@ export class PaymentsController {
   @RequirePermissions(PermissionKeys.PAYMENT_REFUNDS_READ)
   findRefund(@Param() { id }: IDDto) {
     return this.refundsService.findRefund(id);
+  }
+
+  @Post('payment-refunds/:id/reconcile')
+  @RequirePermissions(
+    PermissionKeys.PAYMENT_RECONCILIATION_MANAGE,
+    PermissionKeys.PAYMENT_REFUNDS_READ,
+  )
+  @Header('Cache-Control', 'no-store')
+  reconcileRefund(
+    @Param() { id }: IDDto,
+    @Employee('employeeId') employeeId: string,
+    @Body() dto: ReconcilePaymentRefundDto,
+  ) {
+    return this.refundsService.reconcileRefund(id, employeeId, dto);
   }
 
   @Post('payment-attempts/:id/reconcile')

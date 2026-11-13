@@ -1,11 +1,9 @@
 import { createHmac } from 'node:crypto';
-import {
-  BadGatewayException,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { VnpayService } from './vnpay.service';
+import { VnpayApiException } from './vnpay-api.exception';
 
 describe('VnpayService', () => {
   const hashSecret = 'sandbox-secret-123456789';
@@ -20,6 +18,12 @@ describe('VnpayService', () => {
     VNPAY_RETURN_URL: 'https://coffee.example.com/payment/vnpay/return',
   });
   const service = new VnpayService(config);
+  const queryInput = {
+    requestId: 'query-fixture',
+    merchantReference: 'PA123',
+    providerCreatedAt: new Date('2026-01-01T00:00:00Z'),
+    orderInfo: 'Query invoice INV-001',
+  };
 
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
@@ -194,8 +198,207 @@ describe('VnpayService', () => {
         providerCreatedAt: new Date('2026-01-01T00:00:00.000Z'),
         orderInfo: 'Query invoice INV-001',
       }),
-    ).rejects.toBeInstanceOf(BadGatewayException);
+    ).rejects.toMatchObject({ failureCode: 'VNPAY_API_SIGNATURE_INVALID' });
   });
+
+  it('reports missing API configuration without changing the 503 contract', () => {
+    const unconfigured = new VnpayService(new ConfigService({}));
+    try {
+      unconfigured.assertApiConfigured();
+      throw new Error('Expected missing configuration');
+    } catch (error) {
+      expect(error).toBeInstanceOf(VnpayApiException);
+      expect((error as VnpayApiException).getStatus()).toBe(503);
+      expect((error as VnpayApiException).failureCode).toBe(
+        'VNPAY_NOT_CONFIGURED',
+      );
+    }
+  });
+
+  it.each([
+    [
+      new DOMException('unsafe timeout message', 'TimeoutError'),
+      'VNPAY_API_TIMEOUT',
+      undefined,
+    ],
+    [
+      new TypeError('https://secret@example.test?api_key=never-log', {
+        cause: { code: 'ENOTFOUND', message: 'never-log' },
+      }),
+      'VNPAY_API_NETWORK_ERROR',
+      'ENOTFOUND',
+    ],
+    [
+      new TypeError('unsafe upstream error', {
+        cause: { code: 'UND_ERR_CONNECT_TIMEOUT' },
+      }),
+      'VNPAY_API_TIMEOUT',
+      'UND_ERR_CONNECT_TIMEOUT',
+    ],
+    [
+      new TypeError('never-log', { cause: { code: 'ENEVER_LOG_SECRET' } }),
+      'VNPAY_API_NETWORK_ERROR',
+      undefined,
+    ],
+  ])(
+    'classifies transport failures without retaining raw error messages: %s',
+    async (failure, code, networkCode) => {
+      const fetchMock = jest
+        .spyOn(global, 'fetch')
+        .mockRejectedValueOnce(failure);
+      const error: unknown = await service
+        .queryTransaction(queryInput)
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(VnpayApiException);
+      expect(error).toMatchObject({
+        failureCode: code,
+        diagnostics: { networkCode },
+      });
+      expect((error as VnpayApiException).isTransient).toBe(true);
+      expect(JSON.stringify(error)).not.toContain('never-log');
+      expect(JSON.stringify(error)).not.toContain('unsafe timeout');
+      expect(JSON.stringify(error)).not.toContain('ENEVER_LOG_SECRET');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('classifies a timeout while reading the response body', async () => {
+    const response = new Response('{}', { status: 200 });
+    jest
+      .spyOn(response, 'json')
+      .mockRejectedValueOnce(new DOMException('body timeout', 'TimeoutError'));
+    jest.spyOn(global, 'fetch').mockResolvedValueOnce(response);
+    await expect(service.queryTransaction(queryInput)).rejects.toMatchObject({
+      failureCode: 'VNPAY_API_TIMEOUT',
+      diagnostics: { providerHttpStatus: 200 },
+    });
+  });
+
+  it.each([
+    [429, true],
+    [503, true],
+    [400, false],
+  ])(
+    'classifies provider HTTP %s without exposing the body',
+    async (status, transient) => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(new Response('never-log-body', { status }));
+      const error: unknown = await service
+        .queryTransaction(queryInput)
+        .catch((error: unknown) => error);
+      expect(error).toMatchObject({
+        failureCode: 'VNPAY_API_HTTP_ERROR',
+        diagnostics: { providerHttpStatus: status },
+      });
+      expect((error as VnpayApiException).isTransient).toBe(transient);
+      expect(JSON.stringify(error)).not.toContain('never-log-body');
+    },
+  );
+
+  it.each([undefined, 'invalid-signature'])(
+    'distinguishes missing and invalid signatures: %s',
+    async (signature) => {
+      jest.spyOn(global, 'fetch').mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            vnp_ResponseCode: '02',
+            vnp_Message: 'never-log-provider-message',
+            ...(signature ? { vnp_SecureHash: signature } : {}),
+          }),
+          { status: 200 },
+        ),
+      );
+      const error: unknown = await service
+        .queryTransaction(queryInput)
+        .catch((error: unknown) => error);
+      expect(error).toMatchObject({
+        failureCode: signature
+          ? 'VNPAY_API_SIGNATURE_INVALID'
+          : 'VNPAY_API_SIGNATURE_MISSING',
+        diagnostics: {
+          providerHttpStatus: 200,
+          providerResponseCode: '02',
+          verification: signature ? 'invalid' : 'missing',
+        },
+      });
+      expect((error as VnpayApiException).isTransient).toBe(false);
+      expect(JSON.stringify(error)).not.toContain('never-log-provider-message');
+      expect(JSON.stringify(error)).not.toContain('invalid-signature');
+      expect(JSON.stringify(error)).not.toContain(hashSecret);
+    },
+  );
+
+  it.each([
+    '<html>private upstream failure</html>',
+    'null',
+    '[]',
+    '{"nested":{"token":"never-log"}}',
+  ])('rejects malformed provider payloads: %s', async (body) => {
+    jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const error: unknown = await service
+      .queryTransaction(queryInput)
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      failureCode: 'VNPAY_API_INVALID_PAYLOAD',
+      diagnostics: { providerHttpStatus: 200 },
+    });
+    expect(JSON.stringify(error)).not.toContain('private upstream');
+    expect(JSON.stringify(error)).not.toContain('never-log');
+  });
+
+  // Fixed vectors follow the QueryDr 2.1.0 contract, including empty promotion fields.
+  it.each([
+    [
+      'COFFEE01',
+      'ef1053087e75f4ed2f86bb6a0feb2c75983bb63b84aa736601cddfe3f7320ec8645c41f44274d7d9a9c92f07553a8919d50781edc7c860f0aafad81abf238f91',
+    ],
+    [
+      'OTHER',
+      'b56fed042b68611d5ca826b9f4f29bd47bc7def04eb6b9ed8e5959bae8b91112de3951499b61b2a4560973f4e5e5e315a63fe6a751a4be9b6278381ab15ead69',
+    ],
+  ])(
+    'checks signed contract fixtures for merchant %s',
+    async (tmnCode, signature) => {
+      const response = {
+        vnp_ResponseId: 'fixture-response',
+        vnp_Command: 'querydr',
+        vnp_ResponseCode: '00',
+        vnp_Message: 'Success',
+        vnp_TmnCode: tmnCode,
+        vnp_TxnRef: 'PA123',
+        vnp_Amount: '12550000',
+        vnp_BankCode: 'NCB',
+        vnp_PayDate: '20260101070500',
+        vnp_TransactionNo: '123456',
+        vnp_TransactionType: '01',
+        vnp_TransactionStatus: '00',
+        vnp_OrderInfo: 'Query invoice INV-001',
+      };
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ ...response, vnp_SecureHash: signature }),
+            { status: 200 },
+          ),
+        );
+      if (tmnCode === 'COFFEE01') {
+        await expect(
+          service.queryTransaction(queryInput),
+        ).resolves.toMatchObject({ response });
+      } else {
+        await expect(
+          service.queryTransaction(queryInput),
+        ).rejects.toMatchObject({
+          failureCode: 'VNPAY_API_RESPONSE_MISMATCH',
+          diagnostics: { verification: 'verified' },
+        });
+      }
+    },
+  );
 
   it('uses the VNPay refund transaction type and amount contract', async () => {
     const response = {

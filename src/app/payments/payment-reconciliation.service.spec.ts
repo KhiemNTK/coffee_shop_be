@@ -1,4 +1,4 @@
-import { BadGatewayException } from '@nestjs/common';
+import { BadGatewayException, Logger } from '@nestjs/common';
 import {
   PaymentAttemptStatus,
   PaymentProvider,
@@ -14,6 +14,11 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 import { VnpayService } from './vnpay.service';
 import { MomoService } from './momo.service';
 import type { PayosService } from './payos.service';
+import { VnpayApiException } from './vnpay-api.exception';
+import type {
+  VnpayApiFailureCode,
+  VnpayApiDiagnostics,
+} from '../../common/types';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
 
 describe('PaymentReconciliationService', () => {
@@ -63,8 +68,10 @@ describe('PaymentReconciliationService', () => {
   const prisma = {
     paymentAttempt: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       updateMany: jest.fn(),
     },
+    paymentRefund: { findMany: jest.fn() },
     paymentProviderRequest: { create: jest.fn(), update: jest.fn() },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
@@ -103,6 +110,7 @@ describe('PaymentReconciliationService', () => {
       })
       .mockResolvedValueOnce(attempt);
     prisma.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
+    prisma.paymentRefund.findMany.mockResolvedValue([]);
     prisma.paymentProviderRequest.create.mockResolvedValue({
       id: 'provider-request-id',
     });
@@ -123,6 +131,139 @@ describe('PaymentReconciliationService', () => {
         vnp_TransactionType: '01',
       },
     });
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each<[VnpayApiFailureCode, VnpayApiDiagnostics, number, 'warn' | 'error']>(
+    [
+      ['VNPAY_API_TIMEOUT', {}, 0, 'warn'],
+      ['VNPAY_API_NETWORK_ERROR', { networkCode: 'ENOTFOUND' }, 0, 'warn'],
+      [
+        'VNPAY_API_SIGNATURE_MISSING',
+        {
+          providerHttpStatus: 200,
+          providerResponseCode: '02',
+          verification: 'missing',
+        },
+        0,
+        'error',
+      ],
+      [
+        'VNPAY_API_SIGNATURE_INVALID',
+        { providerHttpStatus: 200, verification: 'invalid' },
+        0,
+        'error',
+      ],
+      ['VNPAY_NOT_CONFIGURED', {}, 0, 'error'],
+      ['VNPAY_API_TIMEOUT', {}, 4, 'error'],
+    ],
+  )(
+    'logs %s once at %s completed queries and keeps financial state safe',
+    async (code, diagnostics, count, level) => {
+      const pending = {
+        ...attempt,
+        status: PaymentAttemptStatus.PENDING,
+        reconciliationAttempts: count,
+      };
+      const state =
+        count >= 4
+          ? PaymentAttemptStatus.REQUIRES_REVIEW
+          : PaymentAttemptStatus.PENDING;
+      const nextReconcileAt = count >= 4 ? null : new Date(Date.now() + 60_000);
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      const error = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+      prisma.paymentAttempt.findMany.mockResolvedValue([
+        { id: attempt.id, provider: PaymentProvider.VNPAY },
+      ]);
+      prisma.paymentAttempt.findUnique.mockReset().mockResolvedValue(pending);
+      tx.paymentAttempt.findUnique.mockResolvedValue(pending);
+      tx.paymentAttempt.update.mockResolvedValue({
+        ...pending,
+        status: state,
+        reconciliationAttempts: count + 1,
+        nextReconcileAt,
+      });
+      vnpay.queryTransaction.mockRejectedValueOnce(
+        new VnpayApiException(code, diagnostics),
+      );
+
+      await expect(service.reconcileDue()).resolves.toEqual({
+        claimed: 1,
+        processed: 0,
+        failed: 1,
+      });
+
+      expect(warn.mock.calls.length + error.mock.calls.length).toBe(1);
+      expect((level === 'warn' ? warn : error).mock.calls[0]).toEqual([
+        expect.objectContaining({
+          event: 'payment.reconciliation.provider_failed',
+          provider: 'VNPAY',
+          paymentAttemptId: attempt.id,
+          providerRequestId: expect.any(String),
+          failureCode: code,
+          ...diagnostics,
+          durationMs: expect.any(Number),
+          reconciliationAttempts: count + 1,
+          status: state,
+          nextReconcileAt: nextReconcileAt?.toISOString() ?? null,
+        }),
+      ]);
+      expect(tx.paymentProviderRequest.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'FAILED',
+            errorMessage: expect.stringContaining(code),
+          }),
+        }),
+      );
+      const data = tx.paymentAttempt.update.mock.calls[0][0].data;
+      if (count < 4) expect(data).not.toHaveProperty('status');
+      else expect(data.status).toBe(PaymentAttemptStatus.REQUIRES_REVIEW);
+      expect(prisma.paymentProviderRequest.update).not.toHaveBeenCalled();
+      expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
+      expect(vnpay.queryTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('logs an unexpected persistence error instead of hiding it as an already-reported provider error', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const error = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    prisma.paymentAttempt.findMany.mockResolvedValue([
+      { id: attempt.id, provider: PaymentProvider.VNPAY },
+    ]);
+    prisma.paymentAttempt.findUnique.mockReset().mockResolvedValue(attempt);
+    vnpay.queryTransaction.mockRejectedValueOnce(
+      new VnpayApiException('VNPAY_API_TIMEOUT'),
+    );
+    tx.paymentProviderRequest.update.mockRejectedValueOnce(
+      new Error('storage unavailable'),
+    );
+    await expect(service.reconcileDue()).resolves.toEqual({
+      claimed: 1,
+      processed: 0,
+      failed: 1,
+    });
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'payment.reconciliation.failed',
+        provider: 'VNPAY',
+        paymentAttemptId: attempt.id,
+        failureCode: 'PAYMENT_RECONCILIATION_FAILED',
+      }),
+      expect.stringContaining('storage unavailable'),
+    );
+    expect(invoices.completeOnlinePayment).not.toHaveBeenCalled();
   });
 
   it.each([

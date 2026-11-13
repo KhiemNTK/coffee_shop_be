@@ -33,6 +33,7 @@ import { OutboxService } from '../durable/outbox.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { GetPaymentIncidentsDto, ResolvePaymentIncidentDto } from './dto';
 import { VnpayService } from './vnpay.service';
+import { VnpayApiException } from './vnpay-api.exception';
 import { MomoService } from './momo.service';
 import { PayosService, PAYOS_PAYMENT_NOTIFIED } from './payos.service';
 import { DomainEventBusService } from '../durable/domain-event-bus.service';
@@ -154,7 +155,7 @@ export class PaymentReconciliationService
       },
       orderBy: [{ nextReconcileAt: 'asc' }, { id: 'asc' }],
       take: BATCH_SIZE,
-      select: { id: true },
+      select: { id: true, provider: true },
     });
     let claimed = 0;
     let processed = 0;
@@ -163,18 +164,28 @@ export class PaymentReconciliationService
       const outcomes = await Promise.all(
         due
           .slice(offset, offset + RECONCILE_CONCURRENCY)
-          .map(async ({ id }) => {
+          .map(async ({ id, provider }) => {
             let isClaimed = false;
+            const startedAt = performance.now();
             try {
               isClaimed = await this.claimAttempt(id, true);
               if (!isClaimed) return 'SKIPPED';
               await this.queryProvider(id);
               return 'PROCESSED';
             } catch (error) {
-              this.logger.error(
-                `Payment reconciliation failed for attempt ${id}.`,
-                error instanceof Error ? error.stack : undefined,
-              );
+              // Typed provider failures are recorded once where their request context is available.
+              if (!isClaimed || !(error instanceof VnpayApiException)) {
+                this.logger.error(
+                  {
+                    event: 'payment.reconciliation.failed',
+                    provider,
+                    paymentAttemptId: id,
+                    failureCode: 'PAYMENT_RECONCILIATION_FAILED',
+                    durationMs: Math.round(performance.now() - startedAt),
+                  },
+                  error instanceof Error ? error.stack : undefined,
+                );
+              }
               return isClaimed ? 'FAILED' : 'CLAIM_FAILED';
             }
           }),
@@ -240,23 +251,100 @@ export class PaymentReconciliationService
       skip: paging.skip,
       take: paging.itemPerPage,
       orderBy: [{ detectedAt: 'desc' }, { id: 'desc' }],
-      include: {
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        title: true,
+        detectedAt: true,
+        paymentAttemptId: true,
+        paymentRefundId: true,
+        resolutionNote: true,
+        resolvedAt: true,
+        details: true,
         paymentAttempt: {
           select: {
             id: true,
+            provider: true,
             merchantReference: true,
             status: true,
             amount: true,
             invoiceId: true,
+            lastReconciledAt: true,
+            nextReconcileAt: true,
+            reconciliationAttempts: true,
+            invoice: { select: { invoiceNumber: true, paymentStatus: true } },
           },
         },
         paymentRefund: {
-          select: { id: true, status: true, amount: true },
+          select: {
+            id: true,
+            status: true,
+            amount: true,
+            updatedAt: true,
+            requestedById: true,
+            providerRequestId: true,
+            providerTransactionNo: true,
+          },
         },
         resolvedBy: { select: { id: true, fullName: true } },
       },
     });
-    return paging.format(incidents);
+    return paging.format(
+      incidents.map(({ details, ...incident }) => ({
+        ...incident,
+        diagnostics: this.incidentDiagnostics(details),
+      })),
+    );
+  }
+
+  private incidentDiagnostics(value: unknown) {
+    const object = (input: unknown): Record<string, unknown> =>
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : {};
+    const details = object(value);
+    const diagnostics = object(details.diagnostics);
+    const response = object(details.response);
+    const code = (input: unknown) =>
+      (typeof input === 'string' ||
+        (typeof input === 'number' && Number.isSafeInteger(input))) &&
+      /^[A-Z0-9_]{1,64}$/.test(String(input))
+        ? String(input)
+        : null;
+    const rawAmount =
+      response.vnp_Amount ?? response.amount ?? details.amountPaid;
+    const amount =
+      typeof rawAmount === 'string'
+        ? rawAmount
+        : typeof rawAmount === 'number' && Number.isSafeInteger(rawAmount)
+          ? String(rawAmount)
+          : '';
+    return {
+      reasonCode: code(details.mismatch),
+      failureCode: code(details.failureCode ?? diagnostics.failureCode),
+      responseCode: code(
+        details.responseCode ??
+          response.vnp_ResponseCode ??
+          diagnostics.providerResponseCode,
+      ),
+      transactionStatus: code(
+        details.transactionStatus ?? response.vnp_TransactionStatus,
+      ),
+      verification: ['missing', 'invalid', 'verified'].includes(
+        String(diagnostics.verification),
+      )
+        ? String(diagnostics.verification)
+        : null,
+      providerAmount: (response.vnp_Amount !== undefined
+        ? /^\d{1,18}$/
+        : /^\d{1,16}(?:\.\d{1,2})?$/
+      ).test(amount)
+        ? new Prisma.Decimal(amount)
+            .div(response.vnp_Amount !== undefined ? 100 : 1)
+            .toFixed(2)
+        : null,
+    };
   }
 
   async resolveIncident(
@@ -365,10 +453,36 @@ export class PaymentReconciliationService
       );
 
     let result: Awaited<ReturnType<VnpayService['queryTransaction']>>;
+    const startedAt = performance.now();
     try {
       result = await this.vnpay.queryTransaction(input);
     } catch (error) {
-      await this.recordQueryFailure(attempt, providerRequest.id, error);
+      const updated = await this.recordQueryFailure(
+        attempt,
+        providerRequest.id,
+        error,
+      );
+      if (error instanceof VnpayApiException) {
+        const log = {
+          event: 'payment.reconciliation.provider_failed',
+          provider: attempt.provider,
+          paymentAttemptId: attempt.id,
+          providerRequestId: requestId,
+          failureCode: error.failureCode,
+          ...error.diagnostics,
+          durationMs: Math.round(performance.now() - startedAt),
+          reconciliationAttempts: updated?.reconciliationAttempts,
+          status: updated?.status,
+          nextReconcileAt: updated?.nextReconcileAt?.toISOString() ?? null,
+        };
+        if (
+          error.isTransient &&
+          updated?.status !== PaymentAttemptStatus.REQUIRES_REVIEW
+        )
+          this.logger.warn(log);
+        else this.logger.error(log);
+        throw error;
+      }
       throw new BadGatewayException('VNPay reconciliation request failed.');
     }
     try {
@@ -881,8 +995,11 @@ export class PaymentReconciliationService
     providerRequestId: string,
     error: unknown,
   ) {
-    const message = this.errorMessage(error);
-    await runSerializableTransaction(this.prisma, async (tx) => {
+    const message =
+      error instanceof VnpayApiException
+        ? `${error.failureCode}: ${error.message}`
+        : this.errorMessage(error);
+    return runSerializableTransaction(this.prisma, async (tx) => {
       await tx.paymentProviderRequest.update({
         where: { id: providerRequestId },
         data: {
@@ -896,11 +1013,19 @@ export class PaymentReconciliationService
         include: ATTEMPT_INCLUDE,
       });
       if (!current) return;
-      await this.rescheduleOrReview(
+      return this.rescheduleOrReview(
         tx,
         current,
         PaymentReconciliationIncidentType.PROVIDER_UNAVAILABLE,
-        { error: message },
+        {
+          error: message,
+          ...(error instanceof VnpayApiException
+            ? {
+                failureCode: error.failureCode,
+                diagnostics: this.toJson(error.diagnostics),
+              }
+            : {}),
+        },
       );
     });
   }

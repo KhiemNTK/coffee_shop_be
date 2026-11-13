@@ -67,4 +67,36 @@ describe('Payment incident search', () => {
         .success,
     ).toBe(false);
   });
+
+  it('returns bounded diagnostic fields and the actual refund amount, not raw provider data', async () => {
+    incident.findMany.mockResolvedValue([
+      {
+        id: 'incident',
+        paymentAttempt: { provider: 'VNPAY', amount: '100000' },
+        paymentRefund: { amount: '20000', status: 'REQUIRES_REVIEW' },
+        details: {
+          mismatch: 'AMOUNT',
+          response: {
+            vnp_Amount: '2000000',
+            vnp_ResponseCode: '00',
+            vnp_SecureHash: 'never-return',
+            customerPhone: 'never-return',
+          },
+        },
+      },
+    ]);
+    const result = await service.findIncidents(
+      GetPaymentIncidentsDto.schema.parse({}),
+    );
+    expect(result.list[0]).toMatchObject({
+      paymentRefund: { amount: '20000' },
+      diagnostics: {
+        providerAmount: '20000.00',
+        reasonCode: 'AMOUNT',
+        responseCode: '00',
+      },
+    });
+    expect(result.list[0]).not.toHaveProperty('details');
+    expect(JSON.stringify(result)).not.toContain('never-return');
+  });
 });

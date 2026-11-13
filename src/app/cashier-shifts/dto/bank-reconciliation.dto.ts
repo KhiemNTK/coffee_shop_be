@@ -106,3 +106,64 @@ export class RegisterBankDepositDto extends createZodDto(
     evidenceReference: z.string().trim().min(1).max(500),
   }),
 ) {}
+
+const ColumnSchema = z.coerce.number().int().min(1).max(50).optional();
+export class PreviewBankStatementExcelDto extends createZodDto(
+  z
+    .object({
+      mode: z.enum(['COLUMNS', 'ENTRIES']).default('COLUMNS'),
+      fundId: z.uuid(),
+      sheet: z.coerce.number().int().min(1).max(5).default(1),
+      headerRow: z.coerce.number().int().min(1).max(1000).default(1),
+      firstRow: z.coerce.number().int().min(2).max(1001).optional(),
+      lastRow: z.coerce.number().int().min(2).max(1001).optional(),
+      externalIdColumn: ColumnSchema,
+      dateColumn: ColumnSchema,
+      creditColumn: ColumnSchema,
+      debitColumn: ColumnSchema,
+      referenceColumn: ColumnSchema,
+      descriptionColumn: ColumnSchema,
+      moneyFormat: z.enum(['PLAIN', 'VI', 'EN']).default('PLAIN'),
+      statementFrom: z.iso.datetime({ offset: true }).optional(),
+      statementTo: z.iso.datetime({ offset: true }).optional(),
+    })
+    .superRefine((value, ctx) => {
+      if (value.mode !== 'ENTRIES') return;
+      if (
+        !value.firstRow ||
+        !value.lastRow ||
+        value.firstRow <= value.headerRow ||
+        value.lastRow < value.firstRow ||
+        value.lastRow - value.firstRow >= 100
+      )
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Select up to 100 transaction rows after the header.',
+        });
+      if (
+        !value.externalIdColumn ||
+        !value.dateColumn ||
+        (!value.creditColumn && !value.debitColumn) ||
+        !value.statementFrom ||
+        !value.statementTo
+      )
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            'Select transaction ID, date, credit/debit columns and the statement period.',
+        });
+      const columns = [
+        value.externalIdColumn,
+        value.dateColumn,
+        value.creditColumn,
+        value.debitColumn,
+        value.referenceColumn,
+        value.descriptionColumn,
+      ].filter((column) => column !== undefined);
+      if (new Set(columns).size !== columns.length)
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Mapped columns must be distinct.',
+        });
+    }),
+) {}

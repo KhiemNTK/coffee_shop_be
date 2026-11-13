@@ -246,6 +246,15 @@ export class BankReconciliationService {
     return paging.format(entries);
   }
 
+  async findSummary(id: string) {
+    const found = await this.prisma.bankStatementImport.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!found) throw new NotFoundException('Bank statement import not found.');
+    return this.getSummary(id);
+  }
+
   async reconcile(importId: string, employeeId: string) {
     await assertActiveEmployee(this.prisma, employeeId);
     const statementImport = await this.prisma.bankStatementImport.findUnique({

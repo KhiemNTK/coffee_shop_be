@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -27,7 +28,11 @@ import { runSerializableTransaction } from '../../common/prisma/transaction.util
 import type { ExtendedPrismaTransactionClient } from '../../common/types';
 import { PaginationUtilService } from '../../common/utils/pagination-util/pagination-util.service';
 import { OutboxService } from '../durable/outbox.service';
-import { CreatePaymentRefundDto, GetPaymentRefundsDto } from './dto';
+import {
+  CreatePaymentRefundDto,
+  GetPaymentRefundsDto,
+  ReconcilePaymentRefundDto,
+} from './dto';
 import { VnpayService } from './vnpay.service';
 
 const RESERVED_REFUND_STATUSES = [
@@ -42,6 +47,7 @@ const REFUND_INCLUDE = {
   paymentAttempt: {
     select: {
       id: true,
+      provider: true,
       amount: true,
       merchantReference: true,
       providerCreatedAt: true,
@@ -244,6 +250,109 @@ export class PaymentRefundsService {
     return refund;
   }
 
+  async reconcileRefund(
+    id: string,
+    employeeId: string,
+    dto: ReconcilePaymentRefundDto,
+  ) {
+    return runSerializableTransaction(this.prisma, async (tx) => {
+      await assertActiveEmployee(tx, employeeId);
+      const refund = await tx.paymentRefund.findUnique({
+        where: { id },
+        include: REFUND_INCLUDE,
+      });
+      if (!refund) throw new NotFoundException('Payment refund not found.');
+      if (refund.requestedById === employeeId)
+        throw new ForbiddenException({
+          code: 'REFUND_SELF_RECONCILIATION',
+          message: 'Another employee must verify the refund evidence.',
+        });
+      if (
+        refund.paymentAttempt.provider !== PaymentProvider.VNPAY ||
+        refund.status !== PaymentRefundStatus.REQUIRES_REVIEW ||
+        refund.updatedAt.toISOString() !==
+          new Date(dto.expectedUpdatedAt).toISOString() ||
+        !refund.amount.equals(dto.expectedAmount)
+      )
+        throw new ConflictException({
+          code: 'REFUND_REVIEW_CHANGED',
+          message: 'Refund changed. Read its current state before reconciling.',
+        });
+
+      // This records externally verified evidence; it never submits another refund.
+      const claimed = await tx.paymentRefund.updateMany({
+        where: {
+          id,
+          status: PaymentRefundStatus.REQUIRES_REVIEW,
+          updatedAt: refund.updatedAt,
+        },
+        data: { reconciliationLockedAt: new Date() },
+      });
+      if (claimed.count !== 1)
+        throw new ConflictException({
+          code: 'REFUND_REVIEW_CHANGED',
+          message: 'Refund changed. Read its current state before reconciling.',
+        });
+      const updated =
+        dto.outcome === 'SUCCEEDED'
+          ? await this.completeSuccessfulRefund(
+              tx,
+              refund,
+              {
+                providerTransactionNo: dto.providerReference,
+                responseCode: null,
+                transactionStatus: null,
+                message: 'Manually reconciled against provider evidence.',
+              },
+              employeeId,
+            )
+          : await tx.paymentRefund.update({
+              where: { id },
+              data: {
+                status: PaymentRefundStatus.FAILED,
+                providerTransactionNo: dto.providerReference,
+                providerMessage:
+                  'Manually reconciled against provider evidence.',
+                lastError: null,
+                completedAt: new Date(),
+                reconciliationLockedAt: null,
+              },
+              include: REFUND_INCLUDE,
+            });
+      await tx.paymentReconciliationIncident.updateMany({
+        where: {
+          paymentRefundId: id,
+          status: PaymentReconciliationIncidentStatus.OPEN,
+          type: {
+            in: [
+              PaymentReconciliationIncidentType.PROVIDER_UNAVAILABLE,
+              PaymentReconciliationIncidentType.REFUND_STATE_MISMATCH,
+            ],
+          },
+        },
+        data: {
+          status: PaymentReconciliationIncidentStatus.RESOLVED,
+          resolvedAt: new Date(),
+          resolvedById: employeeId,
+          resolutionNote: dto.resolutionNote,
+        },
+      });
+      await this.log(tx, employeeId, 'PAYMENT_REFUND_MANUALLY_RECONCILED', {
+        paymentRefundId: id,
+        paymentAttemptId: refund.paymentAttemptId,
+        before: refund.status,
+        after: updated.status,
+        amount: refund.amount.toFixed(2),
+        providerRequestId: refund.providerRequestId,
+        providerReference: dto.providerReference,
+        evidenceReference: dto.evidenceReference,
+        resolutionNote: dto.resolutionNote,
+      });
+      await this.enqueue(tx, 'PAYMENT_REFUND_RECONCILED', updated);
+      return updated;
+    });
+  }
+
   async recoverPendingRefunds() {
     const refunds = await this.prisma.paymentRefund.findMany({
       where: {
@@ -388,7 +497,7 @@ export class PaymentRefundsService {
           ? new Date()
           : null;
       const updated = await tx.paymentRefund.update({
-        where: { id: refund.id },
+        where: { id: refund.id, status: refund.status },
         data: {
           status: outcome,
           providerTransactionNo,
@@ -420,10 +529,11 @@ export class PaymentRefundsService {
       transactionStatus: string | null;
       message: string | null;
     },
+    employeeId = refund.requestedById,
   ) {
     const completedAt = new Date();
     const updated = await tx.paymentRefund.update({
-      where: { id: refund.id },
+      where: { id: refund.id, status: refund.status },
       data: {
         status: PaymentRefundStatus.SUCCEEDED,
         providerTransactionNo: provider.providerTransactionNo,
@@ -431,6 +541,7 @@ export class PaymentRefundsService {
         providerTransactionStatus: provider.transactionStatus,
         providerMessage: provider.message,
         completedAt,
+        lastError: null,
         reconciliationLockedAt: null,
       },
       include: REFUND_INCLUDE,
@@ -469,7 +580,7 @@ export class PaymentRefundsService {
         refund,
       });
     }
-    await this.log(tx, refund.requestedById, 'PAYMENT_REFUND_SUCCEEDED', {
+    await this.log(tx, employeeId, 'PAYMENT_REFUND_SUCCEEDED', {
       paymentRefundId: refund.id,
       paymentAttemptId: refund.paymentAttemptId,
       invoiceId: refund.paymentAttempt.invoice.id,
@@ -509,7 +620,7 @@ export class PaymentRefundsService {
         refund,
       });
       const updated = await tx.paymentRefund.update({
-        where: { id: refund.id },
+        where: { id: refund.id, status: refund.status },
         data: {
           status: PaymentRefundStatus.REQUIRES_REVIEW,
           lastError: message,

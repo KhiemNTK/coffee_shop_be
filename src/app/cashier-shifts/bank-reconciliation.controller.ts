@@ -1,15 +1,27 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Post,
+  Query,
+  UploadedFile,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { Employee } from '../../common/decorators/employee.decorator';
 import { IDDto } from '../../common/dto/param.dto';
 import { RequirePermissions } from '../authorization/authorization.decorator';
 import { BankReconciliationService } from './bank-reconciliation.service';
+import { BankStatementExcelService } from './bank-statement-excel.service';
+import { ImportExcel } from '../../common/utils/excel-util/excel-util.decorator';
 import {
   CreateBankStatementImportDto,
   GetBankStatementEntriesDto,
   GetBankStatementImportsDto,
   IgnoreBankStatementEntryDto,
+  PreviewBankStatementExcelDto,
 } from './dto';
 
 @ApiTags('Bank Reconciliation')
@@ -17,7 +29,19 @@ import {
 export class BankReconciliationController {
   constructor(
     private readonly bankReconciliationService: BankReconciliationService,
+    private readonly bankStatementExcel: BankStatementExcelService,
   ) {}
+
+  @Post('imports/preview-excel')
+  @RequirePermissions(PermissionKeys.BANK_RECONCILIATION_IMPORT)
+  @ImportExcel()
+  @Header('Cache-Control', 'no-store')
+  previewExcel(
+    @UploadedFile() file: Express.Multer.File,
+    @Query() query: PreviewBankStatementExcelDto,
+  ) {
+    return this.bankStatementExcel.preview(file, query);
+  }
 
   @Post('imports')
   @RequirePermissions(PermissionKeys.BANK_RECONCILIATION_IMPORT)
@@ -56,6 +80,12 @@ export class BankReconciliationController {
     @Employee('employeeId') employeeId: string,
   ) {
     return this.bankReconciliationService.reconcile(id, employeeId);
+  }
+
+  @Get('imports/:id/summary')
+  @RequirePermissions(PermissionKeys.BANK_RECONCILIATION_READ)
+  findSummary(@Param() { id }: IDDto) {
+    return this.bankReconciliationService.findSummary(id);
   }
 
   @Get('entries')

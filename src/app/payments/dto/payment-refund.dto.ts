@@ -36,6 +36,24 @@ export class GetPaymentRefundsDto extends createZodDto(
   }),
 ) {}
 
+export class ReconcilePaymentRefundDto extends createZodDto(
+  z
+    .object({
+      expectedUpdatedAt: z.iso.datetime({ offset: true }),
+      expectedAmount: MoneySchema,
+      outcome: z.enum(['SUCCEEDED', 'FAILED']),
+      providerReference: z
+        .string()
+        .trim()
+        .min(3)
+        .max(100)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
+      evidenceReference: z.string().trim().min(10).max(500),
+      resolutionNote: z.string().trim().min(10).max(500),
+    })
+    .strict(),
+) {}
+
 export class GetPaymentIncidentsDto extends createZodDto(
   z.object({
     ...PaginationSchema,

@@ -397,9 +397,10 @@ export class CashierShiftsService {
           },
         });
         if (pendingExpenseRequests > 0) {
-          throw new ConflictException(
-            'Cannot close a shift with pending expense requests.',
-          );
+          throw new ConflictException({
+            code: 'SHIFT_CLOSE_PENDING_EXPENSES',
+            message: 'Cannot close a shift with pending expense requests.',
+          });
         }
         const pendingPaymentAttempts = await tx.paymentAttempt.count({
           where: {
@@ -410,17 +411,19 @@ export class CashierShiftsService {
           },
         });
         if (pendingPaymentAttempts > 0) {
-          throw new ConflictException(
-            'Cannot close a shift with unresolved online payments.',
-          );
+          throw new ConflictException({
+            code: 'SHIFT_CLOSE_PENDING_PAYMENTS',
+            message: 'Cannot close a shift with unresolved online payments.',
+          });
         }
         const activeSessions = await tx.orderSession.count({
           where: { shiftId: shift.id, sessionStatus: SessionStatus.ACTIVE },
         });
         if (activeSessions > 0) {
-          throw new ConflictException(
-            'Cannot close a shift with active order sessions.',
-          );
+          throw new ConflictException({
+            code: 'SHIFT_CLOSE_ACTIVE_SESSIONS',
+            message: 'Cannot close a shift with active order sessions.',
+          });
         }
 
         const reconciliation = await this.calculateReconciliation(tx, shift);
@@ -437,9 +440,10 @@ export class CashierShiftsService {
           difference.abs().gte(noteThreshold) &&
           !dto.closingNote
         ) {
-          throw new BadRequestException(
-            'A closing note is required for this cash discrepancy.',
-          );
+          throw new BadRequestException({
+            code: 'SHIFT_CLOSING_NOTE_REQUIRED',
+            message: 'A closing note is required for this cash discrepancy.',
+          });
         }
         const closedAt = new Date();
         const closed = await tx.cashierShift.updateMany({

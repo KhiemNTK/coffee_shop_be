@@ -57,9 +57,13 @@ function checkAddress(address: string) {
   );
   checkIndex(String(column), limits.columns, 'column');
   checkIndex(match[2], limits.rows + 1, 'row');
+  return { column, row: Number(match[2]) };
 }
 
-export async function validateExcelArchive(buffer: Buffer) {
+export async function validateExcelArchive(
+  buffer: Buffer,
+  allowMergedCells = false,
+) {
   // Bound ZIP directory allocation before the library reads any entries.
   const end = buffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
   if (
@@ -142,7 +146,21 @@ export async function validateExcelArchive(buffer: Buffer) {
       } else if (tag === 'dimension') {
         attributes.ref.split(':').forEach(checkAddress);
       } else if (tag === 'mergeCell') {
-        reject('Excel merged cells are not supported for import.');
+        if (!allowMergedCells)
+          reject('Excel merged cells are not supported for import.');
+        const range = attributes.ref.split(':').map(checkAddress);
+        if (
+          range.length !== 2 ||
+          range[1].column < range[0].column ||
+          range[1].row < range[0].row
+        )
+          reject('Excel merged range is not valid.');
+        // ExcelJS expands merged ranges even when few cells exist in the XML.
+        cells +=
+          (range[1].column - range[0].column + 1) *
+          (range[1].row - range[0].row + 1);
+        if (cells > limits.cells)
+          reject(`Excel cell limit (${limits.cells}) exceeded.`);
       }
     });
 

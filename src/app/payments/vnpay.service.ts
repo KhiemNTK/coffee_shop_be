@@ -1,9 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import {
-  BadGatewayException,
-  Injectable,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   PaymentCallbackQuery,
@@ -13,9 +9,28 @@ import type {
   VnpayQueryInput,
   VnpayRefundInput,
 } from '../../common/types';
+import { VnpayApiException } from './vnpay-api.exception';
 
 const VNPAY_VERSION = '2.1.0';
 const VIETNAM_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
+const NETWORK_ERROR_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
 
 @Injectable()
 export class VnpayService {
@@ -231,9 +246,7 @@ export class VnpayService {
     const serverIp = this.config.get<string>('VNPAY_SERVER_IP');
     const timeoutMs = this.config.get<number>('VNPAY_API_TIMEOUT_MS', 5_000);
     if (!tmnCode || !hashSecret || !apiUrl || !serverIp) {
-      throw new ServiceUnavailableException(
-        'VNPay reconciliation API is not configured for this environment.',
-      );
+      throw new VnpayApiException('VNPAY_NOT_CONFIGURED');
     }
     return { tmnCode, hashSecret, apiUrl, serverIp, timeoutMs };
   }
@@ -256,54 +269,119 @@ export class VnpayService {
       ),
     };
     let response: Response;
+    const timeout = AbortSignal.timeout(timeoutMs);
     try {
       response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: timeout,
       });
-    } catch {
-      throw new BadGatewayException('VNPay API request failed.');
+    } catch (error) {
+      throw this.transportError(error, timeout);
     }
     if (!response.ok) {
-      throw new BadGatewayException(
-        `VNPay API returned HTTP ${response.status}.`,
-      );
+      throw new VnpayApiException('VNPAY_API_HTTP_ERROR', {
+        providerHttpStatus: response.status,
+      });
     }
 
-    const payload: unknown = await response.json().catch(() => null);
-    const normalized = this.normalizeApiResponse(payload);
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'name' in error &&
+        error.name === 'SyntaxError'
+      )
+        throw new VnpayApiException('VNPAY_API_INVALID_PAYLOAD', {
+          providerHttpStatus: response.status,
+        });
+      throw this.transportError(error, timeout, response.status);
+    }
+    const normalized = this.normalizeApiResponse(payload, response.status);
+    // Unverified response codes are diagnostic only, never a payment result.
+    const diagnostics = {
+      providerHttpStatus: response.status,
+      providerResponseCode: /^\d{2}$/.test(normalized.vnp_ResponseCode ?? '')
+        ? normalized.vnp_ResponseCode
+        : undefined,
+    };
     const receivedHash = normalized.vnp_SecureHash;
+    if (!receivedHash)
+      throw new VnpayApiException('VNPAY_API_SIGNATURE_MISSING', {
+        ...diagnostics,
+        verification: 'missing',
+      });
     if (
-      !receivedHash ||
       !this.safeEqual(
         this.signFields(normalized, responseSignatureFields, hashSecret),
         receivedHash.toLowerCase(),
       )
     ) {
-      throw new BadGatewayException('VNPay API response signature is invalid.');
+      throw new VnpayApiException('VNPAY_API_SIGNATURE_INVALID', {
+        ...diagnostics,
+        verification: 'invalid',
+      });
     }
     if (
       normalized.vnp_TmnCode !== params.vnp_TmnCode ||
       normalized.vnp_Command !== params.vnp_Command
     ) {
-      throw new BadGatewayException(
-        'VNPay API response does not match the request.',
-      );
+      throw new VnpayApiException('VNPAY_API_RESPONSE_MISMATCH', {
+        ...diagnostics,
+        verification: 'verified',
+      });
     }
     delete normalized.vnp_SecureHash;
     return { request, response: normalized };
   }
 
-  private normalizeApiResponse(payload: unknown) {
+  private transportError(
+    error: unknown,
+    timeout: AbortSignal,
+    providerHttpStatus?: number,
+  ) {
+    const cause =
+      error && typeof error === 'object' && 'cause' in error
+        ? error.cause
+        : undefined;
+    const code =
+      cause && typeof cause === 'object' && 'code' in cause
+        ? cause.code
+        : undefined;
+    const networkCode =
+      typeof code === 'string' && NETWORK_ERROR_CODES.has(code)
+        ? code
+        : undefined;
+    return new VnpayApiException(
+      timeout.aborted ||
+        (error &&
+          typeof error === 'object' &&
+          'name' in error &&
+          error.name === 'TimeoutError') ||
+        networkCode === 'ETIMEDOUT' ||
+        networkCode?.endsWith('_TIMEOUT')
+        ? 'VNPAY_API_TIMEOUT'
+        : 'VNPAY_API_NETWORK_ERROR',
+      { providerHttpStatus, networkCode },
+    );
+  }
+
+  private normalizeApiResponse(payload: unknown, providerHttpStatus: number) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      throw new BadGatewayException('VNPay API returned an invalid payload.');
+      throw new VnpayApiException('VNPAY_API_INVALID_PAYLOAD', {
+        providerHttpStatus,
+      });
     }
     const normalized: Record<string, string> = {};
     for (const [key, value] of Object.entries(payload)) {
       if (typeof value !== 'string' && typeof value !== 'number') {
-        throw new BadGatewayException('VNPay API returned an invalid payload.');
+        throw new VnpayApiException('VNPAY_API_INVALID_PAYLOAD', {
+          providerHttpStatus,
+        });
       }
       normalized[key] = String(value);
     }

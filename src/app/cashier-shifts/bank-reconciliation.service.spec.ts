@@ -84,6 +84,14 @@ describe('BankReconciliationService', () => {
     });
   });
 
+  it('reads whole-statement totals without attempting settlement or changing balances', async () => {
+    const result = await service.findSummary('import-id');
+    expect(result.MATCHED).toEqual({ count: 1, amount: '80000' });
+    expect(result.UNMATCHED).toEqual({ count: 0, amount: '0' });
+    expect(cashHandoversService.settleInTransaction).not.toHaveBeenCalled();
+    expect(prisma.actionLog.create).not.toHaveBeenCalled();
+  });
+
   const statement = {
     fundId: 'bank-fund-id',
     sourceFileName: 'bank.json',

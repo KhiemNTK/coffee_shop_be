@@ -291,7 +291,9 @@ describe('CashierShiftsService', () => {
         ...targetedCommand,
         reportedEndingCash: '0',
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      response: { code: 'SHIFT_CLOSE_ACTIVE_SESSIONS' },
+    });
 
     expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
   });
@@ -305,7 +307,9 @@ describe('CashierShiftsService', () => {
         ...targetedCommand,
         reportedEndingCash: '0',
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      response: { code: 'SHIFT_CLOSE_PENDING_EXPENSES' },
+    });
 
     expect(tx.orderSession.count).not.toHaveBeenCalled();
   });
@@ -319,7 +323,9 @@ describe('CashierShiftsService', () => {
         ...targetedCommand,
         reportedEndingCash: '0',
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      response: { code: 'SHIFT_CLOSE_PENDING_PAYMENTS' },
+    });
 
     expect(tx.orderSession.count).not.toHaveBeenCalled();
     expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
@@ -340,7 +346,9 @@ describe('CashierShiftsService', () => {
         ...targetedCommand,
         reportedEndingCash: '95000',
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toMatchObject({
+      response: { code: 'SHIFT_CLOSING_NOTE_REQUIRED' },
+    });
 
     expect(tx.cashierShift.updateMany).not.toHaveBeenCalled();
   });

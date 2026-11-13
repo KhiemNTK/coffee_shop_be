@@ -6,6 +6,7 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { ValueType, Workbook } from 'exceljs';
 import { createRequire } from 'node:module';
 import { EXCEL_IMPORT_LIMITS } from './excel-import-limits';
+import { validateExcelArchive } from './excel-import-guard';
 import type { File } from './dto/excel-util.interface';
 
 describe('ExcelUtilService', () => {
@@ -325,6 +326,22 @@ describe('Excel import archive bounds', () => {
     });
     await expectEarlyRejection(file, 'row limit');
   });
+
+  it.each([
+    ['A1:XFD1048576', 'column limit'],
+    ['A1:AX1001', 'cell limit'],
+    ['F1:A1', 'merged range'],
+  ])(
+    'bounds %s even when bank statement title merges are allowed',
+    async (range, message) => {
+      const file = await archiveFile({
+        'xl/worksheets/sheet1.xml': `<worksheet><mergeCell ref="${range}"/></worksheet>`,
+      });
+      await expect(validateExcelArchive(file.buffer, true)).rejects.toThrow(
+        message,
+      );
+    },
+  );
 
   it('rejects workbook named ranges before their cells can be expanded', async () => {
     const file = await archiveFile({
