@@ -44,6 +44,9 @@ import { SystemSettingsController } from '../system-settings/system-settings.con
 import { REQUIRED_PERMISSIONS_KEY } from './authorization.decorator';
 import { PermissionKeys } from '../../common/consts/permission-keys';
 import { isSystemPermissionKey } from '../../common/consts/permission-catalog';
+import { VoucherCampaignsController } from '../vouchers/voucher-campaigns.controller';
+import { VoucherGrantsController } from '../vouchers/voucher-grants.controller';
+import { CustomerVouchersController } from '../vouchers/customer-vouchers.controller';
 
 const controllers = [
   AppController,
@@ -51,6 +54,9 @@ const controllers = [
   AuthController,
   CustomersController,
   CustomerOrdersController,
+  VoucherCampaignsController,
+  VoucherGrantsController,
+  CustomerVouchersController,
   BankReconciliationController,
   CashHandoversController,
   CashierShiftsController,
@@ -147,6 +153,9 @@ describe('Route authorization policy coverage', () => {
     ]);
   });
   it('requires customer authentication on every private customer route', () => {
+    expect(
+      Reflect.getMetadata(GUARDS_METADATA, CustomerVouchersController),
+    ).toContain(CustomerGuard);
     expect(
       Reflect.getMetadata(GUARDS_METADATA, CustomerOrdersController),
     ).toContain(CustomerGuard);

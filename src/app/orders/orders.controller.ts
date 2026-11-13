@@ -225,11 +225,11 @@ export class OrdersController {
 
   @Post('items/:id/handoff')
   @RequirePermissions(PermissionKeys.ORDERS_ITEMS_HANDOFF)
-  handoffTakeawayItem(
+  handoffItem(
     @Param() { id }: IDDto,
     @Employee('employeeId') employeeId: string,
   ) {
-    return this.ordersService.handoffTakeawayItem(id, employeeId);
+    return this.ordersService.handoffItem(id, employeeId);
   }
 
   @Patch('items/:id/cancel')

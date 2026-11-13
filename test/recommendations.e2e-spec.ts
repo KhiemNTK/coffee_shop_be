@@ -339,6 +339,7 @@ describe('Online item recommendations (e2e)', () => {
         pickupName: 'Test only',
         phoneNumber: '0901234567',
         quotedSubtotal: 35_000,
+        quotedTotal: 35_000,
         expiresAt: new Date(Date.now() + 60_000),
         status: OnlineOrderStatus.ACCEPTED,
         reviewedAt: new Date(),
@@ -377,6 +378,7 @@ describe('Online item recommendations (e2e)', () => {
         pickupName: 'Late test',
         phoneNumber: '0901234567',
         quotedSubtotal: 25_000,
+        quotedTotal: 25_000,
         expiresAt: new Date(Date.now() + 60_000),
       },
     });
@@ -413,6 +415,7 @@ describe('Online item recommendations (e2e)', () => {
           pickupName: 'Refund metrics test',
           phoneNumber: '0901234567',
           quotedSubtotal: 35_000,
+          quotedTotal: 35_000,
           expiresAt: new Date(Date.now() + 60_000),
           status: OnlineOrderStatus.ACCEPTED,
           reviewedAt: new Date(),

@@ -103,6 +103,9 @@ describe('Position and print reliability (isolated PostgreSQL)', () => {
       {} as never,
       {} as never,
       printing,
+      {
+        releaseInTransaction: () => Promise.resolve({ released: false }),
+      } as never,
     );
     const position = await db.position.create({
       data: { name: `Actor ${suffix}`, salary: 0 },
@@ -587,6 +590,7 @@ describe('Position and print reliability (isolated PostgreSQL)', () => {
           pickupName: 'Isolated fixture',
           phoneNumber: '0900000000',
           quotedSubtotal: 50000,
+          quotedTotal: 50000,
           expiresAt: new Date(Date.now() + 300_000),
           orderSessionId: fixture.session.id,
           status: 'ACCEPTED',

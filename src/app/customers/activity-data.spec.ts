@@ -49,6 +49,14 @@ describe('Local activity seed', () => {
     expect(first.start.toISOString()).toBe('2005-03-01T17:00:00.000Z');
     expect(first.end.toISOString()).toBe('2005-03-31T17:00:00.000Z');
     expect(first.employee.isActive).toBe(false);
+    expect(first.employee.fullName).toBe('Nguyễn Minh Anh');
+    expect(
+      first.data.requests.every((request) =>
+        /^(Nguyễn Minh Anh|Trần Thanh Hà|Vũ Quốc Bảo|Phạm Bảo Ngọc|Lê Hoàng Nam|Nguyễn Gia Hân|Trần Đức Minh|Đỗ Thảo Linh|Phạm Hải Đăng|Lê Kim Ngân)$/.test(
+          request.pickupName,
+        ),
+      ),
+    ).toBe(true);
     expect(
       first.data.customers.every((r) => r.email.endsWith('.example.test')),
     ).toBe(true);

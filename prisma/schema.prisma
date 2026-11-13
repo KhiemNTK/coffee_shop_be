@@ -39,6 +39,23 @@ enum OnlineOrderStatus {
   CANCELLED
 }
 
+enum VoucherCampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+}
+
+enum CustomerVoucherSource {
+  CLAIM
+  GIFT
+}
+
+enum VoucherRedemptionStatus {
+  RESERVED
+  REDEEMED
+  RELEASED
+}
+
 enum ServeStatus {
   PENDING
   COOKING
@@ -444,6 +461,7 @@ model Customer {
   sessions      CustomerSession[]
   wishlist      CustomerWishlist[]
   onlineOrders  OnlineOrderRequest[]
+  vouchers      CustomerVoucher[]
 }
 
 model CustomerSession {
@@ -532,6 +550,80 @@ model Promotion {
   @@index([discountType])
   @@index([createdAt])
   @@index([name])
+}
+
+model VoucherCampaign {
+  id            String                @id @default(uuid())
+  name          String                @db.VarChar(120)
+  description   String?               @db.VarChar(500)
+  isPublic      Boolean               @default(false)
+  status        VoucherCampaignStatus @default(DRAFT)
+  discountType  DiscountType
+  discountValue Decimal               @db.Decimal(18, 2)
+  maxDiscount   Decimal?              @db.Decimal(18, 2)
+  minSubtotal   Decimal               @db.Decimal(18, 2)
+  startDate     DateTime
+  endDate       DateTime
+  issuanceLimit Int
+  issuedCount   Int                   @default(0)
+  publishedAt   DateTime?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  vouchers      CustomerVoucher[]
+
+  @@index([status, isPublic, startDate, endDate])
+  @@index([createdAt, id])
+}
+
+model CustomerVoucher {
+  id               String                @id @default(uuid())
+  campaignId       String
+  customerId       String
+  source           CustomerVoucherSource
+  sourceKey        String                @db.VarChar(80)
+  sourceOrderId    String?
+  issuedById       String?
+  reason           String?               @db.VarChar(500)
+  revokedAt        DateTime?
+  revokedById      String?
+  revocationReason String?               @db.VarChar(500)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  campaign         VoucherCampaign       @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+  customer         Customer              @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  sourceOrder      OnlineOrderRequest?   @relation("VoucherGiftSource", fields: [sourceOrderId], references: [id], onDelete: Restrict)
+  issuedBy         Employee?             @relation("VoucherIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict)
+  revokedBy        Employee?             @relation("VoucherRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  redemptions      VoucherRedemption[]
+
+  @@unique([campaignId, sourceKey])
+  @@index([customerId, createdAt, id])
+  @@index([sourceOrderId])
+  @@index([issuedById])
+  @@index([revokedById])
+}
+
+model VoucherRedemption {
+  id                   String                  @id @default(uuid())
+  customerVoucherId    String
+  onlineOrderRequestId String                  @unique
+  invoiceId            String?                 @unique
+  status               VoucherRedemptionStatus @default(RESERVED)
+  subTotal             Decimal                 @db.Decimal(18, 2)
+  discountAmount       Decimal                 @db.Decimal(18, 2)
+  totalAmount          Decimal                 @db.Decimal(18, 2)
+  discountSnapshot     Json
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  redeemedAt           DateTime?
+  releasedAt           DateTime?
+  releaseReason        String?                 @db.VarChar(100)
+  customerVoucher      CustomerVoucher         @relation(fields: [customerVoucherId], references: [id], onDelete: Restrict)
+  onlineOrderRequest   OnlineOrderRequest      @relation(fields: [onlineOrderRequestId], references: [id], onDelete: Restrict)
+  invoice              Invoice?                @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@index([customerVoucherId, createdAt])
+  @@index([status, createdAt])
 }
 
 model Unit {
@@ -660,6 +752,8 @@ model Employee {
   idempotencyRequests         IdempotencyRequest[]
   requestedPrintJobs          PrintJob[]                      @relation("PrintJobRequestedBy")
   dailySalesCloses            DailySalesClose[]
+  issuedVouchers              CustomerVoucher[]               @relation("VoucherIssuedBy")
+  revokedVouchers             CustomerVoucher[]               @relation("VoucherRevokedBy")
   resolvedTakeawayFeedbacks   TakeawayFeedback[]              @relation("TakeawayFeedbackResolvedBy")
   reviewedOnlineOrders        OnlineOrderRequest[]            @relation("OnlineOrderReviewedBy")
   menuImageUploads            MenuImageUpload[]
@@ -1168,6 +1262,8 @@ model OnlineOrderRequest {
   pickupName       String            @db.VarChar(80)
   phoneNumber      String            @db.VarChar(20)
   quotedSubtotal   Decimal           @db.Decimal(18, 2)
+  discountAmount   Decimal           @default(0) @db.Decimal(18, 2)
+  quotedTotal      Decimal           @db.Decimal(18, 2)
   pickupAt         DateTime?
   telegramChatId   String?           @db.VarChar(32)
   telegramLinkTokenHash String?       @unique @db.VarChar(64)
@@ -1192,6 +1288,8 @@ model OnlineOrderRequest {
   orderSession   OrderSession? @relation(fields: [orderSessionId], references: [id], onDelete: Restrict)
 
   items OnlineOrderRequestItem[]
+  voucherRedemption VoucherRedemption?
+  voucherGifts      CustomerVoucher[] @relation("VoucherGiftSource")
 
   @@index([status, expiresAt, id])
   @@index([status, createdAt, id])
@@ -1348,6 +1446,7 @@ model Invoice {
   printJobs       PrintJob[]
   takeawayFeedback TakeawayFeedback?
   cashRefunds      CashRefund[]
+  voucherRedemption VoucherRedemption?
 
   @@index([orderSessionId])
   @@index([employeeId])

@@ -195,6 +195,79 @@ describe('InvoicesService', () => {
     expect(ledger.requireOpenShift).not.toHaveBeenCalled();
   });
 
+  it('collects only the frozen voucher net and keeps the issued invoice snapshot', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      sessionStatus: SessionStatus.ACTIVE,
+      tableId: null,
+      onlineOrderRequest: { id: 'request-id' },
+    });
+    const voucher = {
+      voucherId: 'b70a82fa-839b-4a87-9b91-59edf019bce5',
+      campaignId: '09df1232-390b-40c5-9ff8-1770b18edf5d',
+      name: 'Frozen customer benefit',
+      discountType: 'FIXED_AMOUNT' as const,
+      discountValue: '5000.00',
+      maxDiscount: null,
+      minSubtotal: '10000.00',
+      startDate: '2026-01-01T00:00:00.000Z',
+      endDate: '2026-01-02T00:00:00.000Z',
+      discountAmount: '5000.00',
+      totalAmount: '40000.00',
+    };
+    await service.checkoutOnlinePickupInTransaction(
+      tx as never,
+      'employee-id',
+      'session-id',
+      '50000',
+      voucher,
+    );
+    const data = tx.invoice.create.mock.calls[0][0].data;
+    expect(data.subTotal.toFixed(2)).toBe('45000.00');
+    expect(data.discountAmount.toFixed(2)).toBe('5000.00');
+    expect(data.totalAmount.toFixed(2)).toBe('40000.00');
+    expect(data.changeAmount.toFixed(2)).toBe('10000.00');
+    expect(data.documentSnapshot.voucher).toEqual(voucher);
+    expect(data.promotionId).toBeNull();
+    expect(promotionCalculator.calculateDiscountTx).not.toHaveBeenCalled();
+    expect(ledger.recordCashInvoice).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({ amount: new Prisma.Decimal('40000') }),
+    );
+  });
+
+  it('rejects a voucher snapshot whose amount does not match the order', async () => {
+    tx.orderSession.findUnique.mockResolvedValue({
+      id: 'session-id',
+      sessionStatus: SessionStatus.ACTIVE,
+      tableId: null,
+      onlineOrderRequest: { id: 'request-id' },
+    });
+    await expect(
+      service.checkoutOnlinePickupInTransaction(
+        tx as never,
+        'employee-id',
+        'session-id',
+        '50000',
+        {
+          voucherId: 'b70a82fa-839b-4a87-9b91-59edf019bce5',
+          campaignId: '09df1232-390b-40c5-9ff8-1770b18edf5d',
+          name: 'Invalid amount',
+          discountType: 'FIXED_AMOUNT',
+          discountValue: '5000.00',
+          maxDiscount: null,
+          minSubtotal: '10000.00',
+          startDate: '2026-01-01T00:00:00.000Z',
+          endDate: '2026-01-02T00:00:00.000Z',
+          discountAmount: '5000.00',
+          totalAmount: '1.00',
+        },
+      ),
+    ).rejects.toThrow('Stored voucher pricing does not match this order.');
+    expect(tx.invoice.create).not.toHaveBeenCalled();
+    expect(ledger.recordCashInvoice).not.toHaveBeenCalled();
+  });
+
   it('keeps dine-in occupied even when all items are paid', async () => {
     tx.orderSession.findUnique.mockResolvedValue({
       id: 'session-id',

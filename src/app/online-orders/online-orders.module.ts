@@ -10,6 +10,7 @@ import { OnlineOrdersService } from './online-orders.service';
 import { OnlineOrderIntakeService } from './online-order-intake.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
 import { TelegramDeliveryService } from './telegram-delivery.service';
+import { VouchersModule } from '../vouchers/vouchers.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { TelegramDeliveryService } from './telegram-delivery.service';
     TurnstileModule,
     PrintingModule,
     PaginationUtilModule,
+    VouchersModule,
   ],
   controllers: [OnlineOrdersController],
   providers: [

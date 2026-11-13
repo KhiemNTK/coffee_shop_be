@@ -111,7 +111,7 @@ export function buildActivityPlan(
   };
   const date = (time: number) => new Date(time);
   const actorId = id('cashier');
-  const actorName = 'Nguyen Minh Anh';
+  const actorName = 'Nguyễn Minh Anh';
   const fundId = id('fund');
   const supplierId = id('supplier');
   const data = {
@@ -156,16 +156,16 @@ export function buildActivityPlan(
     });
   };
   const names = [
-    'Minh Anh',
-    'Thanh Ha',
-    'Quoc Bao',
-    'Bao Ngoc',
-    'Hoang Nam',
-    'Gia Han',
-    'Duc Minh',
-    'Thao Linh',
-    'Hai Dang',
-    'Kim Ngan',
+    'Nguyễn Minh Anh',
+    'Trần Thanh Hà',
+    'Vũ Quốc Bảo',
+    'Phạm Bảo Ngọc',
+    'Lê Hoàng Nam',
+    'Nguyễn Gia Hân',
+    'Trần Đức Minh',
+    'Đỗ Thảo Linh',
+    'Phạm Hải Đăng',
+    'Lê Kim Ngân',
   ];
   for (let i = 0; i < CUSTOMER_COUNT; i++) {
     const customerId = id(`customer:${i}`);
@@ -386,6 +386,7 @@ export function buildActivityPlan(
           phoneNumber: '0900000000',
           customerId: data.customers[order.customer].id,
           quotedSubtotal: subtotal,
+          quotedTotal: subtotal,
           status:
             order.outcome === 'REJECTED'
               ? 'REJECTED'
@@ -795,7 +796,7 @@ export async function seedActivity(
       await tx.fund.create({
         data: {
           id: plan.fundId,
-          name: 'Quy thu ngan 02',
+          name: 'Quỹ thu ngân 02',
           type: 'CASH',
           balance: plan.balance,
           createdAt: plan.start,
@@ -805,7 +806,7 @@ export async function seedActivity(
         data: {
           id: plan.supplierId,
           code: 'CH-LOCAL-ACTIVITY',
-          name: 'Coffee Homes Supply',
+          name: 'Cung ứng nguyên liệu Coffee Homes',
           notes: SOURCE,
           createdAt: plan.start,
         },

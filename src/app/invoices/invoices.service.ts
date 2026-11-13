@@ -29,6 +29,7 @@ import type {
   PromotionCalculationResult,
   OrderEventBase,
   CreateInvoiceInput,
+  VoucherDiscountSnapshot,
 } from '../../common/types';
 import {
   MoneyInputSchema,
@@ -221,6 +222,7 @@ export class InvoicesService {
     employeeId: string,
     orderSessionId: string,
     amountTendered: string,
+    voucher?: VoucherDiscountSnapshot,
   ) {
     return this.createInvoiceInTransaction(
       tx,
@@ -234,6 +236,7 @@ export class InvoicesService {
         eventNames: [ORDER_EVENTS.INVOICE_CREATED, ORDER_EVENTS.INVOICE_PAID],
       },
       true,
+      voucher,
     );
   }
 
@@ -650,6 +653,7 @@ export class InvoicesService {
       >;
     },
     onlinePickup = false,
+    voucher?: VoucherDiscountSnapshot,
   ) {
     const employee = await tx.employee.findUnique({
       where: { id: employeeId },
@@ -688,6 +692,19 @@ export class InvoicesService {
     this.invoicePolicy.assertInvoiceItemsAreBillable(items);
 
     const subTotal = this.calculateSubTotal(items);
+    if (voucher && (!onlinePickup || input.promotionId))
+      throw new BadRequestException(
+        'A voucher cannot be combined with another promotion.',
+      );
+    if (
+      voucher &&
+      (new Decimal(voucher.discountAmount).lte(0) ||
+        new Decimal(voucher.totalAmount).lte(0) ||
+        !subTotal.minus(voucher.discountAmount).eq(voucher.totalAmount))
+    )
+      throw new ConflictException(
+        'Stored voucher pricing does not match this order.',
+      );
     const promotionCalculation = input.promotionId
       ? await this.promotionCalculatorService.calculateDiscountTx(tx, {
           promotionId: input.promotionId,
@@ -698,6 +715,9 @@ export class InvoicesService {
     const calculation = this.calculateInvoice({
       subTotal,
       promotionCalculation,
+      voucherDiscount: voucher
+        ? new Decimal(voucher.discountAmount)
+        : undefined,
       taxRate: input.taxRate,
       paymentStatus,
       paymentMethod,
@@ -745,6 +765,7 @@ export class InvoicesService {
           table: session.table,
           issuedByName: employee!.fullName,
           promotionName: promotionCalculation?.promotionName ?? null,
+          voucher,
           items,
         }),
       },
@@ -856,6 +877,7 @@ export class InvoicesService {
   private calculateInvoice({
     subTotal,
     promotionCalculation,
+    voucherDiscount,
     taxRate,
     paymentStatus,
     paymentMethod,
@@ -863,13 +885,14 @@ export class InvoicesService {
   }: {
     subTotal: Decimal;
     promotionCalculation: PromotionCalculationResult | null;
+    voucherDiscount?: Decimal;
     taxRate?: string | number;
     paymentStatus: PaymentStatus;
     paymentMethod: PaymentMethod;
     amountTendered?: string | number;
   }): InvoiceCalculationResult {
     const discountAmount =
-      promotionCalculation?.discountAmount ?? new Decimal(0);
+      voucherDiscount ?? promotionCalculation?.discountAmount ?? new Decimal(0);
     const parsedTaxRate = TaxRateInputSchema.safeParse(taxRate ?? 0);
     if (!parsedTaxRate.success)
       throw new BadRequestException(

@@ -12,6 +12,7 @@ import type { OrdersService } from '../orders/orders.service';
 import type { PrintingService } from '../printing/printing.service';
 import type { TurnstileService } from '../auth/turnstile.service';
 import { OnlineOrdersService } from './online-orders.service';
+import type { VouchersService } from '../vouchers/vouchers.service';
 import type { OnlineOrderIntakeService } from './online-order-intake.service';
 
 describe('OnlineOrdersService order access', () => {
@@ -49,6 +50,7 @@ describe('OnlineOrdersService order access', () => {
     {} as TurnstileService,
     {} as OnlineOrderIntakeService,
     {} as PrintingService,
+    {} as VouchersService,
   );
 
   beforeEach(() => jest.clearAllMocks());

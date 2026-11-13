@@ -618,7 +618,7 @@ export class OrdersService {
     return this.changeItemStatus(id, employeeId, serveStatus, false);
   }
 
-  handoffTakeawayItem(id: string, employeeId: string) {
+  handoffItem(id: string, employeeId: string) {
     return this.changeItemStatus(id, employeeId, ServeStatus.SERVED, true);
   }
 
@@ -871,18 +871,19 @@ export class OrdersService {
       }
       if (
         handoffOnly &&
-        (item.orderSession.tableId !== null ||
-          (item.serveStatus !== ServeStatus.READY &&
-            item.serveStatus !== ServeStatus.SERVED))
+        item.serveStatus !== ServeStatus.READY &&
+        item.serveStatus !== ServeStatus.SERVED
       ) {
-        throw new ConflictException('Takeaway item is not ready for handoff.');
+        throw new ConflictException('Order item is not ready for handoff.');
       }
       if (
-        serveStatus === ServeStatus.READY &&
-        item.orderSession.tableId !== null
+        serveStatus === ServeStatus.SERVED &&
+        item.orderSession.tableId !== null &&
+        item.serveStatus !== ServeStatus.READY &&
+        item.serveStatus !== ServeStatus.SERVED
       ) {
         throw new BadRequestException(
-          'READY handoff is only supported for takeaway orders.',
+          'Table items must be ready before delivery.',
         );
       }
 

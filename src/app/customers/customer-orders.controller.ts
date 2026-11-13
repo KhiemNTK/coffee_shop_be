@@ -27,6 +27,7 @@ import {
   CreateCustomerOrderDto,
   GetCustomerOrdersDto,
   RecoverCustomerOrderByKeyDto,
+  QuoteCustomerOrderDto,
 } from './customer.dto';
 
 @ApiTags('Customer Orders')
@@ -37,6 +38,19 @@ import {
 @UseGuards(CustomerGuard)
 export class CustomerOrdersController {
   constructor(private readonly onlineOrders: OnlineOrdersService) {}
+
+  @Post('quote')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  quote(@Req() request: CustomerRequest, @Body() dto: QuoteCustomerOrderDto) {
+    if (request.customer.id !== dto.expectedCustomerId)
+      throw new ConflictException({
+        code: 'CUSTOMER_SESSION_CHANGED',
+        message: 'Customer account changed. Reload before retrying.',
+      });
+    return this.onlineOrders.quoteCustomerBasket(request.customer.id, dto);
+  }
 
   @Post()
   @Header('Cache-Control', 'no-store')

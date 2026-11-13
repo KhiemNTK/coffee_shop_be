@@ -107,6 +107,10 @@ export const PermissionKeys = {
   PROMOTIONS_CREATE: '/promotions_create',
   PROMOTIONS_UPDATE: '/promotions_update',
   PROMOTIONS_DELETE: '/promotions_delete',
+  VOUCHERS_READ: '/vouchers_read',
+  VOUCHERS_MANAGE: '/vouchers_manage',
+  VOUCHERS_ISSUE: '/vouchers_issue',
+  VOUCHERS_REVOKE: '/vouchers_revoke',
 
   EQUIPMENT_READ: '/equipment_read',
   EQUIPMENT_CREATE: '/equipment_create',

@@ -11,6 +11,7 @@ import type { OrdersService } from '../orders/orders.service';
 import type { PrintingService } from '../printing/printing.service';
 import type { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OnlineOrdersService } from './online-orders.service';
+import type { VouchersService } from '../vouchers/vouchers.service';
 
 describe('Online order overdue and no-show policy', () => {
   const prisma = {
@@ -28,6 +29,7 @@ describe('Online order overdue and no-show policy', () => {
     {} as TurnstileService,
     {} as OnlineOrderIntakeService,
     {} as PrintingService,
+    {} as VouchersService,
   );
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-10-24T04:00:00Z'));

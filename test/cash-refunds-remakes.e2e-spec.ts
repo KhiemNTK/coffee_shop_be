@@ -225,7 +225,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     await orders.updateItemStatus(item.id, employee.id, {
       serveStatus: ServeStatus.READY,
     });
-    await orders.handoffTakeawayItem(item.id, employee.id);
+    await orders.handoffItem(item.id, employee.id);
     await db.$transaction((tx) =>
       ledger.recordCashInvoice(tx, {
         shift: { id: shift.id, fundId: fund.id },
@@ -612,7 +612,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     });
     const handoff = await orders.getHandoffItems({ page: 1, itemPerPage: 100 });
     expect(handoff.list.some((item) => item.id === replacementId)).toBe(true);
-    await orders.handoffTakeawayItem(replacementId, f.employee.id);
+    await orders.handoffItem(replacementId, f.employee.id);
     await prisma.inventoryWaste.updateMany({
       where: { orderItemId: f.item.id },
       data: { createdAt: f.from },
@@ -800,6 +800,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
         pickupName: 'Test pickup',
         phoneNumber: '0901234567',
         quotedSubtotal: 100,
+        quotedTotal: 100,
         requestHash: createHash('sha256').update(randomUUID()).digest('hex'),
         expiresAt: new Date(Date.now() + 60_000),
         status: 'ACCEPTED',
@@ -831,7 +832,7 @@ describe('Cash refunds and order remakes (real PostgreSQL)', () => {
     await orders.updateItemStatus(remake.replacementItemId, f.employee.id, {
       serveStatus: ServeStatus.READY,
     });
-    await orders.handoffTakeawayItem(remake.replacementItemId, f.employee.id);
+    await orders.handoffItem(remake.replacementItemId, f.employee.id);
     expect(
       (
         await prisma.orderItem.findUniqueOrThrow({

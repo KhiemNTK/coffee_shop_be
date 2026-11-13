@@ -31,6 +31,8 @@ import type {
   CustomerReorderSource,
   ExtendedPrismaTransactionClient,
   InventoryRequirement,
+  CustomerOrderVoucherInput,
+  VoucherDiscountSnapshot,
 } from '../../common/types';
 import { ONLINE_ORDER_NO_SHOW_GRACE_MS } from '../../common/consts/online-order-settings';
 import { TurnstileService } from '../auth/turnstile.service';
@@ -71,12 +73,21 @@ import {
 } from './telegram-events';
 import { onlineOrderAccessExpiresAt } from './online-order-access';
 import { fulfillmentWhere } from './fulfillment-where';
+import { VouchersService } from '../vouchers/vouchers.service';
+import { readVoucherSnapshot } from '../../common/validation/voucher-snapshot.schema';
 
 const REVIEW_WINDOW_MS = 30 * 60 * 1000;
 const REORDER_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 const CUSTOMER_CANCELLATION_REASON = 'Customer cancelled before preparation.';
 
+const voucherPriceSelect = {
+  discountAmount: true,
+  quotedTotal: true,
+  voucherRedemption: { select: { discountSnapshot: true } },
+} satisfies Prisma.OnlineOrderRequestSelect;
+
 const publicRequestSelect = {
+  ...voucherPriceSelect,
   id: true,
   requestHash: true,
   reorderNonce: true,
@@ -125,6 +136,7 @@ export class OnlineOrdersService {
     private readonly turnstile: TurnstileService,
     private readonly intake: OnlineOrderIntakeService,
     private readonly printing: PrintingService,
+    private readonly vouchers: VouchersService,
   ) {
     this.pickupSchedule = readPickupSchedule(config);
     this.telegramBotUsername = config.get<string>('TELEGRAM_BOT_USERNAME');
@@ -183,8 +195,36 @@ export class OnlineOrdersService {
     };
   }
 
+  async quoteCustomerBasket(
+    customerId: string,
+    dto: QuoteOnlineOrderDto & { voucherId?: string },
+  ) {
+    const quote = await this.quoteBasket(dto);
+    const voucher = dto.voucherId
+      ? await runSerializableTransaction(this.prisma, (tx) =>
+          this.vouchers.quoteInTransaction(tx, {
+            customerId,
+            voucherId: dto.voucherId!,
+            subTotal: new Prisma.Decimal(quote.subtotal),
+          }),
+        )
+      : null;
+    return {
+      ...quote,
+      discountAmount: voucher?.discountAmount ?? '0.00',
+      totalAmount: voucher?.totalAmount ?? quote.subtotal,
+      voucher,
+      quoteFingerprint: this.customerQuoteFingerprint(
+        customerId,
+        quote.items,
+        quote.subtotal,
+        voucher,
+      ),
+    };
+  }
+
   async createPublicRequest(
-    dto: CreateOnlineOrderDto,
+    dto: CreateOnlineOrderDto & CustomerOrderVoucherInput,
     ipAddress?: string,
     customerId?: string,
   ) {
@@ -197,6 +237,15 @@ export class OnlineOrdersService {
       select: publicRequestSelect,
     });
     if (existing) return this.replay(existing, requestHash, customerId);
+    if (dto.voucherId && !customerId)
+      throw new UnauthorizedException(
+        'Customer login is required to use a voucher.',
+      );
+    if (dto.voucherId && (!dto.expectedTotal || !dto.quoteFingerprint))
+      throw new ConflictException({
+        code: 'ONLINE_ORDER_QUOTE_CHANGED',
+        message: 'A voucher requires a confirmed quote.',
+      });
     await this.turnstile.verify(dto.turnstileToken, ipAddress, 'online_order');
     if (dto.pickupAt)
       assertPickupAt(dto.pickupAt, this.pickupSchedule, new Date());
@@ -261,7 +310,7 @@ export class OnlineOrdersService {
           )
             throw new UnauthorizedException('Customer is inactive.');
           await this.intake.assertAccepting(tx, Boolean(dto.pickupAt));
-          const request = await tx.onlineOrderRequest.create({
+          let request = await tx.onlineOrderRequest.create({
             data: {
               clientRequestId: dto.clientRequestId,
               requestHash,
@@ -270,12 +319,56 @@ export class OnlineOrdersService {
               pickupName: dto.pickupName,
               phoneNumber: dto.phoneNumber,
               quotedSubtotal,
+              quotedTotal: quotedSubtotal,
               pickupAt: dto.pickupAt,
               expiresAt: new Date(Date.now() + REVIEW_WINDOW_MS),
               items: { create: items },
             },
             select: publicRequestSelect,
           });
+          const voucher =
+            dto.voucherId && customerId
+              ? await this.vouchers.reserveInTransaction(tx, {
+                  customerId,
+                  voucherId: dto.voucherId,
+                  onlineOrderRequestId: request.id,
+                  subTotal: quotedSubtotal,
+                })
+              : null;
+          if (dto.voucherId && !voucher)
+            throw new UnauthorizedException(
+              'Customer login is required to use a voucher.',
+            );
+          const quotedTotal = voucher
+            ? new Prisma.Decimal(voucher.totalAmount)
+            : quotedSubtotal;
+          if (
+            (dto.expectedTotal !== undefined &&
+              !quotedTotal.eq(dto.expectedTotal)) ||
+            (dto.quoteFingerprint &&
+              dto.quoteFingerprint !==
+                this.customerQuoteFingerprint(
+                  customerId!,
+                  items.map((item) => ({
+                    menuItemId: item.menuItemId,
+                    quantity: item.quantity,
+                    unitPrice: item.quotedUnitPrice.toFixed(2),
+                    selectedOptions: readSelectedOptions(item.quotedOptions),
+                  })),
+                  quotedSubtotal.toFixed(2),
+                  voucher,
+                ))
+          )
+            throw new ConflictException({
+              code: 'ONLINE_ORDER_QUOTE_CHANGED',
+              message:
+                'Order quote changed. Review the price and voucher before confirming.',
+            });
+          if (voucher)
+            request = await tx.onlineOrderRequest.findUniqueOrThrow({
+              where: { id: request.id },
+              select: publicRequestSelect,
+            });
           if (this.telegramStaffChatId) {
             await this.outbox.enqueue(tx, {
               topic: 'order',
@@ -306,7 +399,10 @@ export class OnlineOrdersService {
     }
   }
 
-  async recoverPublicRequest(dto: CreateOnlineOrderDto, customerId?: string) {
+  async recoverPublicRequest(
+    dto: CreateOnlineOrderDto & CustomerOrderVoucherInput,
+    customerId?: string,
+  ) {
     return this.recoverByKey(
       {
         clientRequestId: dto.clientRequestId,
@@ -382,6 +478,7 @@ export class OnlineOrdersService {
       skip: paging.skip,
       take: paging.itemPerPage,
       select: {
+        ...voucherPriceSelect,
         id: true,
         status: true,
         createdAt: true,
@@ -392,8 +489,9 @@ export class OnlineOrdersService {
       },
     });
     return this.pagination.paging({ ...query, totalItems }).format(
-      list.map((row) => ({
+      list.map(({ voucherRedemption, ...row }) => ({
         ...row,
+        ...this.priceBreakdown({ ...row, voucherRedemption }),
         status:
           row.status === OnlineOrderStatus.PENDING &&
           row.expiresAt <= new Date()
@@ -411,6 +509,7 @@ export class OnlineOrdersService {
     const request = await this.prisma.onlineOrderRequest.findUnique({
       where: { id: requestId, ...(customerId ? { customerId } : {}) },
       select: {
+        ...voucherPriceSelect,
         id: true,
         status: true,
         createdAt: true,
@@ -483,6 +582,7 @@ export class OnlineOrdersService {
       cancellationReason: request.cancellationReason,
       noShowAt: request.noShowAt,
       quotedSubtotal: request.quotedSubtotal,
+      ...this.priceBreakdown(request),
       pickupAt: request.pickupAt,
       items: request.items,
       fulfillmentStatus,
@@ -785,14 +885,29 @@ export class OnlineOrdersService {
 
   async cancelPublicRequest({ requestId, accessToken }: OnlineOrderAccessDto) {
     this.assertAccess(requestId, accessToken);
-    const cancelled = await this.prisma.onlineOrderRequest.updateMany({
-      where: {
-        id: requestId,
-        status: OnlineOrderStatus.PENDING,
-        expiresAt: { gt: new Date() },
+    const cancelled = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const changed = await tx.onlineOrderRequest.updateMany({
+          where: {
+            id: requestId,
+            status: OnlineOrderStatus.PENDING,
+            expiresAt: { gt: new Date() },
+          },
+          data: {
+            status: OnlineOrderStatus.CANCELLED,
+            cancelledAt: new Date(),
+          },
+        });
+        if (changed.count === 1)
+          await this.vouchers.releaseInTransaction(
+            tx,
+            requestId,
+            'CUSTOMER_CANCELLED',
+          );
+        return changed;
       },
-      data: { status: OnlineOrderStatus.CANCELLED, cancelledAt: new Date() },
-    });
+    );
     if (cancelled.count === 1) {
       return { requestId, status: OnlineOrderStatus.CANCELLED };
     }
@@ -925,6 +1040,11 @@ export class OnlineOrdersService {
           tx,
           items.map((item) => item.id),
         );
+        await this.vouchers.releaseInTransaction(
+          tx,
+          requestId,
+          'CUSTOMER_CANCELLED',
+        );
         await this.enqueueCancellationEvents(
           tx,
           requestId,
@@ -951,6 +1071,8 @@ export class OnlineOrdersService {
         take: paging.itemPerPage,
         orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
         select: {
+          ...voucherPriceSelect,
+          customerId: true,
           id: true,
           pickupName: true,
           phoneNumber: true,
@@ -962,7 +1084,13 @@ export class OnlineOrdersService {
         },
       }),
     ]);
-    return this.pagination.paging({ ...query, totalItems }).format(list);
+    return this.pagination.paging({ ...query, totalItems }).format(
+      list.map(({ customerId, voucherRedemption, ...row }) => ({
+        ...row,
+        ...this.priceBreakdown({ ...row, voucherRedemption }),
+        hasCustomerAccount: Boolean(customerId),
+      })),
+    );
   }
 
   async findFulfillment(query: GetPendingOnlineOrdersDto) {
@@ -980,6 +1108,8 @@ export class OnlineOrdersService {
         take: paging.itemPerPage,
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         select: {
+          ...voucherPriceSelect,
+          customerId: true,
           id: true,
           pickupName: true,
           phoneNumber: true,
@@ -1011,24 +1141,32 @@ export class OnlineOrdersService {
       }),
     ]);
     return this.pagination.paging({ ...query, totalItems }).format(
-      list.map(({ orderSession, ...request }) => ({
-        ...request,
-        isOverdue:
-          request.pickupAt !== null
-            ? request.pickupAt < overdueBefore
-            : this.isNoShowEligible(null, orderSession?.orderItems ?? [], now),
-        isNoShowEligible: this.isNoShowEligible(
-          request.pickupAt,
-          orderSession?.orderItems ?? [],
-          now,
-        ),
-        sessionStatus: orderSession?.sessionStatus ?? null,
-        orderItems: orderSession?.orderItems ?? [],
-        fulfillmentStatus: this.fulfillmentStatus(
-          OnlineOrderStatus.ACCEPTED,
-          orderSession?.orderItems ?? [],
-        ),
-      })),
+      list.map(
+        ({ orderSession, customerId, voucherRedemption, ...request }) => ({
+          ...request,
+          ...this.priceBreakdown({ ...request, voucherRedemption }),
+          hasCustomerAccount: Boolean(customerId),
+          isOverdue:
+            request.pickupAt !== null
+              ? request.pickupAt < overdueBefore
+              : this.isNoShowEligible(
+                  null,
+                  orderSession?.orderItems ?? [],
+                  now,
+                ),
+          isNoShowEligible: this.isNoShowEligible(
+            request.pickupAt,
+            orderSession?.orderItems ?? [],
+            now,
+          ),
+          sessionStatus: orderSession?.sessionStatus ?? null,
+          orderItems: orderSession?.orderItems ?? [],
+          fulfillmentStatus: this.fulfillmentStatus(
+            OnlineOrderStatus.ACCEPTED,
+            orderSession?.orderItems ?? [],
+          ),
+        }),
+      ),
     );
   }
 
@@ -1036,6 +1174,8 @@ export class OnlineOrdersService {
     const request = await this.prisma.onlineOrderRequest.findUnique({
       where: { id },
       select: {
+        ...voucherPriceSelect,
+        customerId: true,
         id: true,
         status: true,
         pickupName: true,
@@ -1074,8 +1214,11 @@ export class OnlineOrdersService {
       },
     });
     if (!request) throw new NotFoundException('Order request not found.');
+    const { customerId, voucherRedemption, ...details } = request;
     return {
-      ...request,
+      ...details,
+      ...this.priceBreakdown({ ...details, voucherRedemption }),
+      hasCustomerAccount: Boolean(customerId),
       isNoShowEligible: this.isNoShowEligible(
         request.pickupAt,
         request.orderSession?.orderItems ?? [],
@@ -1109,6 +1252,7 @@ export class OnlineOrdersService {
         const request = await tx.onlineOrderRequest.findUnique({
           where: { id },
           select: {
+            ...voucherPriceSelect,
             status: true,
             quotedSubtotal: true,
             orderSessionId: true,
@@ -1166,12 +1310,37 @@ export class OnlineOrdersService {
           );
         }
 
-        const invoice = await this.invoices.checkoutOnlinePickupInTransaction(
-          tx,
-          employeeId,
-          request.orderSessionId,
-          dto.amountTendered,
-        );
+        const pricing = this.priceBreakdown(request);
+        if (
+          !subtotal.minus(pricing.discountAmount).eq(pricing.quotedTotal) ||
+          (pricing.voucher &&
+            (!pricing.discountAmount.eq(pricing.voucher.discountAmount) ||
+              !pricing.quotedTotal.eq(pricing.voucher.totalAmount))) ||
+          (!pricing.voucher && !pricing.discountAmount.isZero())
+        )
+          throw new ConflictException(
+            'Stored voucher pricing does not match this order.',
+          );
+        const invoice = pricing.voucher
+          ? await this.invoices.checkoutOnlinePickupInTransaction(
+              tx,
+              employeeId,
+              request.orderSessionId,
+              dto.amountTendered,
+              pricing.voucher,
+            )
+          : await this.invoices.checkoutOnlinePickupInTransaction(
+              tx,
+              employeeId,
+              request.orderSessionId,
+              dto.amountTendered,
+            );
+        if (!invoice.totalAmount.eq(pricing.quotedTotal))
+          throw new ConflictException(
+            'Online order total changed after confirmation.',
+          );
+        if (pricing.voucher)
+          await this.vouchers.redeemInTransaction(tx, id, invoice.id);
         const itemIds = items.map((item) => item.id);
         const collected = await tx.orderItem.updateMany({
           where: {
@@ -1388,6 +1557,11 @@ export class OnlineOrdersService {
             'Online order changed during cancellation.',
           );
         }
+        await this.vouchers.releaseInTransaction(
+          tx,
+          id,
+          noShow ? 'NO_SHOW' : 'STAFF_CANCELLED',
+        );
         await tx.actionLog.create({
           data: {
             employeeId,
@@ -1636,6 +1810,7 @@ export class OnlineOrdersService {
         if (updated.count !== 1) {
           throw new ConflictException('Order request is no longer pending.');
         }
+        await this.vouchers.releaseInTransaction(tx, id, 'REJECTED');
         await tx.actionLog.create({
           data: {
             employeeId,
@@ -1650,7 +1825,10 @@ export class OnlineOrdersService {
     );
   }
 
-  private hashPublicRequest(dto: CreateOnlineOrderDto, customerId?: string) {
+  private hashPublicRequest(
+    dto: CreateOnlineOrderDto & CustomerOrderVoucherInput,
+    customerId?: string,
+  ) {
     return createHash('sha256')
       .update(
         JSON.stringify({
@@ -1662,6 +1840,15 @@ export class OnlineOrdersService {
             : undefined,
           items: dto.items,
           ...(customerId ? { customerId } : {}),
+          ...(dto.voucherId ? { voucherId: dto.voucherId } : {}),
+          ...(dto.expectedTotal !== undefined
+            ? {
+                expectedTotal: new Prisma.Decimal(dto.expectedTotal).toFixed(2),
+              }
+            : {}),
+          ...(dto.quoteFingerprint
+            ? { quoteFingerprint: dto.quoteFingerprint }
+            : {}),
         }),
       )
       .digest('hex');
@@ -1685,6 +1872,7 @@ export class OnlineOrdersService {
       status: request.status,
       expiresAt: request.expiresAt,
       quotedSubtotal: request.quotedSubtotal,
+      ...this.priceBreakdown(request),
       pickupAt: request.pickupAt,
       items: request.items,
       accessToken: this.signAccess(request.id),
@@ -1716,6 +1904,30 @@ export class OnlineOrdersService {
       select: ORDER_MENU_ITEM_SELECT,
     });
     return new Map(items.map((item) => [item.id, item]));
+  }
+
+  private priceBreakdown(request: {
+    quotedSubtotal: Prisma.Decimal;
+    discountAmount?: Prisma.Decimal;
+    quotedTotal?: Prisma.Decimal;
+    voucherRedemption?: { discountSnapshot: unknown } | null;
+  }) {
+    return {
+      discountAmount: request.discountAmount ?? new Prisma.Decimal(0),
+      quotedTotal: request.quotedTotal ?? request.quotedSubtotal,
+      voucher: readVoucherSnapshot(request.voucherRedemption?.discountSnapshot),
+    };
+  }
+
+  private customerQuoteFingerprint(
+    customerId: string,
+    items: unknown,
+    subtotal: string,
+    voucher: VoucherDiscountSnapshot | null,
+  ) {
+    return createHmac('sha256', this.accessKey)
+      .update(JSON.stringify({ customerId, items, subtotal, voucher }))
+      .digest('hex');
   }
 
   private reorderExpiresAt(createdAt: Date) {

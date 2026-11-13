@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { ForbiddenException, INestApplication } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  INestApplication,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -22,6 +26,7 @@ import { App } from 'supertest/types';
 import { AppModule } from '../src/app/app.module';
 import { TurnstileService } from '../src/app/auth/turnstile.service';
 import { OnlineOrdersService } from '../src/app/online-orders/online-orders.service';
+import { VouchersService } from '../src/app/vouchers/vouchers.service';
 import { OnlineOrderIntakeService } from '../src/app/online-orders/online-order-intake.service';
 import { ONLINE_ORDER_TELEGRAM_STAFF_EVENT } from '../src/app/online-orders/telegram-events';
 import { OutboxService } from '../src/app/durable/outbox.service';
@@ -120,6 +125,7 @@ describe('Remote takeaway orders (e2e)', () => {
       turnstile,
       module.get(OnlineOrderIntakeService),
       module.get(PrintingService),
+      module.get(VouchersService),
     );
 
     const position = await prisma.position.create({
@@ -862,9 +868,9 @@ describe('Remote takeaway orders (e2e)', () => {
     await orders.updateItemStatus(item.id, ids.employee, {
       serveStatus: ServeStatus.READY,
     });
-    await expect(
-      orders.handoffTakeawayItem(item.id, ids.employee),
-    ).rejects.toThrow('Online orders must be paid');
+    await expect(orders.handoffItem(item.id, ids.employee)).rejects.toThrow(
+      'Online orders must be paid',
+    );
     const fulfillment = await onlineOrders.findFulfillment({
       page: 1,
       itemPerPage: 50,
@@ -1031,7 +1037,7 @@ describe('Remote takeaway orders (e2e)', () => {
       serveStatus: ServeStatus.COOKING,
     });
     await orders.updateItemStatus(item.id, ids.employee, {
-      serveStatus: ServeStatus.SERVED,
+      serveStatus: ServeStatus.READY,
     });
     const invoices = app.get(InvoicesService);
     await invoices.checkoutInvoice(ids.employee, {
@@ -1044,6 +1050,10 @@ describe('Remote takeaway orders (e2e)', () => {
       (await prisma.diningTable.findUniqueOrThrow({ where: { id: table.id } }))
         .status,
     ).toBe(TableStatus.OCCUPIED);
+    await expect(
+      orders.completeSession(session.id, ids.employee),
+    ).rejects.toThrow(ConflictException);
+    await orders.handoffItem(item.id, ids.employee);
     await Promise.all([
       orders.completeSession(session.id, ids.employee),
       orders.completeSession(session.id, ids.employee),

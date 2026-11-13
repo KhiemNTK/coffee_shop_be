@@ -400,6 +400,8 @@ export class TelegramNotificationsService
         expiresAt: true,
         pickupAt: true,
         quotedSubtotal: true,
+        discountAmount: true,
+        quotedTotal: true,
         items: {
           orderBy: { lineNumber: 'asc' },
           take: 6,
@@ -432,7 +434,7 @@ export class TelegramNotificationsService
         ...items,
         ...(request.items.length > 5 ? ['… và các món khác.'] : []),
         `Hẹn nhận: ${pickup}`,
-        `Giá trị dự kiến: ${request.quotedSubtotal.toFixed(2)} VND`,
+        `Cần thu khi nhận: ${(request.quotedTotal ?? request.quotedSubtotal).toFixed(2)} VND`,
         'Chờ nhân viên xác nhận. Thanh toán tại quầy khi nhận món.',
       ].join('\n'),
       this.webButton('Mở hàng đợi đơn', '/staff/online-orders?tab=pending'),

@@ -1,5 +1,6 @@
 import type { PaymentMethod, PaymentStatus, ServeStatus } from '@prisma/client';
 import type { Decimal } from '@prisma/client/runtime/library';
+import type { VoucherDiscountSnapshot } from './voucher.types';
 
 export interface InvoiceLineSnapshot {
   id: string;
@@ -21,6 +22,7 @@ export type InvoiceDocumentSnapshot = {
   tableName: string | null;
   issuedByName: string;
   promotionName: string | null;
+  voucher?: VoucherDiscountSnapshot | null;
   items: {
     orderItemId: string;
     menuItemId: string;

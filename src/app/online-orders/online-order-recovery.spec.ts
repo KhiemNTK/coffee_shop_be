@@ -16,6 +16,7 @@ import type { PrintingService } from '../printing/printing.service';
 import type { CreateOnlineOrderDto } from './dto';
 import type { OnlineOrderIntakeService } from './online-order-intake.service';
 import { OnlineOrdersService } from './online-orders.service';
+import type { VouchersService } from '../vouchers/vouchers.service';
 
 describe('Online order read-only recovery', () => {
   const prisma = {
@@ -39,6 +40,7 @@ describe('Online order read-only recovery', () => {
     turnstile as unknown as TurnstileService,
     {} as OnlineOrderIntakeService,
     {} as PrintingService,
+    {} as VouchersService,
   );
   const dto: CreateOnlineOrderDto = {
     clientRequestId: '6f967ae8-33dc-49c0-989d-a9c623d52a9b',

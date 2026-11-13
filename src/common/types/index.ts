@@ -22,3 +22,4 @@ export type * from './query-util.types';
 export type * from './report.types';
 export type * from './business-insight.types';
 export type * from './customer.types';
+export type * from './voucher.types';

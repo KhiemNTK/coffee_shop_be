@@ -4,6 +4,7 @@ import {
   CreateOnlineOrderDto,
   GetPendingOnlineOrdersDto,
   RecoverOnlineOrderByKeyDto,
+  QuoteOnlineOrderDto,
 } from '../online-orders/dto';
 
 export class ExpectedCustomerDto extends createZodDto(
@@ -12,7 +13,39 @@ export class ExpectedCustomerDto extends createZodDto(
 
 export class CreateCustomerOrderDto extends createZodDto(
   CreateOnlineOrderDto.schema
-    .safeExtend({ expectedCustomerId: z.uuid() })
+    .safeExtend({
+      expectedCustomerId: z.uuid(),
+      voucherId: z.uuid().optional(),
+      expectedTotal: z
+        .string()
+        .regex(/^(0|[1-9]\d{0,15})(\.\d{1,2})?$/)
+        .optional(),
+      quoteFingerprint: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/)
+        .optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        value.voucherId &&
+        (!value.expectedTotal || !value.quoteFingerprint)
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['voucherId'],
+          message: 'A voucher requires a confirmed quote.',
+        });
+      }
+    }),
+) {}
+
+export class QuoteCustomerOrderDto extends createZodDto(
+  QuoteOnlineOrderDto.schema
+    .safeExtend({
+      expectedCustomerId: z.uuid(),
+      voucherId: z.uuid().optional(),
+    })
     .strict(),
 ) {}
 

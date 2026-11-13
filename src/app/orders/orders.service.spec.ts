@@ -472,7 +472,7 @@ describe('OrdersService', () => {
     expect(outbox.enqueue).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the direct cooking-to-served path for dine-in orders', async () => {
+  it('rejects table delivery before the kitchen marks an item ready', async () => {
     const item = {
       id: 'order-item-id',
       isPaid: false,
@@ -484,35 +484,85 @@ describe('OrdersService', () => {
         tableId: 'table-id',
       },
     };
-    tx.orderItem.findUnique
-      .mockResolvedValueOnce(item)
-      .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.SERVED });
-    tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+    tx.orderItem.findUnique.mockResolvedValueOnce(item);
 
     await expect(
       service.updateItemStatus(item.id, 'employee-id', {
         serveStatus: ServeStatus.SERVED,
       }),
-    ).resolves.toMatchObject({ serveStatus: ServeStatus.SERVED });
-  });
-
-  it('rejects READY for dine-in until table lifecycle supports it', async () => {
-    tx.orderItem.findUnique.mockResolvedValue({
-      id: 'order-item-id',
-      serveStatus: ServeStatus.COOKING,
-      orderSession: {
-        sessionStatus: SessionStatus.ACTIVE,
-        tableId: 'table-id',
-      },
-    });
-
-    await expect(
-      service.updateItemStatus('order-item-id', 'employee-id', {
-        serveStatus: ServeStatus.READY,
-      }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toThrow('Table items must be ready before delivery.');
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
+    expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'marks a dine-in item READY without delivering it (paid: %s)',
+    async (isPaid) => {
+      const item = {
+        id: 'order-item-id',
+        isPaid,
+        invoiceId: isPaid ? 'invoice-id' : null,
+        serveStatus: ServeStatus.COOKING,
+        orderSessionId: 'session-id',
+        orderSession: {
+          sessionStatus: SessionStatus.ACTIVE,
+          tableId: 'table-id',
+        },
+      };
+      tx.orderItem.findUnique
+        .mockResolvedValueOnce(item)
+        .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.READY });
+      tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        service.updateItemStatus('order-item-id', 'employee-id', {
+          serveStatus: ServeStatus.READY,
+        }),
+      ).resolves.toMatchObject({ serveStatus: ServeStatus.READY });
+      expect(tx.orderItem.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({ serveStatus: ServeStatus.COOKING }),
+        data: { serveStatus: ServeStatus.READY, readyAt: expect.any(Date) },
+      });
+      expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        tx,
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            isServed: false,
+            currentStatus: ServeStatus.READY,
+            tableId: 'table-id',
+          }),
+        }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'delivers a READY table item only once (paid: %s)',
+    async (isPaid) => {
+      const item = {
+        id: 'order-item-id',
+        isPaid,
+        invoiceId: isPaid ? 'invoice-id' : null,
+        serveStatus: ServeStatus.READY,
+        orderSessionId: 'session-id',
+        orderSession: {
+          sessionStatus: SessionStatus.ACTIVE,
+          tableId: 'table-id',
+        },
+      };
+      const delivered = { ...item, serveStatus: ServeStatus.SERVED };
+      tx.orderItem.findUnique
+        .mockResolvedValueOnce(item)
+        .mockResolvedValue(delivered);
+      tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
+      await service.handoffItem(item.id, 'employee-id');
+      await service.handoffItem(item.id, 'employee-id');
+      expect(tx.orderItem.updateMany).toHaveBeenCalledTimes(1);
+      expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
+      expect(outbox.enqueue).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('hands off a READY takeaway item without consuming inventory again', async () => {
     const item = {
@@ -531,7 +581,7 @@ describe('OrdersService', () => {
       .mockResolvedValueOnce({ ...item, serveStatus: ServeStatus.SERVED });
     tx.orderItem.updateMany.mockResolvedValue({ count: 1 });
 
-    await service.handoffTakeawayItem(item.id, 'employee-id');
+    await service.handoffItem(item.id, 'employee-id');
 
     expect(inventoryConsumption.consumeOrderItem).not.toHaveBeenCalled();
     expect(tx.orderItem.updateMany).toHaveBeenCalledWith({
@@ -552,8 +602,8 @@ describe('OrdersService', () => {
     });
 
     await expect(
-      service.handoffTakeawayItem('order-item-id', 'employee-id'),
-    ).rejects.toThrow('Takeaway item is not ready for handoff.');
+      service.handoffItem('order-item-id', 'employee-id'),
+    ).rejects.toThrow('Order item is not ready for handoff.');
     expect(tx.orderItem.updateMany).not.toHaveBeenCalled();
   });
 

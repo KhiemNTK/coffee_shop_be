@@ -161,6 +161,13 @@ export const PermissionLabels = {
   PROMOTIONS_CREATE: ['Tạo khuyến mãi', 'Create promotions'],
   PROMOTIONS_UPDATE: ['Sửa khuyến mãi', 'Edit promotions'],
   PROMOTIONS_DELETE: ['Ngừng hoặc xóa khuyến mãi', 'Delete promotions'],
+  VOUCHERS_READ: [
+    'Xem chiến dịch và lượt voucher',
+    'View voucher campaigns and grants',
+  ],
+  VOUCHERS_MANAGE: ['Quản lý chiến dịch voucher', 'Manage voucher campaigns'],
+  VOUCHERS_ISSUE: ['Tặng voucher cho khách', 'Gift customer vouchers'],
+  VOUCHERS_REVOKE: ['Thu hồi voucher chưa sử dụng', 'Revoke unused vouchers'],
   EQUIPMENT_READ: ['Xem thiết bị và tài sản', 'View equipment and assets'],
   EQUIPMENT_CREATE: ['Thêm thiết bị', 'Create equipment'],
   EQUIPMENT_UPDATE: ['Sửa thiết bị', 'Edit equipment'],

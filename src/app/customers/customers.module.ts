@@ -7,10 +7,16 @@ import { CustomersService } from './customers.service';
 import { OnlineOrdersModule } from '../online-orders/online-orders.module';
 import { CustomerOrdersController } from './customer-orders.controller';
 import { LoginRequestGuard } from '../auth/login-request.guard';
+import { VouchersModule } from '../vouchers/vouchers.module';
+import { CustomerVouchersController } from '../vouchers/customer-vouchers.controller';
 
 @Module({
-  imports: [TurnstileModule, OnlineOrdersModule],
-  controllers: [CustomersController, CustomerOrdersController],
+  imports: [TurnstileModule, OnlineOrdersModule, VouchersModule],
+  controllers: [
+    CustomersController,
+    CustomerOrdersController,
+    CustomerVouchersController,
+  ],
   providers: [
     CustomersService,
     CustomerGuard,

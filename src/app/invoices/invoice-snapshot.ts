@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { InvoiceDocumentSnapshot } from '../../common/types';
 import type { InvoiceLineSnapshot } from '../../common/types';
 import { readSelectedOptions } from '../menu/menu-option-selection';
+import { VoucherDiscountSnapshotSchema } from '../../common/validation/voucher-snapshot.schema';
 
 const snapshotSchema = z.object({
   version: z.literal(1),
@@ -10,6 +11,7 @@ const snapshotSchema = z.object({
   tableName: z.string().nullable(),
   issuedByName: z.string(),
   promotionName: z.string().nullable(),
+  voucher: VoucherDiscountSnapshotSchema.nullable().optional(),
   items: z.array(
     z.object({
       orderItemId: z.string(),
@@ -40,6 +42,7 @@ export function createInvoiceSnapshot(input: {
   table: { id: string; name: string } | null;
   issuedByName: string;
   promotionName: string | null;
+  voucher?: InvoiceDocumentSnapshot['voucher'];
   items: InvoiceLineSnapshot[];
   source?: InvoiceDocumentSnapshot['source'];
 }): InvoiceDocumentSnapshot {
@@ -50,6 +53,7 @@ export function createInvoiceSnapshot(input: {
     tableName: input.table?.name ?? null,
     issuedByName: input.issuedByName,
     promotionName: input.promotionName,
+    ...(input.voucher ? { voucher: input.voucher } : {}),
     items: input.items.map((item) => ({
       orderItemId: item.id,
       menuItemId: item.menuItem.id,
