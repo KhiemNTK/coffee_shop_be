@@ -87,6 +87,19 @@ Do not copy an old rollout note as an API specification.
 - Online pickup uses payment on collection. Acceptance reserves recipe ingredients;
   cooking consumes them. Prepared cancellations record waste, not restored stock.
   Use the dedicated online collection/cancellation flow, not generic POS checkout.
+- Customer vouchers are separate from promotions and work only on signed-in online
+  pickup orders. Quotes do not hold a voucher; order creation reserves it, cash
+  collection redeems it, and unpaid cancellations release it without extending
+  its expiry. Refunds never restore a redeemed voucher. Campaign terms freeze on
+  publication; pausing issuance does not invalidate issued vouchers.
+- Before enabling vouchers, deploy `20261110000000_customer_voucher_wallet`, then
+  the backend and frontend, and run the reviewed permission-only seed. Grant the
+  four `/vouchers_*` permissions explicitly; do not publish campaigns until the
+  discounted collection flow has been accepted. No voucher campaign is seeded.
+- Dine-in preparation follows `COOKING -> READY -> SERVED`. Kitchen completion
+  does not mean table delivery. `POST /orders/items/:id/handoff` uses the existing
+  handoff permission; only paid, served items allow table release. Deploy the
+  matching backend/frontend together; this change needs no migration or seed.
 - Reuse the original idempotency key and payload after an uncertain write.
   Recovery reads do not create orders. Do not replace a pending command merely
   because its response timed out.
@@ -96,6 +109,11 @@ Do not copy an old rollout note as an API specification.
 - Only verified provider callbacks/reconciliation confirm online payments.
   Return URLs and screenshots are not payment evidence. Active cash shifts are
   required for cash collection; refunds and adjustments remain audited.
+- Uncertain VNPay refunds require another authorized employee to record verified
+  provider evidence, the observed version and exact amount. This never resends a
+  refund. Bank reconciliation matches cash-handover deposits, not all revenue.
+  Excel preview supports bounded `.xlsx` files with explicit column mapping;
+  no MBBank-specific export layout has been verified yet.
 - Outbox delivery is at least once, not exactly once. Keep consumer idempotency,
   Redis persistence and `noeviction`; preserve pending/failed work during recovery.
 

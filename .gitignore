@@ -2,6 +2,7 @@
 /dist
 /node_modules
 /build
+/.pnpm-store/
 
 # Logs
 logs
@@ -37,15 +38,29 @@ lerna-debug.log*
 
 # dotenv environment variable files
 .env
-.env.production
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+.env.*
+!.env.example
 
 # temp directory
 .temp
 .tmp
+/.cache/
+/.runtime/
+/.codex/
+*.tsbuildinfo
+
+# Local captures, credentials and database backups
+*.har
+*.heapsnapshot
+*.cpuprofile
+*.pem
+*.key
+*.p12
+*.pfx
+*.dump
+*.sql.gz
+/backups/
+/backup/
 
 # Runtime data
 pids
@@ -63,4 +78,5 @@ generated
 # Ignore extension VS Code
 *.session.sql
 .agents/
-docs/*
+# Local plans and working notes; shared runbooks stay under deploy/.
+/docs/*
